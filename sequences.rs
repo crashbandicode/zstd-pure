@@ -105,7 +105,10 @@ fn resolve_offset(rep: &mut [u32; 3], offset_value: u32, ll0: bool) -> u32 {
             rep[0]
         } else {
             let off = if rep_code == 3 {
-                rep[0] - 1
+                // `rep[0] - 1`; on corrupt input rep[0] may be 0/1, which would
+                // underflow — saturate to 0 so the caller's zero-offset check
+                // rejects it instead of panicking.
+                rep[0].saturating_sub(1)
             } else {
                 rep[rep_code as usize]
             };
@@ -193,10 +196,13 @@ pub fn decode(
         let ll_code = s_ll.symbol(&ll_table) as usize;
         let ml_code = s_ml.symbol(&ml_table) as usize;
         let of_code = s_of.symbol(&of_table) as u32;
-        if ll_code >= LL_BASE.len() || ml_code >= ML_BASE.len() {
+        // `of_code` is the log2 baseline of the offset; a 32-bit offset caps it
+        // at 31. A corrupt/mutated entropy table can yield a larger symbol —
+        // reject it rather than overflow the `1 << of_code` shift.
+        if ll_code >= LL_BASE.len() || ml_code >= ML_BASE.len() || of_code > 31 {
             return Err(ZstdError::Invalid {
                 what: "sequence code",
-                detail: format!("ll {ll_code} / ml {ml_code} out of range"),
+                detail: format!("ll {ll_code} / ml {ml_code} / of {of_code} out of range"),
             });
         }
 

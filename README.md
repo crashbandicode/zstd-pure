@@ -22,7 +22,7 @@ oracle**, never at runtime.
 - [x] Dictionary decode (raw-content + structured/tagged) — **T1.1**
 - [x] Streaming / bounded-memory sliding-window decode + `io::Read` — **T1.2**
 - [ ] `no_std` + `alloc` (behind a default `std` feature) — T1.3
-- [ ] Robustness harness (decodecorpus matrix + fuzz) — T1.5
+- [x] Robustness harness (corpus matrix + randomized never-panic + oracle) — **T1.5**
 
 ### Encoder
 - [ ] FSE / Huff0 entropy encoders — T2.1
