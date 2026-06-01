@@ -122,11 +122,26 @@ mod tests {
     }
 
     #[test]
-    fn huffman_falls_back_to_store_on_full_byte_alphabet() {
-        // Symbols > 128 can't use direct weights yet, so these blocks must fall
-        // back to a store block — still a valid frame both decoders accept.
+    fn huffman_uniform_full_byte_alphabet_is_valid() {
+        // A near-uniform full-byte alphabet won't compress; the encoder either
+        // stores it or FSE-codes the weights — either way a valid frame.
         let data: Vec<u8> = (0..4096u32).map(|i| (i * 7 + 3) as u8).collect();
         assert_huffman_roundtrips(&data, false);
+    }
+
+    #[test]
+    fn huffman_fse_weights_full_byte_alphabet_roundtrips() {
+        // Skewed distribution spanning the full byte range (highest symbol >
+        // 128) exercises the FSE-compressed weight header through libzstd.
+        let mut data = Vec::new();
+        for i in 0..20_000u32 {
+            data.push((i % 24) as u8);
+        }
+        for k in 0..1500u32 {
+            data.push((130 + (k * 13) % 120) as u8);
+        }
+        assert_huffman_roundtrips(&data, false);
+        assert_huffman_roundtrips(&data, true);
     }
 
     #[test]
