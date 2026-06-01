@@ -19,6 +19,7 @@
 
 use super::super::error::{Result, ZstdError};
 use super::super::huff;
+use super::bitstream::BitWriter;
 
 /// Hard cap on emitted code length. zstd's literals Huffman table log is 11.
 const MAX_CODE_LEN: u8 = 11;
@@ -153,44 +154,6 @@ fn build_code_table(lengths: &[u8; 256]) -> Result<CodeTable> {
         max_symbol,
         weights,
     })
-}
-
-/// Forward LSB bit accumulator mirroring libzstd's `BIT_CStream`.
-struct BitWriter {
-    acc: u64,
-    nbits: u32,
-    out: Vec<u8>,
-}
-
-impl BitWriter {
-    fn new() -> Self {
-        BitWriter {
-            acc: 0,
-            nbits: 0,
-            out: Vec::new(),
-        }
-    }
-
-    /// Append the low `nb` bits of `value` (nb ≤ ~24; we only ever push ≤ 11).
-    #[inline]
-    fn add(&mut self, value: u32, nb: u32) {
-        self.acc |= (value as u64) << self.nbits;
-        self.nbits += nb;
-        while self.nbits >= 8 {
-            self.out.push(self.acc as u8);
-            self.acc >>= 8;
-            self.nbits -= 8;
-        }
-    }
-
-    /// Cap with the sentinel `1` bit and flush the final partial byte.
-    fn finish(mut self) -> Vec<u8> {
-        self.add(1, 1);
-        if self.nbits > 0 {
-            self.out.push(self.acc as u8);
-        }
-        self.out
-    }
 }
 
 /// Encode one literal sub-stream. Symbols are emitted in **reverse** order so

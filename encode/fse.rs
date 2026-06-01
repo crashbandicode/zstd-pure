@@ -10,10 +10,17 @@
 //!   from libzstd's `FSE_writeNCount_generic` (forward LSB bit writer, pairing
 //!   with the decoder's [`ForwardBitReader`](crate::zstd_pure::bits)).
 //!
-//! The table-build + 2-state encode (the bitstream itself) land in the next
-//! batch; both are verified by round-tripping through the decoder.
+//! The table-build + 2-state encode (the bitstream itself, [`build_ctable`] +
+//! [`encode`]) follow, both verified by round-tripping through the decoder's
+//! `fse::decompress`.
 
 use super::super::fse::FSE_MAX_TABLELOG;
+use super::bitstream::BitWriter;
+
+#[inline]
+fn highbit32(x: u32) -> u32 {
+    31 - x.leading_zeros()
+}
 
 /// Pick a valid accuracy log for `num_present` symbols within `[5, max_log]`.
 ///
@@ -184,10 +191,179 @@ pub fn write_ncount(norm: &[i16], max_symbol: usize, table_log: u32) -> Vec<u8> 
     out
 }
 
+/// A built FSE **encode** table — the inverse of [`fse::build_dtable`], ported
+/// from libzstd's `FSE_buildCTable`.
+pub struct FseCTable {
+    table_log: u32,
+    /// Next-state table indexed by find-state position (`1 << table_log` entries).
+    state_table: Vec<u16>,
+    /// Per-symbol `deltaNbBits` / `deltaFindState` (`symbolTT`).
+    delta_nb_bits: Vec<i32>,
+    delta_find_state: Vec<i32>,
+}
+
+/// Build an FSE encode table from a normalized distribution. The symbol spread
+/// (step + `high_threshold` placement of `-1` low-probability symbols) is
+/// identical to [`fse::build_dtable`], so the two tables are exact inverses.
+pub fn build_ctable(norm: &[i16], max_symbol: usize, table_log: u32) -> FseCTable {
+    let size = 1usize << table_log;
+    let mask = size - 1;
+
+    // Cumulative symbol starts + the spread positions. A `-1` (probability < 1)
+    // symbol is counted as 1 and placed from the high end, exactly as the
+    // decoder's build_dtable does.
+    let mut cumul = vec![0u32; max_symbol + 2];
+    let mut table_symbol = vec![0u8; size];
+    let mut high_threshold = size - 1;
+    for s in 0..=max_symbol {
+        if norm[s] == -1 {
+            cumul[s + 1] = cumul[s] + 1;
+            table_symbol[high_threshold] = s as u8;
+            high_threshold = high_threshold.wrapping_sub(1);
+        } else {
+            cumul[s + 1] = cumul[s] + norm[s].max(0) as u32;
+        }
+    }
+
+    let step = (size >> 1) + (size >> 3) + 3;
+    let mut pos = 0usize;
+    for (s, &count) in norm[..=max_symbol].iter().enumerate() {
+        for _ in 0..count.max(0) {
+            table_symbol[pos] = s as u8;
+            pos = (pos + step) & mask;
+            while pos > high_threshold {
+                pos = (pos + step) & mask;
+            }
+        }
+    }
+    debug_assert_eq!(pos, 0, "FSE spread did not cover the table");
+
+    // Next-state table: position u (= decoder state) maps to encoder state
+    // `size + u`, slotted by the symbol's running cumulative index.
+    let mut state_table = vec![0u16; size];
+    let mut cumul_pos = cumul.clone();
+    for (u, &sym) in table_symbol.iter().enumerate() {
+        let s = sym as usize;
+        state_table[cumul_pos[s] as usize] = (size + u) as u16;
+        cumul_pos[s] += 1;
+    }
+
+    // Per-symbol transform (libzstd FSE_buildCTable step 4).
+    let mut delta_nb_bits = vec![0i32; max_symbol + 1];
+    let mut delta_find_state = vec![0i32; max_symbol + 1];
+    let mut total: i32 = 0;
+    for s in 0..=max_symbol {
+        match norm[s] {
+            0 => {
+                // Filler (symbol never encoded); value kept spec-consistent.
+                delta_nb_bits[s] = (((table_log + 1) << 16) as i32) - (size as i32);
+            }
+            -1 | 1 => {
+                delta_nb_bits[s] = ((table_log << 16) as i32) - (size as i32);
+                delta_find_state[s] = total - 1;
+                total += 1;
+            }
+            c => {
+                let cc = c as u32;
+                let max_bits_out = table_log - highbit32(cc - 1);
+                let min_state_plus = cc << max_bits_out;
+                delta_nb_bits[s] = ((max_bits_out << 16) as i32) - (min_state_plus as i32);
+                delta_find_state[s] = total - c as i32;
+                total += c as i32;
+            }
+        }
+    }
+
+    FseCTable {
+        table_log,
+        state_table,
+        delta_nb_bits,
+        delta_find_state,
+    }
+}
+
+/// One FSE compression state (`FSE_CState_t`).
+struct CState {
+    value: u32,
+}
+
+impl FseCTable {
+    /// Initialize a state for the first symbol it will encode (`FSE_initCState2`).
+    fn init_state2(&self, symbol: usize) -> CState {
+        let dnb = self.delta_nb_bits[symbol];
+        let nb_bits_out = ((dnb + (1 << 15)) >> 16) as u32;
+        let value = ((nb_bits_out << 16) as i32 - dnb) as u32;
+        let idx = (value >> nb_bits_out) as i32 + self.delta_find_state[symbol];
+        CState {
+            value: self.state_table[idx as usize] as u32,
+        }
+    }
+
+    /// Encode one symbol: flush `nbBitsOut` low bits of the state, then advance
+    /// it (`FSE_encodeSymbol`).
+    #[inline]
+    fn encode_symbol(&self, bw: &mut BitWriter, st: &mut CState, symbol: usize) {
+        let nb_bits_out = ((st.value as i32 + self.delta_nb_bits[symbol]) >> 16) as u32;
+        bw.add(st.value, nb_bits_out);
+        let idx = (st.value >> nb_bits_out) as i32 + self.delta_find_state[symbol];
+        st.value = self.state_table[idx as usize] as u32;
+    }
+
+    /// Flush a final state (`FSE_flushCState`): its full `table_log` bits.
+    #[inline]
+    fn flush_state(&self, bw: &mut BitWriter, st: &CState) {
+        bw.add(st.value, self.table_log);
+    }
+}
+
+/// Two-state FSE compression of `src` — the exact inverse of
+/// [`fse::decompress`]. Requires `src.len() > 2` (shorter inputs aren't worth
+/// FSE and the decoder's two-state init assumes ≥ 2 symbols).
+///
+/// Ported from libzstd's `FSE_compress_usingCTable`, with the 64-bit-unroll
+/// flush points dropped (the [`BitWriter`] flushes eagerly, so only the `add`
+/// order matters). Symbols are consumed back-to-front; the two states alternate
+/// so that on decode `state1` drives the even output positions and `state2` the
+/// odd ones, and the last-flushed state (`state1`) is the first the backward
+/// reader initializes.
+pub fn encode(ct: &FseCTable, src: &[u8]) -> Vec<u8> {
+    assert!(src.len() > 2, "FSE encode needs > 2 symbols");
+    let mut bw = BitWriter::with_capacity(src.len() / 2 + 8);
+    let n = src.len();
+    let mut ip = n;
+
+    let mut s1;
+    let mut s2;
+    if n & 1 == 1 {
+        ip -= 1;
+        s1 = ct.init_state2(src[ip] as usize);
+        ip -= 1;
+        s2 = ct.init_state2(src[ip] as usize);
+        ip -= 1;
+        ct.encode_symbol(&mut bw, &mut s1, src[ip] as usize);
+    } else {
+        ip -= 1;
+        s2 = ct.init_state2(src[ip] as usize);
+        ip -= 1;
+        s1 = ct.init_state2(src[ip] as usize);
+    }
+
+    while ip > 0 {
+        ip -= 1;
+        ct.encode_symbol(&mut bw, &mut s2, src[ip] as usize);
+        ip -= 1;
+        ct.encode_symbol(&mut bw, &mut s1, src[ip] as usize);
+    }
+
+    ct.flush_state(&mut bw, &s2);
+    ct.flush_state(&mut bw, &s1);
+    bw.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::zstd_pure::fse::read_ncount;
+    use crate::zstd_pure::fse::{build_dtable, decompress, read_ncount};
 
     /// `read_ncount(write_ncount(norm))` must reproduce `norm` exactly, for many
     /// random distributions across both weight (≤6) and sequence (≤9) logs.
@@ -252,6 +428,52 @@ mod tests {
                 header.len(),
                 "byte length mismatch (trial {trial})"
             );
+        }
+    }
+
+    /// `decompress(encode(x)) == x`: the 2-state FSE encoder must invert the
+    /// decoder across many lengths (both parities), alphabets, and table logs.
+    #[test]
+    fn encode_inverts_decompress() {
+        let mut seed = 0xfeed_face_dead_beefu64;
+        let mut rng = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+
+        for trial in 0..500 {
+            let max_log = if trial % 2 == 0 { 6 } else { 9 };
+            // Restricted alphabet so the table fits the log; bias toward small.
+            let alphabet = (rng() % 30 + 2).min((1u32 << max_log) - 1);
+            // Lengths of both parities, from tiny (>2) to a few thousand.
+            let n = (rng() as usize % 3000) + 3;
+            let src: Vec<u8> = (0..n)
+                .map(|_| {
+                    let u = rng() % alphabet;
+                    ((u * u) / alphabet) as u8
+                })
+                .collect();
+
+            let mut freq = [0u32; 256];
+            for &b in &src {
+                freq[b as usize] += 1;
+            }
+            let max_symbol = (0..256).rev().find(|&s| freq[s] > 0).unwrap();
+            let num_present = freq.iter().filter(|&&c| c > 0).count();
+            if num_present < 2 {
+                continue; // FSE needs at least two symbols
+            }
+            let table_log = choose_table_log(max_log, num_present);
+            let norm = normalize_counts(&freq, n as u32, max_symbol, table_log);
+
+            let ct = build_ctable(&norm, max_symbol, table_log);
+            let stream = encode(&ct, &src);
+
+            let dt = build_dtable(&norm, max_symbol, table_log).unwrap();
+            let got = decompress(&stream, &dt, n).unwrap();
+            assert_eq!(got, src, "FSE round-trip mismatch (trial {trial}, n={n})");
         }
     }
 }

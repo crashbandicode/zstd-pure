@@ -11,6 +11,7 @@
 //! * (planned) `fse` — FSE encoder (T2.1b); `sequences` / match finders — the
 //!   ratio work (T2.3).
 
+pub mod bitstream;
 pub mod block;
 pub mod frame;
 pub mod fse;
