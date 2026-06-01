@@ -16,9 +16,10 @@ pub mod block;
 pub mod frame;
 pub mod fse;
 pub mod huff;
+pub mod lz;
 pub mod sequences;
 
-pub use frame::{compress_huffman_literals, compress_store};
+pub use frame::{compress, compress_huffman_literals, compress_store};
 
 /// Compress `data` into a standard (magic-prefixed) store-mode frame. No
 /// content checksum. See [`compress_store`] for the full-control entry point.
@@ -143,6 +144,57 @@ mod tests {
         }
         assert_huffman_roundtrips(&data, false);
         assert_huffman_roundtrips(&data, true);
+    }
+
+    /// A compressed frame must round-trip through BOTH libzstd and our decoder.
+    fn assert_compress_roundtrips(data: &[u8], checksum: bool) {
+        let frame = compress(data, 3, checksum, true);
+        let by_libzstd = zstd::bulk::decompress(&frame, data.len() + 64)
+            .expect("libzstd must decode our compressed frame");
+        assert_eq!(by_libzstd, data, "libzstd mismatch ({} bytes)", data.len());
+        assert_eq!(decompress(&frame).unwrap(), data, "self mismatch");
+        assert!(
+            frame.len() <= compress_store(data, checksum, true).len(),
+            "compressed ({}) larger than store ({})",
+            frame.len(),
+            compress_store(data, checksum, true).len(),
+        );
+    }
+
+    #[test]
+    fn compress_roundtrips_across_inputs() {
+        let text = b"the quick brown fox jumps over the lazy dog. ".repeat(200);
+        let big: Vec<u8> = (0..300_000u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 16) as u8)
+            .collect();
+        let cases: Vec<Vec<u8>> = vec![
+            vec![],
+            vec![0u8],
+            b"abc".to_vec(),
+            b"abcabcabcabcabcabcabc".to_vec(),
+            vec![0x55; 200_000], // long run -> offset-1 matches, multi-block
+            text,
+            skewed(50_000, 64, 7),
+            big, // mostly incompressible -> store blocks
+        ];
+        for data in &cases {
+            assert_compress_roundtrips(data, false);
+            assert_compress_roundtrips(data, true);
+        }
+    }
+
+    #[test]
+    fn compress_actually_shrinks_compressible_data() {
+        let data = b"the quick brown fox jumps over the lazy dog. ".repeat(500);
+        let frame = compress(&data, 3, false, true);
+        // Highly repetitive text should compress to a small fraction.
+        assert!(
+            frame.len() < data.len() / 3,
+            "expected real compression, got {} from {}",
+            frame.len(),
+            data.len()
+        );
+        assert_eq!(decompress(&frame).unwrap(), data);
     }
 
     #[test]

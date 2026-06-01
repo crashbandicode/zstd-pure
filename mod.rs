@@ -31,7 +31,7 @@ pub mod streaming;
 pub mod xxhash;
 
 pub use dict::Dictionary;
-pub use encode::{compress_store, compress_stored};
+pub use encode::{compress, compress_huffman_literals, compress_store, compress_stored};
 pub use streaming::StreamingDecoder;
 pub use error::{Result, ZstdError};
 pub use frame::{

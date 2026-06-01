@@ -28,7 +28,9 @@ oracle**, never at runtime.
 - [x] Huff0 literal encoder (length-limited Huffman, 1-/4-stream, direct + FSE-coded weights) — **T2.1a / T2.1b**
 - [x] FSE entropy encoder (`normalize_counts` + `write_ncount` + `build_ctable` + 2-state `encode`) — **T2.1b** (sequence encoding wired in T2.3)
 - [x] Frame + block writer — store mode (raw/RLE) + Huffman-literals compressed block, magicless — **T2.2 / T2.1a** (real sequences land with T2.3)
-- [ ] Match finders by strategy (fast/dfast/lazy/btopt) — T2.3
+- [x] Sequence-section encoder (3-state interleaved FSE, predefined tables) — **T2.3**
+- [x] Match finder — `fast` strategy + full compressed-block assembly + `compress(data, level)` — **T2.3** (dfast/lazy/btopt + per-block FSE tables are ratio follow-ups)
+- [ ] Stronger strategies (dfast/lazy/btopt) + per-block FSE sequence tables + repeat offsets — T2.3 (ratio)
 - [ ] Long-distance matching — T2.4
 - [ ] Dictionary encode + tagged-dictionary training — T3.1
 
@@ -56,7 +58,7 @@ lands): `libzstd.decompress(our_compress(x)) == x` and
 | `frame` | frame header + block loop + skippable + checksum + dict priming |
 | `dict` | raw-content + structured (tagged) dictionary parse |
 | `streaming` | block-by-block bounded-memory decode + `io::Read` (`StreamingDecoder`) |
-| `encode` | encoder: `huff` (Huff0 literal encoder), `fse` (FSE entropy encoder), `bitstream` (shared `BIT_CStream` writer), `block`/`frame` writers (store raw/RLE + Huffman-literals compressed block, magicless) |
+| `encode` | encoder: `huff` (Huff0 literal encoder), `fse` (FSE entropy encoder), `sequences` (sequence-section encoder), `lz` (fast match finder), `bitstream` (shared `BIT_CStream` writer), `block`/`frame` writers + `compress` |
 
 ## Handoff — remaining work (notes for the next agent)
 

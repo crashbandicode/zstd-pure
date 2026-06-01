@@ -6,7 +6,9 @@
 
 use super::super::frame::ZSTD_MAGIC;
 use super::super::xxhash::xxh64;
-use super::block::{write_huffman_literals_block, write_store_block, BLOCK_SIZE_MAX};
+use super::block::{
+    write_compressed_block, write_huffman_literals_block, write_store_block, BLOCK_SIZE_MAX,
+};
 
 /// Window log used by the store-mode encoder. Raw/RLE blocks carry no
 /// back-references, so the window only has to admit one full block (128 KiB =
@@ -55,6 +57,46 @@ pub fn compress_store(data: &[u8], checksum: bool, expect_magic: bool) -> Vec<u8
         while let Some(chunk) = chunks.next() {
             let last = chunks.peek().is_none();
             write_store_block(&mut out, last, chunk);
+        }
+    }
+
+    if checksum {
+        let digest = (xxh64(data, 0) & 0xFFFF_FFFF) as u32;
+        out.extend_from_slice(&digest.to_le_bytes());
+    }
+    out
+}
+
+/// Compress `data` into a frame using LZ match finding + entropy coding (the
+/// `fast` strategy). Each block independently picks the smallest of a fully
+/// compressed block, a raw block, or an RLE block, so the output is always a
+/// spec-conformant frame that libzstd and this crate's decoder both accept, and
+/// is never larger than [`compress_store`].
+///
+/// `level` is accepted for forward compatibility but currently selects only the
+/// `fast` strategy (the stronger strategies are a later ratio refinement).
+pub fn compress(data: &[u8], level: i32, checksum: bool, expect_magic: bool) -> Vec<u8> {
+    let _ = level;
+    let mut out = Vec::with_capacity(data.len() / 2 + 64);
+    if expect_magic {
+        out.extend_from_slice(&ZSTD_MAGIC.to_le_bytes());
+    }
+    write_frame_header(&mut out, data.len() as u64, checksum, STORE_WINDOW_LOG);
+
+    let max_offset = 1usize << STORE_WINDOW_LOG;
+    if data.is_empty() {
+        super::block::write_raw_block(&mut out, true, &[]);
+    } else {
+        let mut chunks = data.chunks(BLOCK_SIZE_MAX).peekable();
+        while let Some(chunk) = chunks.next() {
+            let last = chunks.peek().is_none();
+            let mut store = Vec::new();
+            write_store_block(&mut store, last, chunk);
+
+            let mut comp = Vec::new();
+            let use_comp = write_compressed_block(&mut comp, last, chunk, max_offset).is_ok()
+                && comp.len() < store.len();
+            out.extend_from_slice(if use_comp { &comp } else { &store });
         }
     }
 

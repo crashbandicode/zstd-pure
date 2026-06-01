@@ -346,6 +346,37 @@ pub fn write_literals_section(out: &mut Vec<u8>, literals: &[u8]) -> Result<()> 
     Ok(())
 }
 
+/// Write a **Raw** literals section (`block_type 0`): the bytes verbatim with a
+/// 1-/2-/3-byte size header (5-/12-/20-bit `Regenerated_Size`).
+pub fn write_raw_literals(out: &mut Vec<u8>, lits: &[u8]) {
+    let regen = lits.len();
+    debug_assert!(regen < (1 << 20), "raw literals {regen} exceed 20-bit size");
+    if regen < 32 {
+        // Size_Format 0: 1 byte, 5-bit size.
+        out.push((regen as u8) << 3);
+    } else if regen < 4096 {
+        // Size_Format 1: 2 bytes, 12-bit size.
+        out.push((1 << 2) | ((regen as u8 & 0xF) << 4));
+        out.push((regen >> 4) as u8);
+    } else {
+        // Size_Format 3: 3 bytes, 20-bit size.
+        out.push((3 << 2) | (((regen & 0xF) as u8) << 4));
+        out.push(((regen >> 4) & 0xFF) as u8);
+        out.push((regen >> 12) as u8);
+    }
+    out.extend_from_slice(lits);
+}
+
+/// Write the smaller of a raw or Huffman-compressed literals section.
+pub fn write_literals_auto(out: &mut Vec<u8>, lits: &[u8]) {
+    let mut raw = Vec::with_capacity(lits.len() + 3);
+    write_raw_literals(&mut raw, lits);
+
+    let mut huf = Vec::new();
+    let use_huf = write_literals_section(&mut huf, lits).is_ok() && huf.len() < raw.len();
+    out.extend_from_slice(if use_huf { &huf } else { &raw });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
