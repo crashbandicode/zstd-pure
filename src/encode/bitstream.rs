@@ -6,6 +6,8 @@
 //! **reverse** order. A final `1` sentinel bit (added by [`BitWriter::finish`])
 //! marks the start of the stream for the backward reader.
 
+#[allow(unused_imports)]
+use crate::alloc_prelude::*;
 /// Forward, byte-eager LSB bit writer. Eager flushing produces the exact same
 /// byte sequence as libzstd's deferred `BIT_flushBits`, so the intermediate
 /// flush points in the ported encoders can be dropped — only the order and

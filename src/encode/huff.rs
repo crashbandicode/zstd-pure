@@ -17,6 +17,8 @@
 //! sentinel bit. That pairs with the decoder's reverse `BIT_DStream` reader:
 //! `add(v, nb)` on encode ↔ `read(nb) == v` on decode.
 
+#[allow(unused_imports)]
+use crate::alloc_prelude::*;
 use super::super::error::{Result, ZstdError};
 use super::super::huff;
 use super::bitstream::BitWriter;
@@ -55,8 +57,8 @@ fn code_lengths(freq: &[u32; 256]) -> [u8; 256] {
     for (i, &s) in present.iter().enumerate() {
         weight[i] = freq[s] as u64;
     }
-    use std::cmp::Reverse;
-    use std::collections::BinaryHeap;
+    use alloc::collections::BinaryHeap;
+    use core::cmp::Reverse;
     let mut heap: BinaryHeap<Reverse<(u64, usize)>> = BinaryHeap::new();
     for (i, &w) in weight.iter().enumerate().take(m) {
         heap.push(Reverse((w, i)));

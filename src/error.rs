@@ -3,6 +3,8 @@
 //! Kept `std`- and `thiserror`-only so this module can be lifted into a
 //! standalone crate later (no dependency on the rest of `nx-layout-toolbox`).
 
+#[allow(unused_imports)]
+use crate::alloc_prelude::*;
 use thiserror::Error;
 
 /// An error decoding (or, later, encoding) a Zstandard stream.

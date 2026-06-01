@@ -14,6 +14,8 @@
 //! [`encode`]) follow, both verified by round-tripping through the decoder's
 //! `fse::decompress`.
 
+#[allow(unused_imports)]
+use crate::alloc_prelude::*;
 use super::super::fse::FSE_MAX_TABLELOG;
 use super::bitstream::BitWriter;
 

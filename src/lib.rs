@@ -1,3 +1,4 @@
+#![cfg_attr(not(feature = "std"), no_std)]
 //! A pure-Rust Zstandard ([RFC 8478]) codec, implemented from the specification
 //! (no GPL / Switch-Toolbox code). It exists so the crate can decode Nintendo's
 //! **MeshCodec** mesh stream — a custom container that reuses zstd's block and
@@ -17,6 +18,29 @@
 //!
 //! [RFC 8478]: https://www.rfc-editor.org/rfc/rfc8478
 
+// `alloc` provides Vec/String/format!/vec! in `no_std`; under `std` the std
+// prelude already provides the macros, so only pull them in (macro_use) when
+// std is absent, to avoid a double import.
+#[cfg(not(feature = "std"))]
+#[macro_use]
+extern crate alloc;
+#[cfg(feature = "std")]
+extern crate alloc;
+
+/// The `alloc` types used throughout, imported uniformly by each module via
+/// `use crate::alloc_prelude::*;` so the codec compiles under `no_std + alloc`.
+mod alloc_prelude {
+    #[allow(unused_imports)]
+    pub use alloc::{
+        borrow::ToOwned,
+        boxed::Box,
+        string::{String, ToString},
+        vec::Vec,
+    };
+}
+#[allow(unused_imports)]
+use alloc_prelude::*;
+
 pub mod bits;
 pub mod block;
 pub mod dict;
@@ -27,11 +51,15 @@ pub mod fse;
 pub mod huff;
 pub mod literals;
 pub mod sequences;
+/// Streaming, bounded-memory decode is std-only (it builds on `std::io::Read`);
+/// add a `no_std` `Read` shim to make it available without `std`.
+#[cfg(feature = "std")]
 pub mod streaming;
 pub mod xxhash;
 
 pub use dict::Dictionary;
 pub use encode::{compress, compress_huffman_literals, compress_store, compress_stored};
+#[cfg(feature = "std")]
 pub use streaming::StreamingDecoder;
 pub use error::{Result, ZstdError};
 pub use frame::{

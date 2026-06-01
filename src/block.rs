@@ -4,6 +4,8 @@
 //! `Block_Type`, bits 3-23 `Block_Size`. Raw and RLE blocks are trivial;
 //! compressed blocks are a literals section followed by a sequences section.
 
+#[allow(unused_imports)]
+use crate::alloc_prelude::*;
 use super::error::{Result, ZstdError};
 use super::huff::HuffTable;
 use super::{literals, sequences};

@@ -5,6 +5,8 @@
 //! (literals_length, match_length, offset) triple and reconstructing output by
 //! copying literals and back-references (with the three repeat offsets).
 
+#[allow(unused_imports)]
+use crate::alloc_prelude::*;
 use super::bits::ReverseBitReader;
 use super::error::{Result, ZstdError};
 use super::fse::{self, FseDecodeTable, FseDecoder};

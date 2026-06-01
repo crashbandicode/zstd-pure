@@ -13,6 +13,8 @@
 //!   whose first block selects the "Repeat" entropy mode (or treeless literals)
 //!   reuses these preset tables, and the initial repeat offsets are the dict's.
 
+#[allow(unused_imports)]
+use crate::alloc_prelude::*;
 use super::error::{Result, ZstdError};
 use super::fse;
 use super::huff::{self, HuffTable};

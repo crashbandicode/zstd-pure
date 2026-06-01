@@ -5,6 +5,8 @@
 //! `FSE_decompress` used for Huffman weights. Sequence decoding drives the
 //! per-symbol [`FseDecoder`] states directly (see `sequences`).
 
+#[allow(unused_imports)]
+use crate::alloc_prelude::*;
 use super::bits::{ForwardBitReader, ReloadStatus, ReverseBitReader};
 use super::error::{Result, ZstdError};
 

@@ -23,8 +23,8 @@ TotK BFRES frames (themselves standard magicless zstd).
 - [x] Output ceiling (`decompress_capped`) against decompression bombs
 - [x] Frame inspection without decoding the body (`frame_header`) — **T1.4**
 - [x] Dictionary decode (raw-content + structured/tagged) — **T1.1**
-- [x] Streaming / bounded-memory sliding-window decode + `io::Read` — **T1.2**
-- [ ] `no_std` + `alloc` (behind a default `std` feature) — T1.3
+- [x] Streaming / bounded-memory sliding-window decode + `io::Read` — **T1.2** (std-only)
+- [x] `no_std` + `alloc` (behind a default `std` feature) — **T1.3**
 - [x] Robustness harness (corpus matrix + randomized never-panic + oracle) — **T1.5**
 
 ### Encoder
@@ -36,6 +36,25 @@ TotK BFRES frames (themselves standard magicless zstd).
 - [ ] Stronger strategies (dfast/lazy/btopt) + per-block FSE sequence tables + repeat offsets — T2.3 (ratio)
 - [ ] Long-distance matching — T2.4
 - [ ] Dictionary encode + tagged-dictionary training — T3.1
+
+## Features / `no_std`
+
+| feature | default | effect |
+|---|---|---|
+| `std` | on | `std::io::Read` `StreamingDecoder` + `std` error impls |
+| `alloc` | (implied by `std`) | the decode/encode core + dictionaries |
+
+The codec runs on `no_std + alloc`:
+
+```sh
+cargo build --no-default-features --features alloc     # no_std
+cargo build                                            # std (default)
+```
+
+Under `no_std` everything is available except `StreamingDecoder` (it builds on
+`std::io::Read`; add a `no_std` `Read` shim to expose it). Verified with the
+host `no_std` build (a `#![no_std]` crate fails to compile on any stray `std::`
+path); a `thumbv7em-none-eabi` build is the recommended CI gate.
 
 ## Validation
 

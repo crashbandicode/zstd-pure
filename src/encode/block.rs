@@ -6,6 +6,8 @@
 //! followed by an empty sequences section (the T2.1 entropy-encoder building
 //! block; the match finder / real sequences land in T2.3).
 
+#[allow(unused_imports)]
+use crate::alloc_prelude::*;
 use super::super::error::Result;
 
 /// Maximum bytes a single block may regenerate (`Block_Maximum_Size` cap).

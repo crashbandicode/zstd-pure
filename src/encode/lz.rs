@@ -9,6 +9,8 @@
 //! to the block start, which the decoder reconstructs correctly because its
 //! copy offset is relative to the current output end.
 
+#[allow(unused_imports)]
+use crate::alloc_prelude::*;
 use super::sequences::Seq;
 
 /// Minimum match length (in bytes) the fast parser will emit.

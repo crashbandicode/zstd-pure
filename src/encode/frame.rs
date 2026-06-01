@@ -4,6 +4,8 @@
 //! checksum. The block bodies come from [`super::block`] (raw/RLE today;
 //! compressed blocks land with the match finder in T2.3).
 
+#[allow(unused_imports)]
+use crate::alloc_prelude::*;
 use super::super::frame::ZSTD_MAGIC;
 use super::super::xxhash::xxh64;
 use super::block::{

@@ -4,6 +4,8 @@
 //! decoded Huffman table is threaded through `cache` so a Treeless block can
 //! reuse the previous block's table.
 
+#[allow(unused_imports)]
+use crate::alloc_prelude::*;
 use super::error::{Result, ZstdError};
 use super::huff::{self, HuffTable};
 

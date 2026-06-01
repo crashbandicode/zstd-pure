@@ -1,6 +1,8 @@
 //! Frame decoding — RFC 8478 §3.1.1.1: frame header parse, the block loop,
 //! and the optional XXH64 content checksum.
 
+#[allow(unused_imports)]
+use crate::alloc_prelude::*;
 use super::block::{self, BlockState};
 use super::dict::Dictionary;
 use super::error::{Result, ZstdError};

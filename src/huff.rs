@@ -5,6 +5,8 @@
 //! 4-stream literal bitstreams. The built [`HuffTable`] is cacheable so the
 //! "treeless" literal block type can reuse the previous block's table.
 
+#[allow(unused_imports)]
+use crate::alloc_prelude::*;
 use super::bits::ReverseBitReader;
 use super::error::{Result, ZstdError};
 use super::fse;

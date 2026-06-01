@@ -3,6 +3,8 @@
 //! The frame checksum is the low 32 bits of `XXH64(decoded_content, seed=0)`.
 //! Reference: Yann Collet's xxHash specification (public domain / BSD-2).
 
+#[allow(unused_imports)]
+use crate::alloc_prelude::*;
 const PRIME64_1: u64 = 0x9E37_79B1_85EB_CA87;
 const PRIME64_2: u64 = 0xC2B2_AE3D_27D4_EB4F;
 const PRIME64_3: u64 = 0x1656_67B1_9E37_79F9;

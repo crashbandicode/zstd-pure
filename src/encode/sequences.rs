@@ -13,6 +13,8 @@
 //! then the `LL`/`ML`/offset extra bits, and the three states flush in
 //! `ML`/`OF`/`LL` order — exactly inverting the decoder's read sequence.
 
+#[allow(unused_imports)]
+use crate::alloc_prelude::*;
 use super::super::error::Result;
 use super::super::sequences::{LL_BASE, LL_BITS, LL_DEFAULT, ML_BASE, ML_BITS, ML_DEFAULT, OF_DEFAULT};
 use super::bitstream::BitWriter;
