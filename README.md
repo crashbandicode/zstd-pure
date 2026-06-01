@@ -25,8 +25,9 @@ oracle**, never at runtime.
 - [x] Robustness harness (corpus matrix + randomized never-panic + oracle) — **T1.5**
 
 ### Encoder
-- [ ] FSE / Huff0 entropy encoders — T2.1
-- [x] Frame + block writer — store mode (raw/RLE), magicless — **T2.2** (compressed block type lands with T2.3)
+- [x] Huff0 literal encoder (length-limited Huffman, 1-/4-stream, direct weights) — **T2.1a**
+- [ ] FSE entropy encoder (sequences + FSE-coded Huffman weights) — T2.1b
+- [x] Frame + block writer — store mode (raw/RLE) + Huffman-literals compressed block, magicless — **T2.2 / T2.1a** (real sequences land with T2.3)
 - [ ] Match finders by strategy (fast/dfast/lazy/btopt) — T2.3
 - [ ] Long-distance matching — T2.4
 - [ ] Dictionary encode + tagged-dictionary training — T3.1
@@ -55,7 +56,7 @@ lands): `libzstd.decompress(our_compress(x)) == x` and
 | `frame` | frame header + block loop + skippable + checksum + dict priming |
 | `dict` | raw-content + structured (tagged) dictionary parse |
 | `streaming` | block-by-block bounded-memory decode + `io::Read` (`StreamingDecoder`) |
-| `encode` | encoder: `block`/`frame` writers (store mode today: raw/RLE, magicless) |
+| `encode` | encoder: `huff` (Huff0 literal encoder), `block`/`frame` writers (store mode raw/RLE + Huffman-literals compressed block, magicless) |
 
 ## Handoff — remaining work (notes for the next agent)
 
@@ -66,28 +67,20 @@ inspection) and hardened by a randomized never-panic + libzstd-oracle harness
 store-mode skeleton (`encode::compress_store`). The big remaining piece is the
 ratio-competitive compressed path.
 
-### T2.1 entropy encoders (next)
-- **Huff0 encoder** is the lower-risk one to do first because libzstd is a
-  *direct* oracle: build a single compressed block = `[Huffman literals][0
-  sequences]`, wrap in a frame, and assert `zstd::bulk::decompress` returns the
-  literals. Plan:
-  1. length-limited Huffman code lengths (≤11). Either package-merge or
-     heap-Huffman + the zlib `gen_bitlen` overflow repair. Must yield a
-     *complete* prefix code (Kraft sum = 1) so `huff::build_table`'s residual is
-     a power of two.
-  2. weights `w_s = max_bits + 1 − len_s` (0 = absent). **Reuse the decoder's
-     `huff::build_table(weights)`** to get `symbols[]`/`num_bits[]`, then invert:
-     each symbol's canonical code = `first_index_of(s) >> (max_bits − nb_s)`.
-     This guarantees consistency with our (libzstd-validated) decoder.
-  3. bitstream: mirror libzstd `BIT_CStream` — `addBits(code, nb)` per symbol in
-     **reverse** data order, then a `1` sentinel bit, flushing LE. (Pairs with
-     our `ReverseBitReader`: `addBits(v,nb)` on encode ↔ `read(nb)==v` on decode
-     when fields are processed in reverse.)
-  4. weight header: **direct** form (`byte = 127 + N`, 4-bit packed, N = highest
-     symbol index) only covers alphabets with max-symbol ≤ 128; the general case
-     needs FSE-compressed weights (header byte < 128) → depends on the FSE
-     encoder.
-- **FSE encoder** (sequences + general weights). Only oracle is our own
+### T2.1 entropy encoders
+- **Huff0 encoder — DONE (T2.1a).** `encode/huff.rs`: length-limited Huffman
+  (heap-Huffman + JPEG/zlib count-redistribution to ≤ 11 bits), weights derived
+  and codes read back from the decoder's own `huff::build_table` (so encode and
+  decode can't drift), `BIT_CStream`-style reverse-order bitstream, 1- and
+  4-stream forms, **direct** weight header (max-symbol ≤ 128). `encode/block.rs`
+  `write_huffman_literals_block` wraps `[Huffman literals][0 sequences]`;
+  `encode/frame.rs` `compress_huffman_literals` builds a frame, per-block picking
+  the smaller of Huffman vs store (so it never beats `compress_store` by size and
+  falls back cleanly on the >128-symbol / FSE-weights case). Verified: full-frame
+  round-trip through **libzstd** and our decoder across sizes/alphabets, plus
+  sub-stream round-trips through the decoder.
+- **FSE encoder (NEXT, T2.1b)** — sequences + general (full-byte alphabet)
+  Huffman weights. Only oracle is our own
   `fse::decompress` (no libzstd standalone-FSE via the crate), so verify by
   round-trip. Pieces: `normalize_counts` (a *valid* normalization — present
   symbols ≥ 1, sum = `1<<table_log` — suffices; libzstd's exact

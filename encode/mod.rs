@@ -2,17 +2,20 @@
 //!
 //! Staged build-out (see `zstd_pure/README.md`):
 //!
-//! * `block` / `frame` — block + frame writers. Today: store mode (raw / RLE
-//!   blocks), which produces a fully spec-conformant frame that libzstd and
-//!   this crate's decoder both accept. This is the skeleton the compressed
-//!   block type and match finder hang off.
-//! * (planned) `fse` / `huff` — entropy encoders (T2.1).
-//! * (planned) `sequences` / match finders — the ratio work (T2.3).
+//! * `block` / `frame` — block + frame writers. Store mode (raw / RLE blocks)
+//!   plus a Huffman-literals compressed block (`[Huffman literals][0
+//!   sequences]`), both producing fully spec-conformant frames that libzstd and
+//!   this crate's decoder accept. This is the skeleton the match finder hangs
+//!   off.
+//! * `huff` — Huff0 literal **encoder** (T2.1a).
+//! * (planned) `fse` — FSE encoder (T2.1b); `sequences` / match finders — the
+//!   ratio work (T2.3).
 
 pub mod block;
 pub mod frame;
+pub mod huff;
 
-pub use frame::compress_store;
+pub use frame::{compress_huffman_literals, compress_store};
 
 /// Compress `data` into a standard (magic-prefixed) store-mode frame. No
 /// content checksum. See [`compress_store`] for the full-control entry point.
@@ -65,6 +68,63 @@ mod tests {
         let frame = compress_store(&data, false, true);
         assert!(frame.len() < 64, "RLE run should be tiny, got {}", frame.len());
         assert_eq!(decompress(&frame).unwrap(), data);
+    }
+
+    /// Deterministic skewed byte stream over a restricted alphabet (≤ 128 so the
+    /// direct Huffman weight header applies).
+    fn skewed(n: usize, alphabet: u32, seed: u64) -> Vec<u8> {
+        let mut s = seed | 1;
+        (0..n)
+            .map(|_| {
+                s = s
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let u = (s >> 33) as u32 % alphabet;
+                ((u * u) / alphabet) as u8
+            })
+            .collect()
+    }
+
+    /// A Huffman-literals frame must round-trip through BOTH libzstd and us, and
+    /// it must never be larger than the store-mode frame.
+    fn assert_huffman_roundtrips(data: &[u8], checksum: bool) {
+        let frame = compress_huffman_literals(data, checksum, true);
+        let by_libzstd = zstd::bulk::decompress(&frame, data.len() + 64)
+            .expect("libzstd must decode our Huffman frame");
+        assert_eq!(by_libzstd, data, "libzstd mismatch ({} bytes)", data.len());
+        assert_eq!(decompress(&frame).unwrap(), data, "self mismatch");
+        assert!(
+            frame.len() <= compress_store(data, checksum, true).len(),
+            "Huffman frame ({}) larger than store ({})",
+            frame.len(),
+            compress_store(data, checksum, true).len(),
+        );
+    }
+
+    #[test]
+    fn huffman_literals_roundtrips_across_sizes() {
+        let cases: Vec<Vec<u8>> = vec![
+            vec![],
+            vec![0u8],
+            b"hello world".to_vec(),
+            b"the quick brown fox jumps over the lazy dog".to_vec(),
+            skewed(50, 40, 1),
+            skewed(300, 90, 2),     // crosses into the 4-stream path
+            skewed(2000, 120, 3),   // 4-stream, larger header
+            skewed(60_000, 128, 4), // full direct-weight alphabet, big block
+        ];
+        for data in &cases {
+            assert_huffman_roundtrips(data, false);
+            assert_huffman_roundtrips(data, true);
+        }
+    }
+
+    #[test]
+    fn huffman_falls_back_to_store_on_full_byte_alphabet() {
+        // Symbols > 128 can't use direct weights yet, so these blocks must fall
+        // back to a store block — still a valid frame both decoders accept.
+        let data: Vec<u8> = (0..4096u32).map(|i| (i * 7 + 3) as u8).collect();
+        assert_huffman_roundtrips(&data, false);
     }
 
     #[test]

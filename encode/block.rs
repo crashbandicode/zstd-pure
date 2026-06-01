@@ -1,9 +1,12 @@
 //! Block-level encoding — RFC 8478 §3.1.1.2.
 //!
-//! For now this writes the two literal block types that need no entropy coding:
-//! **Raw** (store the bytes verbatim) and **RLE** (a single byte repeated). The
-//! compressed block type (literals + sequences) is added with the match finder
-//! in T2.3.
+//! This writes the two literal block types that need no entropy coding —
+//! **Raw** (store the bytes verbatim) and **RLE** (a single byte repeated) —
+//! plus a **Compressed** block whose body is a Huffman-coded literals section
+//! followed by an empty sequences section (the T2.1 entropy-encoder building
+//! block; the match finder / real sequences land in T2.3).
+
+use super::super::error::Result;
 
 /// Maximum bytes a single block may regenerate (`Block_Maximum_Size` cap).
 pub const BLOCK_SIZE_MAX: usize = 128 * 1024;
@@ -46,4 +49,18 @@ pub fn write_store_block(out: &mut Vec<u8>, last: bool, chunk: &[u8]) {
     } else {
         write_raw_block(out, last, chunk);
     }
+}
+
+/// Write one compressed block whose body is a Huffman-coded literals section
+/// followed by an empty (`Number_of_Sequences = 0`) sequences section, so it
+/// reconstructs `literals` verbatim. Errors if the literals can't be Huffman
+/// coded (see [`super::huff::write_literals_section`]); the caller falls back to
+/// a store block.
+pub fn write_huffman_literals_block(out: &mut Vec<u8>, last: bool, literals: &[u8]) -> Result<()> {
+    let mut body = Vec::with_capacity(literals.len());
+    super::huff::write_literals_section(&mut body, literals)?;
+    body.push(0); // Number_of_Sequences = 0 (single-byte short form)
+    write_block_header(out, last, BlockType::Compressed, body.len());
+    out.extend_from_slice(&body);
+    Ok(())
 }

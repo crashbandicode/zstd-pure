@@ -76,7 +76,11 @@ pub fn read_table(src: &[u8]) -> Result<(HuffTable, usize)> {
 
 /// Reconstruct the Huffman decode table from the per-symbol weight list (the
 /// implicit final symbol's weight is derived so the total is a power of two).
-fn build_table(weights: &[u8]) -> Result<HuffTable> {
+///
+/// Exposed to the encoder (`encode::huff`) so it can derive per-symbol canonical
+/// codes from the *same* table the decoder uses — keeping encode and decode in
+/// exact lockstep instead of hand-rolling a parallel code assignment.
+pub(crate) fn build_table(weights: &[u8]) -> Result<HuffTable> {
     let mut total_weight: u32 = 0;
     for &w in weights {
         if w as u32 > HUF_TABLELOG_MAX {
