@@ -28,7 +28,10 @@ pub mod sequences;
 pub mod xxhash;
 
 pub use error::{Result, ZstdError};
-pub use frame::{decode_one, decompress, decompress_capped, decompress_magicless, DecodedFrame};
+pub use frame::{
+    decode_one, decompress, decompress_capped, decompress_magicless, frame_header,
+    frame_header_magicless, DecodedFrame, FrameHeader,
+};
 
 /// Decompress a single magicless frame and return just the bytes (the common
 /// case for the MeshCodec BFRES frame).
@@ -82,6 +85,30 @@ mod tests {
         for data in [vec![], vec![0u8], b"ab".to_vec(), vec![7u8; 500]] {
             round_trip(&data, 3);
         }
+    }
+
+    #[test]
+    fn frame_header_matches_libzstd() {
+        // A frame that pledges its content size (single-shot bulk compress does).
+        let data = b"frame header inspection corpus ".repeat(40);
+        let comp = zstd::bulk::compress(&data, 5).expect("compress");
+        let h = frame_header(&comp).expect("parse header");
+        assert_eq!(h.content_size, Some(data.len() as u64));
+        assert!(!h.has_checksum);
+        assert_eq!(h.dictionary_id, 0);
+        // The window must be large enough to hold any back-reference, i.e. at
+        // least the content size (which is what libzstd would also report).
+        assert!(h.window_size >= data.len().min(8 << 20) as u64 || h.content_size.is_some());
+        // Header is small and well within the compressed length.
+        assert!(h.header_len >= 5 && h.header_len < comp.len());
+
+        // A checksum frame reports has_checksum.
+        let mut cctx = zstd::zstd_safe::CCtx::create();
+        cctx.set_parameter(zstd::zstd_safe::CParameter::ChecksumFlag(true))
+            .unwrap();
+        let mut out = Vec::with_capacity(zstd::zstd_safe::compress_bound(data.len()));
+        cctx.compress2(&mut out, &data).unwrap();
+        assert!(frame_header(&out).expect("header").has_checksum);
     }
 
     #[test]

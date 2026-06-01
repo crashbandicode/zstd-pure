@@ -22,15 +22,25 @@ pub struct DecodedFrame {
     pub consumed: usize,
 }
 
-/// Parsed Zstandard frame header.
-struct FrameHeader {
-    header_len: usize,
-    content_checksum: bool,
-    frame_content_size: Option<u64>,
-    #[allow(dead_code)]
-    window_size: u64,
-    #[allow(dead_code)]
-    dictionary_id: u32,
+/// Parsed Zstandard frame header (RFC 8478 §3.1.1.1.1).
+///
+/// Produced by [`frame_header`] / [`frame_header_magicless`] for buffer sizing
+/// and inspection without decoding the frame body — the analog of libzstd's
+/// `ZSTD_getFrameHeader` / `ZSTD_getFrameContentSize`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameHeader {
+    /// Total bytes the header occupies (including the 4-byte magic when parsed
+    /// via [`frame_header`]; header-only in the magicless case).
+    pub header_len: usize,
+    /// Whether a 4-byte XXH64 content checksum trails the frame.
+    pub has_checksum: bool,
+    /// The pledged decompressed size, if the frame declared one.
+    pub content_size: Option<u64>,
+    /// The decoder window size (the maximum back-reference distance / minimum
+    /// history buffer the decoder must retain).
+    pub window_size: u64,
+    /// The referenced dictionary id (0 = none).
+    pub dictionary_id: u32,
 }
 
 fn parse_frame_header(src: &[u8]) -> Result<FrameHeader> {
@@ -121,11 +131,37 @@ fn parse_frame_header(src: &[u8]) -> Result<FrameHeader> {
 
     Ok(FrameHeader {
         header_len: o,
-        content_checksum,
-        frame_content_size,
+        has_checksum: content_checksum,
+        content_size: frame_content_size,
         window_size,
         dictionary_id,
     })
+}
+
+/// Parse a standard (magic-prefixed) frame header without decoding the body.
+///
+/// `header_len` in the result includes the 4-byte magic. Returns an error for a
+/// skippable frame (use [`decode_one`] to skip those) or a bad magic.
+pub fn frame_header(src: &[u8]) -> Result<FrameHeader> {
+    if src.len() < 4 {
+        return Err(ZstdError::Truncated {
+            what: "frame magic",
+            needed: 4 - src.len(),
+        });
+    }
+    let magic = u32::from_le_bytes([src[0], src[1], src[2], src[3]]);
+    if magic != ZSTD_MAGIC {
+        return Err(ZstdError::BadMagic(magic));
+    }
+    let mut h = parse_frame_header(&src[4..])?;
+    h.header_len += 4;
+    Ok(h)
+}
+
+/// Parse a **magicless** frame header (`ZSTD_f_zstd1_magicless`) without
+/// decoding the body. `header_len` excludes any magic (there is none).
+pub fn frame_header_magicless(src: &[u8]) -> Result<FrameHeader> {
+    parse_frame_header(src)
 }
 
 /// Decode one frame from the front of `src`. If `expect_magic`, a 4-byte magic
@@ -170,7 +206,7 @@ pub fn decode_one(src: &[u8], expect_magic: bool, max_output: usize) -> Result<D
     let header = parse_frame_header(&src[pos..])?;
     pos += header.header_len;
 
-    let cap = match header.frame_content_size {
+    let cap = match header.content_size {
         Some(n) => (n as usize).min(max_output),
         None => max_output,
     };
@@ -229,7 +265,7 @@ pub fn decode_one(src: &[u8], expect_magic: bool, max_output: usize) -> Result<D
         }
     }
 
-    if let Some(n) = header.frame_content_size {
+    if let Some(n) = header.content_size {
         if state.out.len() as u64 != n {
             return Err(ZstdError::Invalid {
                 what: "frame content size",
@@ -238,7 +274,7 @@ pub fn decode_one(src: &[u8], expect_magic: bool, max_output: usize) -> Result<D
         }
     }
 
-    if header.content_checksum {
+    if header.has_checksum {
         if src.len() < pos + 4 {
             return Err(ZstdError::Truncated {
                 what: "content checksum",
