@@ -16,6 +16,7 @@ pub mod block;
 pub mod frame;
 pub mod fse;
 pub mod huff;
+pub mod sequences;
 
 pub use frame::{compress_huffman_literals, compress_store};
 

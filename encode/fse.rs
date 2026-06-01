@@ -283,13 +283,13 @@ pub fn build_ctable(norm: &[i16], max_symbol: usize, table_log: u32) -> FseCTabl
 }
 
 /// One FSE compression state (`FSE_CState_t`).
-struct CState {
+pub struct CState {
     value: u32,
 }
 
 impl FseCTable {
     /// Initialize a state for the first symbol it will encode (`FSE_initCState2`).
-    fn init_state2(&self, symbol: usize) -> CState {
+    pub fn init_state2(&self, symbol: usize) -> CState {
         let dnb = self.delta_nb_bits[symbol];
         let nb_bits_out = ((dnb + (1 << 15)) >> 16) as u32;
         let value = ((nb_bits_out << 16) as i32 - dnb) as u32;
@@ -302,7 +302,7 @@ impl FseCTable {
     /// Encode one symbol: flush `nbBitsOut` low bits of the state, then advance
     /// it (`FSE_encodeSymbol`).
     #[inline]
-    fn encode_symbol(&self, bw: &mut BitWriter, st: &mut CState, symbol: usize) {
+    pub fn encode_symbol(&self, bw: &mut BitWriter, st: &mut CState, symbol: usize) {
         let nb_bits_out = ((st.value as i32 + self.delta_nb_bits[symbol]) >> 16) as u32;
         bw.add(st.value, nb_bits_out);
         let idx = (st.value >> nb_bits_out) as i32 + self.delta_find_state[symbol];
@@ -311,7 +311,7 @@ impl FseCTable {
 
     /// Flush a final state (`FSE_flushCState`): its full `table_log` bits.
     #[inline]
-    fn flush_state(&self, bw: &mut BitWriter, st: &CState) {
+    pub fn flush_state(&self, bw: &mut BitWriter, st: &CState) {
         bw.add(st.value, self.table_log);
     }
 }
