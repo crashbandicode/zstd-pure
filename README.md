@@ -20,7 +20,7 @@ oracle**, never at runtime.
 - [x] Output ceiling (`decompress_capped`) against decompression bombs
 - [x] Frame inspection without decoding the body (`frame_header`) — **T1.4**
 - [x] Dictionary decode (raw-content + structured/tagged) — **T1.1**
-- [ ] Streaming / bounded-memory sliding-window decode + `io::Read` — T1.2
+- [x] Streaming / bounded-memory sliding-window decode + `io::Read` — **T1.2**
 - [ ] `no_std` + `alloc` (behind a default `std` feature) — T1.3
 - [ ] Robustness harness (decodecorpus matrix + fuzz) — T1.5
 
@@ -54,3 +54,4 @@ lands): `libzstd.decompress(our_compress(x)) == x` and
 | `block` | block header + raw/RLE/compressed block decode |
 | `frame` | frame header + block loop + skippable + checksum + dict priming |
 | `dict` | raw-content + structured (tagged) dictionary parse |
+| `streaming` | block-by-block bounded-memory decode + `io::Read` (`StreamingDecoder`) |

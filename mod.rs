@@ -26,9 +26,11 @@ pub mod fse;
 pub mod huff;
 pub mod literals;
 pub mod sequences;
+pub mod streaming;
 pub mod xxhash;
 
 pub use dict::Dictionary;
+pub use streaming::StreamingDecoder;
 pub use error::{Result, ZstdError};
 pub use frame::{
     decode_one, decode_one_with_dict, decompress, decompress_capped, decompress_magicless,

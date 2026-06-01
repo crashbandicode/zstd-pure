@@ -72,12 +72,7 @@ pub fn xxh64(data: &[u8], seed: u64) -> u64 {
         idx += 1;
     }
 
-    h64 ^= h64 >> 33;
-    h64 = h64.wrapping_mul(PRIME64_2);
-    h64 ^= h64 >> 29;
-    h64 = h64.wrapping_mul(PRIME64_3);
-    h64 ^= h64 >> 32;
-    h64
+    avalanche(h64)
 }
 
 #[inline]
@@ -88,6 +83,131 @@ fn read_u64(d: &[u8], i: usize) -> u64 {
 #[inline]
 fn read_u32(d: &[u8], i: usize) -> u32 {
     u32::from_le_bytes(d[i..i + 4].try_into().unwrap())
+}
+
+/// Final XXH64 avalanche (shared by the one-shot and streaming paths).
+#[inline]
+fn avalanche(mut h64: u64) -> u64 {
+    h64 ^= h64 >> 33;
+    h64 = h64.wrapping_mul(PRIME64_2);
+    h64 ^= h64 >> 29;
+    h64 = h64.wrapping_mul(PRIME64_3);
+    h64 ^= h64 >> 32;
+    h64
+}
+
+/// Streaming XXH64 state, for hashing content that is produced (and evicted)
+/// incrementally — used by the bounded-memory streaming decoder, which can't
+/// retain the whole output to hash at the end. Matches the one-shot [`xxh64`]
+/// (and Yann Collet's reference) byte-for-byte regardless of chunk boundaries.
+#[derive(Debug, Clone)]
+pub struct Xxh64 {
+    total_len: u64,
+    v: [u64; 4],
+    mem: [u8; 32],
+    memsize: usize,
+    seed: u64,
+}
+
+impl Xxh64 {
+    /// Start a streaming hash with the given seed.
+    pub fn new(seed: u64) -> Self {
+        Xxh64 {
+            total_len: 0,
+            v: [
+                seed.wrapping_add(PRIME64_1).wrapping_add(PRIME64_2),
+                seed.wrapping_add(PRIME64_2),
+                seed,
+                seed.wrapping_sub(PRIME64_1),
+            ],
+            mem: [0u8; 32],
+            memsize: 0,
+            seed,
+        }
+    }
+
+    /// Absorb more input.
+    pub fn update(&mut self, mut input: &[u8]) {
+        self.total_len = self.total_len.wrapping_add(input.len() as u64);
+
+        // Not enough to complete a 32-byte block yet: just buffer it.
+        if self.memsize + input.len() < 32 {
+            self.mem[self.memsize..self.memsize + input.len()].copy_from_slice(input);
+            self.memsize += input.len();
+            return;
+        }
+
+        // Finish the partial buffer to a full 32-byte stripe.
+        if self.memsize > 0 {
+            let need = 32 - self.memsize;
+            self.mem[self.memsize..32].copy_from_slice(&input[..need]);
+            for k in 0..4 {
+                self.v[k] = round(self.v[k], read_u64(&self.mem, k * 8));
+            }
+            input = &input[need..];
+            self.memsize = 0;
+        }
+
+        // Process whole 32-byte stripes straight from the input.
+        while input.len() >= 32 {
+            for k in 0..4 {
+                self.v[k] = round(self.v[k], read_u64(input, k * 8));
+            }
+            input = &input[32..];
+        }
+
+        // Stash the remainder.
+        if !input.is_empty() {
+            self.mem[..input.len()].copy_from_slice(input);
+            self.memsize = input.len();
+        }
+    }
+
+    /// Finalize and return the 64-bit hash. Non-consuming (the state can keep
+    /// being updated afterwards).
+    pub fn digest(&self) -> u64 {
+        let mut h64 = if self.total_len >= 32 {
+            let mut h = self.v[0]
+                .rotate_left(1)
+                .wrapping_add(self.v[1].rotate_left(7))
+                .wrapping_add(self.v[2].rotate_left(12))
+                .wrapping_add(self.v[3].rotate_left(18));
+            h = merge_round(h, self.v[0]);
+            h = merge_round(h, self.v[1]);
+            h = merge_round(h, self.v[2]);
+            h = merge_round(h, self.v[3]);
+            h
+        } else {
+            self.seed.wrapping_add(PRIME64_5)
+        };
+        h64 = h64.wrapping_add(self.total_len);
+
+        let mem = &self.mem[..self.memsize];
+        let mut idx = 0usize;
+        while idx + 8 <= mem.len() {
+            let k1 = round(0, read_u64(mem, idx));
+            h64 ^= k1;
+            h64 = h64
+                .rotate_left(27)
+                .wrapping_mul(PRIME64_1)
+                .wrapping_add(PRIME64_4);
+            idx += 8;
+        }
+        if idx + 4 <= mem.len() {
+            h64 ^= (read_u32(mem, idx) as u64).wrapping_mul(PRIME64_1);
+            h64 = h64
+                .rotate_left(23)
+                .wrapping_mul(PRIME64_2)
+                .wrapping_add(PRIME64_3);
+            idx += 4;
+        }
+        while idx < mem.len() {
+            h64 ^= (mem[idx] as u64).wrapping_mul(PRIME64_5);
+            h64 = h64.rotate_left(11).wrapping_mul(PRIME64_1);
+            idx += 1;
+        }
+        avalanche(h64)
+    }
 }
 
 #[cfg(test)]
@@ -112,5 +232,24 @@ mod tests {
         for n in 0..=100 {
             let _ = xxh64(&data[..n], 0);
         }
+    }
+
+    #[test]
+    fn streaming_matches_oneshot_regardless_of_chunking() {
+        // A buffer spanning many 32-byte stripes plus a partial tail.
+        let data: Vec<u8> = (0..1000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        let one = xxh64(&data, 0);
+        // Feed it in a variety of chunk sizes that cross stripe boundaries.
+        for &chunk in &[1usize, 3, 7, 8, 13, 31, 32, 33, 64, 257] {
+            let mut h = Xxh64::new(0);
+            for part in data.chunks(chunk) {
+                h.update(part);
+            }
+            assert_eq!(h.digest(), one, "chunk size {chunk}");
+        }
+        // Known vectors via the streaming path too.
+        let mut empty = Xxh64::new(0);
+        empty.update(b"");
+        assert_eq!(empty.digest(), 0xEF46_DB37_51D8_E999);
     }
 }
