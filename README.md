@@ -1,10 +1,13 @@
-# zstd_pure — pure-Rust Zstandard codec
+# zstd-pure — pure-Rust Zstandard codec
 
 A from-scratch Zstandard ([RFC 8478]) implementation, written from the spec
-(no GPL / Switch-Toolbox code) and structured so it can be lifted into a
-standalone `zstd-pure` crate (depends only on `core`/`alloc`/`std` +
-`thiserror`). libzstd (the `zstd` crate) is used only as the **test/bench
-oracle**, never at runtime.
+(no GPL code). The crate depends only on `core`/`alloc`/`std` + `thiserror`;
+libzstd (the `zstd` crate) is a **dev-only test/bench oracle**, never used at
+runtime. Crate name `zstd-pure`, library `zstd_pure`.
+
+Extracted with full history from the `nx-layout-toolbox` (Toolbox-Cli) monorepo,
+where it was built bottom-up and validated against libzstd and real Nintendo
+TotK BFRES frames (themselves standard magicless zstd).
 
 [RFC 8478]: https://www.rfc-editor.org/rfc/rfc8478
 

@@ -1,0 +1,31 @@
+[package]
+name = "zstd-pure"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+license = "MIT"
+description = "Pure-Rust Zstandard (RFC 8478) codec: a decoder at ecosystem parity (dictionaries, streaming/bounded-memory, magicless frames, frame inspection) plus an encoder. No GPL, no libzstd at runtime."
+repository = "https://github.com/crashbandicode/zstd-pure"
+readme = "README.md"
+keywords = ["zstd", "zstandard", "compression", "decompression", "decoder"]
+categories = ["compression"]
+
+[lib]
+name = "zstd_pure"
+
+[features]
+default = ["std"]
+# `std` pulls in std-only surface (the io::Read StreamingDecoder + std error
+# impls). With `--no-default-features --features alloc` the crate is no_std
+# (decode/encode core, dictionaries) — see the no_std notes in README.
+std = ["alloc", "thiserror/std"]
+alloc = []
+
+[dependencies]
+# thiserror 2.0 emits against core::error::Error under no_std (std feature off).
+thiserror = { version = "2", default-features = false }
+
+[dev-dependencies]
+# libzstd is the test ORACLE only (never used at runtime). `zdict_builder`
+# enables the dictionary trainer used by the dictionary round-trip tests.
+zstd = { version = "0.13", features = ["experimental", "zdict_builder"] }

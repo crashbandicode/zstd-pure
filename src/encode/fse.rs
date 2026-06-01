@@ -1,5 +1,5 @@
 //! FSE (Finite State Entropy) **encoder** — RFC 8478 §4.1, the inverse of the
-//! decoder in [`crate::zstd_pure::fse`].
+//! decoder in [`crate::fse`].
 //!
 //! This batch covers the table *description*:
 //! * [`normalize_counts`] — turn a raw symbol histogram into a valid normalized
@@ -8,7 +8,7 @@
 //!   affects ratio, which is a non-goal for now.
 //! * [`write_ncount`] — the faithful inverse of [`fse::read_ncount`], ported
 //!   from libzstd's `FSE_writeNCount_generic` (forward LSB bit writer, pairing
-//!   with the decoder's [`ForwardBitReader`](crate::zstd_pure::bits)).
+//!   with the decoder's [`ForwardBitReader`](crate::bits)).
 //!
 //! The table-build + 2-state encode (the bitstream itself, [`build_ctable`] +
 //! [`encode`]) follow, both verified by round-tripping through the decoder's
@@ -363,7 +363,7 @@ pub fn encode(ct: &FseCTable, src: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::zstd_pure::fse::{build_dtable, decompress, read_ncount};
+    use crate::fse::{build_dtable, decompress, read_ncount};
 
     /// `read_ncount(write_ncount(norm))` must reproduce `norm` exactly, for many
     /// random distributions across both weight (≤6) and sequence (≤9) logs.

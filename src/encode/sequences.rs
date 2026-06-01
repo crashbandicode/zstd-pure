@@ -1,5 +1,5 @@
 //! Sequence-section **encoding** — RFC 8478 §3.1.1.3.2, the inverse of
-//! [`crate::zstd_pure::sequences`].
+//! [`crate::sequences`].
 //!
 //! A sequence is `(literals_length, match_length, offset_value)`, where
 //! `offset_value` is the already-encoded offset (the `repeat + 3` convention the
@@ -138,7 +138,7 @@ pub fn write_sequences_predefined(out: &mut Vec<u8>, seqs: &[Seq]) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::zstd_pure::sequences::{decode, SeqTables};
+    use crate::sequences::{decode, SeqTables};
 
     /// Deterministic RNG.
     struct Rng(u64);

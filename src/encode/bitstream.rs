@@ -1,7 +1,7 @@
 //! Forward LSB bit accumulator mirroring libzstd's `BIT_CStream`, shared by the
 //! Huff0 and FSE encoders.
 //!
-//! Pairs with the decoder's reverse [`ReverseBitReader`](crate::zstd_pure::bits):
+//! Pairs with the decoder's reverse [`ReverseBitReader`](crate::bits):
 //! `add(v, nb)` here ↔ `read(nb) == v` there, provided fields are emitted in
 //! **reverse** order. A final `1` sentinel bit (added by [`BitWriter::finish`])
 //! marks the start of the stream for the backward reader.

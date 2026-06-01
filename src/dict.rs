@@ -133,7 +133,7 @@ impl Dictionary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::zstd_pure::decompress_with_dict;
+    use crate::decompress_with_dict;
 
     /// Compress `data` with libzstd + `dict_bytes`, decode with us + the same
     /// dictionary, and assert agreement.

@@ -279,7 +279,7 @@ impl Read for StreamingDecoder<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::zstd_pure::decompress;
+    use crate::decompress;
 
     fn zstd_with_window(data: &[u8], level: i32, window_log: u32) -> Vec<u8> {
         let mut cctx = zstd::zstd_safe::CCtx::create();

@@ -1,6 +1,6 @@
 //! Pure-Rust Zstandard **encoder** (RFC 8878 / RFC 8478).
 //!
-//! Staged build-out (see `zstd_pure/README.md`):
+//! Staged build-out (see `README.md`):
 //!
 //! * `block` / `frame` — block + frame writers. Store mode (raw / RLE blocks)
 //!   plus a Huffman-literals compressed block (`[Huffman literals][0
@@ -30,7 +30,7 @@ pub fn compress_stored(data: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::zstd_pure::{decompress, frame_header};
+    use crate::{decompress, frame_header};
 
     /// A store-mode frame must round-trip through BOTH libzstd and our decoder.
     fn assert_store_roundtrips(data: &[u8], checksum: bool) {
@@ -202,7 +202,7 @@ mod tests {
         let data = b"magicless store frame payload that is not too short".repeat(20);
         let frame = compress_store(&data, true, false);
         // Our magicless decoder reads it back.
-        let got = crate::zstd_pure::decompress_magicless(&frame, 1 << 20).unwrap();
+        let got = crate::decompress_magicless(&frame, 1 << 20).unwrap();
         assert_eq!(got.data, data);
         // libzstd reads it with the magicless frame format too.
         let mut dctx = zstd::zstd_safe::DCtx::create();

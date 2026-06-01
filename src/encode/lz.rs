@@ -29,7 +29,7 @@ fn hash4(v: u32) -> usize {
 /// Parse `data` into `(sequences, literals)`. `literals` is the concatenation of
 /// every literal run (including the trailing run after the last match);
 /// reconstructing it requires copying `lit_len` literals then the match, per
-/// sequence, exactly as [`crate::zstd_pure::sequences::decode`] does.
+/// sequence, exactly as [`crate::sequences::decode`] does.
 ///
 /// `max_offset` bounds back-references to the advertised window.
 pub fn fast_parse(data: &[u8], max_offset: usize) -> (Vec<Seq>, Vec<u8>) {

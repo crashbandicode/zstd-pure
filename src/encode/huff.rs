@@ -1,7 +1,7 @@
 //! Huff0 (Huffman) literal **encoding** — RFC 8478 §4.2.1, the inverse of the
-//! decoder in [`crate::zstd_pure::huff`].
+//! decoder in [`crate::huff`].
 //!
-//! Strategy (see `zstd_pure/README.md`):
+//! Strategy (see `README.md`):
 //! 1. histogram the literals and build **length-limited** Huffman code lengths
 //!    (≤ [`MAX_CODE_LEN`]), yielding a *complete* prefix code (Kraft sum = 1);
 //! 2. convert lengths to zstd "weights" (`w_s = max_bits + 1 − len_s`);
@@ -380,8 +380,8 @@ pub fn write_literals_auto(out: &mut Vec<u8>, lits: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::zstd_pure::huff::{decode_1stream, decode_4stream};
-    use crate::zstd_pure::literals;
+    use crate::huff::{decode_1stream, decode_4stream};
+    use crate::literals;
 
     /// A reproducible pseudo-random byte stream over a restricted alphabet so the
     /// direct weight header (max symbol ≤ 128) applies.
