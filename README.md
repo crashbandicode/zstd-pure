@@ -64,10 +64,26 @@ lands): `libzstd.decompress(our_compress(x)) == x` and
 
 State at this point: the **decoder** is at ecosystem parity (multi-frame,
 magicless, dictionaries [raw + tagged], streaming/bounded-memory, frame
-inspection) and hardened by a randomized never-panic + libzstd-oracle harness
-(which already caught two corrupt-input panics). The **encoder** has a verified
-store-mode skeleton (`encode::compress_store`). The big remaining piece is the
-ratio-competitive compressed path.
+inspection) and hardened by a randomized never-panic + libzstd-oracle harness.
+The **encoder** now compresses for real: Huff0 literals (T2.1a), the full FSE
+entropy coder (T2.1b), the three-state sequence bitstream, a `fast` match
+finder, and a `compress(data, level)` entry that emits compressed/raw/RLE blocks
+(T2.3 core). Every encoder output is verified through **both libzstd and our own
+decoder** (lib unit tests + the corpus harness's encoder sweep).
+
+**Remaining is ratio engineering, not new correctness surface:**
+- **Stronger parses** — `dfast` (double hash, L2–3), `lazy`/`lazy2` (hash-chain +
+  lazy eval, L4–12), `btopt`/`btultra` (binary tree + optimal parse, L13–22), wired
+  to the zstd level→param table so `level` actually selects a strategy.
+- **Per-block FSE sequence tables** (`sequences` table mode 2) + RLE/repeat modes
+  + a real `FSE_optimalTableLog`, instead of always-predefined tables.
+- **Repeat offsets** in the match finder (the sequence encoder already emits
+  `offset_value` 1–3; the decoder's `resolve_offset` handles them — the finder
+  just needs to detect and prefer them, mirroring `ZSTD_updateRep`/`ll0`).
+- **Benchmark** (`benches/`, criterion vs the `zstd` crate) + `BENCHMARKS.md`;
+  the bar is beating ruzstd/structured-zstd ratio at L3+.
+- **T2.4 LDM**, and the **T1.3 no_std** gating (deferred to crate extraction —
+  see below).
 
 ### T2.1 entropy encoders
 - **Huff0 encoder — DONE (T2.1a).** `encode/huff.rs`: length-limited Huffman
@@ -103,13 +119,22 @@ ratio-competitive compressed path.
   (this tail is the fiddly part — iterate against the decoder).
 
 ### T2.3 match finders + compressed-block assembly (the ratio work)
-- sequence encoding: 3 interleaved FSE states (LL/OF/ML), offset = `rep+3`
-  with repeat-offset codes; literals via the Huff0 encoder.
-- match finders by level: `fast` (L1) → `dfast` (L2–3) → `lazy/lazy2` (L4–12) →
-  `btopt/btultra` (L13–22); the zstd level→param table.
-- block-type + literal-mode selection; block splitting.
-- Acceptance: `libzstd.decompress(our_compress(x,lvl))==x` and
-  `our.decompress(our_compress(x,lvl))==x` per level; ratio bench in `benches/`.
+- **Sequence encoder — DONE.** `encode/sequences.rs`: 3 interleaved FSE states
+  (LL/OF/ML), predefined-table mode, ported from `ZSTD_encodeSequences_body` and
+  verified by round-trip through the decoder (600 trials, incl. the `-1`
+  low-prob table entries). `offset_value = rep+3` (literal offsets today).
+- **`fast` match finder + assembly — DONE.** `encode/lz.rs::fast_parse` (single
+  4-byte hash, greedy + overlap-safe extension); `encode/block.rs::
+  write_compressed_block` (literals auto raw/Huffman + sequences);
+  `encode/frame.rs::compress` per-block picks the smallest of compressed/raw/RLE.
+  Acceptance met: `libzstd.decompress(compress(x))==x` and `our.decompress==x`
+  across the lib tests + corpus encoder sweep.
+- **Still TODO (ratio):** repeat-offset codes in the finder (the encoder/decoder
+  already support them); stronger parses `dfast` (L2–3) → `lazy/lazy2` (L4–12) →
+  `btopt/btultra` (L13–22) wired to the zstd level→param table so `level`
+  selects a strategy; per-block FSE sequence tables (mode 2) + RLE/repeat modes +
+  `FSE_optimalTableLog`; block splitting; a ratio bench in `benches/` (criterion
+  vs the `zstd` crate) tracked in `BENCHMARKS.md`.
 
 ### T1.3 no_std + alloc
 Deferred: `zstd_pure` is currently a *module* of the std crate
