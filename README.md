@@ -26,7 +26,7 @@ oracle**, never at runtime.
 
 ### Encoder
 - [ ] FSE / Huff0 entropy encoders — T2.1
-- [ ] Frame + block writer (raw/RLE/compressed, magicless) — T2.2
+- [x] Frame + block writer — store mode (raw/RLE), magicless — **T2.2** (compressed block type lands with T2.3)
 - [ ] Match finders by strategy (fast/dfast/lazy/btopt) — T2.3
 - [ ] Long-distance matching — T2.4
 - [ ] Dictionary encode + tagged-dictionary training — T3.1
@@ -55,3 +55,4 @@ lands): `libzstd.decompress(our_compress(x)) == x` and
 | `frame` | frame header + block loop + skippable + checksum + dict priming |
 | `dict` | raw-content + structured (tagged) dictionary parse |
 | `streaming` | block-by-block bounded-memory decode + `io::Read` (`StreamingDecoder`) |
+| `encode` | encoder: `block`/`frame` writers (store mode today: raw/RLE, magicless) |

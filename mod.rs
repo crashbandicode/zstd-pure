@@ -20,6 +20,7 @@
 pub mod bits;
 pub mod block;
 pub mod dict;
+pub mod encode;
 mod error;
 pub mod frame;
 pub mod fse;
@@ -30,6 +31,7 @@ pub mod streaming;
 pub mod xxhash;
 
 pub use dict::Dictionary;
+pub use encode::{compress_store, compress_stored};
 pub use streaming::StreamingDecoder;
 pub use error::{Result, ZstdError};
 pub use frame::{
