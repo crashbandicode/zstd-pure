@@ -2,6 +2,7 @@
 //! and the optional XXH64 content checksum.
 
 use super::block::{self, BlockState};
+use super::dict::Dictionary;
 use super::error::{Result, ZstdError};
 use super::sequences::SeqTables;
 use super::xxhash::xxh64;
@@ -168,6 +169,17 @@ pub fn frame_header_magicless(src: &[u8]) -> Result<FrameHeader> {
 /// (and skippable frames) is parsed first; otherwise `src` starts at the frame
 /// header descriptor (magicless mode).
 pub fn decode_one(src: &[u8], expect_magic: bool, max_output: usize) -> Result<DecodedFrame> {
+    decode_one_with_dict(src, expect_magic, max_output, None)
+}
+
+/// Like [`decode_one`] but priming the decode with an optional dictionary
+/// (preloaded window history + any preset entropy tables and repeat offsets).
+pub fn decode_one_with_dict(
+    src: &[u8],
+    expect_magic: bool,
+    max_output: usize,
+    dict: Option<&Dictionary>,
+) -> Result<DecodedFrame> {
     let mut pos = 0usize;
     if expect_magic {
         if src.len() < 4 {
@@ -219,6 +231,29 @@ pub fn decode_one(src: &[u8], expect_magic: bool, max_output: usize) -> Result<D
         rep: [1, 4, 8],
     };
 
+    if let Some(d) = dict {
+        // A frame that names a dictionary id must match the supplied dict; a
+        // zero frame id (dict id omitted) accepts any dictionary.
+        if header.dictionary_id != 0 && d.id() != 0 && header.dictionary_id != d.id() {
+            return Err(ZstdError::Dictionary(format!(
+                "frame references dictionary id {} but dictionary is id {}",
+                header.dictionary_id,
+                d.id()
+            )));
+        }
+        // Preload the content as window history so back-references reach it.
+        state.out.extend_from_slice(d.content());
+        state.dict_len = d.content().len();
+        // Structured dictionaries prime the entropy tables + repeat offsets,
+        // used by the first block's "Repeat" / treeless modes.
+        if let Some(e) = d.entropy() {
+            state.huff = Some(e.huff.clone());
+            state.seq = e.tables.clone();
+            state.rep = e.rep;
+        }
+    }
+    let dict_len = state.dict_len;
+
     loop {
         let header = block::read_header(&src[pos..])?;
         pos += 3;
@@ -265,11 +300,14 @@ pub fn decode_one(src: &[u8], expect_magic: bool, max_output: usize) -> Result<D
         }
     }
 
+    // `state.out` carries any dictionary history at the front; the real output
+    // is everything past `dict_len`.
+    let output_len = state.out.len() - dict_len;
     if let Some(n) = header.content_size {
-        if state.out.len() as u64 != n {
+        if output_len as u64 != n {
             return Err(ZstdError::Invalid {
                 what: "frame content size",
-                detail: format!("declared {n}, decoded {}", state.out.len()),
+                detail: format!("declared {n}, decoded {output_len}"),
             });
         }
     }
@@ -282,15 +320,18 @@ pub fn decode_one(src: &[u8], expect_magic: bool, max_output: usize) -> Result<D
             });
         }
         let stored = u32::from_le_bytes([src[pos], src[pos + 1], src[pos + 2], src[pos + 3]]);
-        let computed = (xxh64(&state.out, 0) & 0xFFFF_FFFF) as u32;
+        let computed = (xxh64(&state.out[dict_len..], 0) & 0xFFFF_FFFF) as u32;
         if stored != computed {
             return Err(ZstdError::ChecksumMismatch { stored, computed });
         }
         pos += 4;
     }
 
+    // Drop the dictionary prefix, returning only the frame's own output.
+    let mut data = state.out;
+    data.drain(..dict_len);
     Ok(DecodedFrame {
-        data: state.out,
+        data,
         consumed: pos,
     })
 }
@@ -317,4 +358,30 @@ pub fn decompress_capped(src: &[u8], max_output: usize) -> Result<Vec<u8>> {
 /// the bytes and the number of input bytes the frame consumed.
 pub fn decompress_magicless(src: &[u8], max_output: usize) -> Result<DecodedFrame> {
     decode_one(src, false, max_output)
+}
+
+/// Decompress a standard stream using a dictionary (raw-content or structured).
+/// The dictionary primes every frame in the stream.
+pub fn decompress_with_dict(
+    src: &[u8],
+    dict: &Dictionary,
+    max_output: usize,
+) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while pos < src.len() {
+        let frame = decode_one_with_dict(&src[pos..], true, max_output, Some(dict))?;
+        out.extend_from_slice(&frame.data);
+        pos += frame.consumed;
+    }
+    Ok(out)
+}
+
+/// Decompress a single **magicless** frame using a dictionary.
+pub fn decompress_magicless_with_dict(
+    src: &[u8],
+    dict: &Dictionary,
+    max_output: usize,
+) -> Result<DecodedFrame> {
+    decode_one_with_dict(src, false, max_output, Some(dict))
 }

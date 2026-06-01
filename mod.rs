@@ -19,6 +19,7 @@
 
 pub mod bits;
 pub mod block;
+pub mod dict;
 mod error;
 pub mod frame;
 pub mod fse;
@@ -27,10 +28,12 @@ pub mod literals;
 pub mod sequences;
 pub mod xxhash;
 
+pub use dict::Dictionary;
 pub use error::{Result, ZstdError};
 pub use frame::{
-    decode_one, decompress, decompress_capped, decompress_magicless, frame_header,
-    frame_header_magicless, DecodedFrame, FrameHeader,
+    decode_one, decode_one_with_dict, decompress, decompress_capped, decompress_magicless,
+    decompress_magicless_with_dict, decompress_with_dict, frame_header, frame_header_magicless,
+    DecodedFrame, FrameHeader,
 };
 
 /// Decompress a single magicless frame and return just the bytes (the common
