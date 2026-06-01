@@ -13,6 +13,7 @@
 
 pub mod block;
 pub mod frame;
+pub mod fse;
 pub mod huff;
 
 pub use frame::{compress_huffman_literals, compress_store};
