@@ -39,6 +39,36 @@ pub fn choose_table_log(max_log: u32, num_present: usize) -> u32 {
     max_log
 }
 
+/// libzstd's `FSE_optimalTableLog` (the `minus = 2` variant used for the
+/// sequence tables): pick an accuracy log in `[5, max_log]` that trades table
+/// precision against the `write_ncount` header cost for `src_size` symbols over
+/// an alphabet up to `max_symbol`. Smaller inputs get smaller (cheaper) tables.
+///
+/// The caller must still raise the result to host one count per present symbol
+/// (see [`min_table_log`]); this only chooses the *ratio-optimal* size.
+pub fn optimal_table_log(max_log: u32, src_size: usize, max_symbol: usize) -> u32 {
+    let max_log = max_log.min(FSE_MAX_TABLELOG);
+    let src = src_size.max(2) as u32;
+    let max_bits_src = highbit32(src - 1).saturating_sub(2);
+    let min_bits_src = highbit32(src) + 1;
+    let min_bits_symbols = highbit32(max_symbol.max(1) as u32) + 2;
+    let min_bits = min_bits_src.min(min_bits_symbols);
+    let mut log = max_log;
+    if max_bits_src < log {
+        log = max_bits_src;
+    }
+    if min_bits > log {
+        log = min_bits;
+    }
+    log.clamp(5, max_log)
+}
+
+/// Smallest accuracy log that can host one count per present symbol (so every
+/// present symbol gets a normalized count ≥ 1).
+pub fn min_table_log(num_present: usize) -> u32 {
+    (32 - (num_present as u32).saturating_sub(1).leading_zeros()).max(5)
+}
+
 /// Normalize a raw histogram to a distribution summing to `1 << table_log`.
 ///
 /// Every present symbol (`freq > 0`) receives a count ≥ 1; absent symbols get
@@ -284,6 +314,15 @@ pub fn build_ctable(norm: &[i16], max_symbol: usize, table_log: u32) -> FseCTabl
     }
 }
 
+/// Build a degenerate single-state encode table (`table_log = 0`) that always
+/// emits `symbol` for zero bits — the encoder side of the decoder's RLE
+/// sequence table. Used when a sequence channel has a single distinct code.
+pub fn build_rle_ctable(symbol: u8) -> FseCTable {
+    let mut norm = vec![0i16; symbol as usize + 1];
+    norm[symbol as usize] = 1;
+    build_ctable(&norm, symbol as usize, 0)
+}
+
 /// One FSE compression state (`FSE_CState_t`).
 pub struct CState {
     value: u32,
@@ -315,6 +354,26 @@ impl FseCTable {
     #[inline]
     pub fn flush_state(&self, bw: &mut BitWriter, st: &CState) {
         bw.add(st.value, self.table_log);
+    }
+
+    /// Exact number of bits the interleaved sequence encoder spends on one
+    /// channel whose per-sequence symbols are `codes` (sequence order,
+    /// non-empty): the state inits from the last symbol (0 bits), each earlier
+    /// symbol charges its `encode_symbol` width, and the state flushes
+    /// `table_log` bits. Replays `init_state2` / `encode_symbol` / `flush_state`
+    /// without writing, so a channel's table mode can be chosen by exact cost.
+    pub fn stream_cost_bits(&self, codes: &[usize]) -> u64 {
+        let n = codes.len();
+        debug_assert!(n >= 1);
+        let mut value = self.init_state2(codes[n - 1]).value;
+        let mut bits = self.table_log as u64; // final flush
+        for &c in codes[..n - 1].iter().rev() {
+            let nb = ((value as i32 + self.delta_nb_bits[c]) >> 16) as u32;
+            bits += nb as u64;
+            let idx = (value >> nb) as i32 + self.delta_find_state[c];
+            value = self.state_table[idx as usize] as u32;
+        }
+        bits
     }
 }
 

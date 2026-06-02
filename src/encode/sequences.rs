@@ -18,7 +18,10 @@ use crate::alloc_prelude::*;
 use super::super::error::Result;
 use super::super::sequences::{LL_BASE, LL_BITS, LL_DEFAULT, ML_BASE, ML_BITS, ML_DEFAULT, OF_DEFAULT};
 use super::bitstream::BitWriter;
-use super::fse::build_ctable;
+use super::fse::{
+    build_ctable, build_rle_ctable, min_table_log, normalize_counts, optimal_table_log,
+    write_ncount, FseCTable,
+};
 
 // Predefined table parameters (max symbol, accuracy log) — must match the
 // decoder's `resolve_table` calls.
@@ -28,6 +31,12 @@ const OF_PRED_MAX: usize = 28;
 const OF_PRED_LOG: u32 = 5;
 const ML_PRED_MAX: usize = 52;
 const ML_PRED_LOG: u32 = 6;
+
+// Maximum accuracy log for a per-block (mode 2) FSE table per channel — the
+// limits the decoder's `parse_mode` enforces (`read_ncount` max_log).
+const LL_MAX_LOG: u32 = 9;
+const OF_MAX_LOG: u32 = 8;
+const ML_MAX_LOG: u32 = 9;
 
 /// One sequence: copy `lit_len` literals, then a match of `match_len` bytes at
 /// the offset encoded by `offset_value` (`repeat + 3`).
@@ -76,22 +85,16 @@ fn write_seq_count(out: &mut Vec<u8>, n: usize) {
     }
 }
 
-/// Encode a sequences section using the **predefined** FSE tables and append it
-/// to `out`. An empty sequence list writes the single-byte `nb_seq = 0` form
-/// (the decoder then emits the literals verbatim).
-pub fn write_sequences_predefined(out: &mut Vec<u8>, seqs: &[Seq]) -> Result<()> {
-    write_seq_count(out, seqs.len());
-    if seqs.is_empty() {
-        return Ok(());
-    }
-
-    // Compression modes byte: LL/OF/ML all Predefined (0).
-    out.push(0);
-
-    let ll_ct = build_ctable(&LL_DEFAULT, LL_PRED_MAX, LL_PRED_LOG);
-    let of_ct = build_ctable(&OF_DEFAULT, OF_PRED_MAX, OF_PRED_LOG);
-    let ml_ct = build_ctable(&ML_DEFAULT, ML_PRED_MAX, ML_PRED_LOG);
-
+/// Encode the three-state interleaved FSE bitstream for `seqs` with the given
+/// per-channel encode tables and return the finished bytes. The state layout
+/// (init from the last sequence, backward body, `ML`/`OF`/`LL` flush order) is
+/// fixed by the decoder; only the tables differ by compression mode.
+fn encode_seq_bitstream(
+    seqs: &[Seq],
+    ll_ct: &FseCTable,
+    of_ct: &FseCTable,
+    ml_ct: &FseCTable,
+) -> Vec<u8> {
     let n = seqs.len();
     let mut bw = BitWriter::with_capacity(n * 2 + 16);
 
@@ -133,7 +136,118 @@ pub fn write_sequences_predefined(out: &mut Vec<u8>, seqs: &[Seq]) -> Result<()>
     of_ct.flush_state(&mut bw, &st_of);
     ll_ct.flush_state(&mut bw, &st_ll);
 
-    out.extend_from_slice(&bw.finish());
+    bw.finish()
+}
+
+/// Encode a sequences section using the **predefined** FSE tables and append it
+/// to `out`. An empty sequence list writes the single-byte `nb_seq = 0` form
+/// (the decoder then emits the literals verbatim).
+pub fn write_sequences_predefined(out: &mut Vec<u8>, seqs: &[Seq]) -> Result<()> {
+    write_seq_count(out, seqs.len());
+    if seqs.is_empty() {
+        return Ok(());
+    }
+    out.push(0); // modes byte: LL/OF/ML all Predefined
+    let ll_ct = build_ctable(&LL_DEFAULT, LL_PRED_MAX, LL_PRED_LOG);
+    let of_ct = build_ctable(&OF_DEFAULT, OF_PRED_MAX, OF_PRED_LOG);
+    let ml_ct = build_ctable(&ML_DEFAULT, ML_PRED_MAX, ML_PRED_LOG);
+    out.extend_from_slice(&encode_seq_bitstream(seqs, &ll_ct, &of_ct, &ml_ct));
+    Ok(())
+}
+
+/// One channel's chosen table mode, its encode table, and the bytes describing
+/// it (empty for Predefined, 1 byte for RLE, the `write_ncount` description for
+/// a per-block FSE table).
+struct ChannelPlan {
+    mode: u8,
+    ct: FseCTable,
+    header: Vec<u8>,
+}
+
+/// Choose the cheapest table mode for one sequence channel by *exact* bitstream
+/// cost. Candidates considered:
+///
+/// * **Predefined** (mode 0) — no header; only when every code fits the
+///   predefined table. Always a candidate when valid, so the chosen plan is
+///   never larger than the predefined encoding.
+/// * **RLE** (mode 1) — 1 header byte, zero state bits; only when the channel
+///   has a single distinct code.
+/// * **Per-block FSE** (mode 2) — a `write_ncount` header + a custom table;
+///   only when ≥ 2 distinct codes (FSE needs a real alphabet).
+///
+/// Repeat (mode 3) is a later refinement. Costs compare only the parts that
+/// differ between modes (state bits + header bytes); the extra/low bits are
+/// mode-independent and the three channels' state bits are independent, so
+/// per-channel selection minimizes the whole section.
+fn plan_channel(
+    codes: &[usize],
+    pred_dist: &[i16],
+    pred_max: usize,
+    pred_log: u32,
+    max_log: u32,
+) -> ChannelPlan {
+    let max_sym = codes.iter().copied().max().unwrap_or(0);
+    let mut freq = vec![0u32; max_sym + 1];
+    for &c in codes {
+        freq[c] += 1;
+    }
+    let num_present = freq.iter().filter(|&&f| f > 0).count();
+
+    let mut candidates: Vec<(u64, ChannelPlan)> = Vec::new();
+
+    if max_sym <= pred_max {
+        let ct = build_ctable(pred_dist, pred_max, pred_log);
+        let cost = ct.stream_cost_bits(codes);
+        candidates.push((cost, ChannelPlan { mode: 0, ct, header: Vec::new() }));
+    }
+    if num_present == 1 {
+        let sym = codes[0] as u8;
+        // 1 header byte; the FSE states cost nothing for a single-symbol table.
+        candidates.push((8, ChannelPlan { mode: 1, ct: build_rle_ctable(sym), header: vec![sym] }));
+    }
+    if num_present >= 2 {
+        let n = codes.len();
+        let table_log = optimal_table_log(max_log, n, max_sym)
+            .max(min_table_log(num_present))
+            .min(max_log);
+        let norm = normalize_counts(&freq, n as u32, max_sym, table_log);
+        let header = write_ncount(&norm, max_sym, table_log);
+        let ct = build_ctable(&norm, max_sym, table_log);
+        let cost = ct.stream_cost_bits(codes) + header.len() as u64 * 8;
+        candidates.push((cost, ChannelPlan { mode: 2, ct, header }));
+    }
+
+    candidates
+        .into_iter()
+        .min_by_key(|(cost, _)| *cost)
+        .expect("at least one table mode is always viable")
+        .1
+}
+
+/// Encode a sequences section, choosing the cheapest table mode per channel
+/// (Predefined / RLE / per-block FSE) and appending the count, the modes byte,
+/// the table descriptions (LL, then OF, then ML), and the three-state
+/// bitstream. Never larger than [`write_sequences_predefined`] — predefined is
+/// always a candidate per channel.
+pub fn write_sequences(out: &mut Vec<u8>, seqs: &[Seq]) -> Result<()> {
+    write_seq_count(out, seqs.len());
+    if seqs.is_empty() {
+        return Ok(());
+    }
+
+    let ll_codes: Vec<usize> = seqs.iter().map(|s| ll_code(s.lit_len)).collect();
+    let of_codes: Vec<usize> = seqs.iter().map(|s| of_code(s.offset_value)).collect();
+    let ml_codes: Vec<usize> = seqs.iter().map(|s| ml_code(s.match_len)).collect();
+
+    let ll = plan_channel(&ll_codes, &LL_DEFAULT, LL_PRED_MAX, LL_PRED_LOG, LL_MAX_LOG);
+    let of = plan_channel(&of_codes, &OF_DEFAULT, OF_PRED_MAX, OF_PRED_LOG, OF_MAX_LOG);
+    let ml = plan_channel(&ml_codes, &ML_DEFAULT, ML_PRED_MAX, ML_PRED_LOG, ML_MAX_LOG);
+
+    out.push((ll.mode << 6) | (of.mode << 4) | (ml.mode << 2));
+    out.extend_from_slice(&ll.header);
+    out.extend_from_slice(&of.header);
+    out.extend_from_slice(&ml.header);
+    out.extend_from_slice(&encode_seq_bitstream(seqs, &ll.ct, &of.ct, &ml.ct));
     Ok(())
 }
 
@@ -233,5 +347,90 @@ mod tests {
         let mut rep = [1u32, 4, 8];
         decode(&section, &literals, &mut out, &mut tables, &mut rep).unwrap();
         assert_eq!(out, literals);
+    }
+
+    /// The mode-selecting encoder must (a) round-trip through the decoder and
+    /// (b) never produce a larger section than the predefined-only encoder —
+    /// the exact-cost selection guarantees this since predefined is always a
+    /// per-channel candidate.
+    #[test]
+    fn auto_table_sequences_round_trip_and_never_grow() {
+        let mut rng = Rng(0x5151_2727_3939_4242);
+        for trial in 0..600 {
+            let steps = (rng.next() as usize % 40) + 1;
+            let (seqs, literals, expected) = gen_case(&mut rng, steps);
+
+            let mut section = Vec::new();
+            write_sequences(&mut section, &seqs).unwrap();
+            let mut pred = Vec::new();
+            write_sequences_predefined(&mut pred, &seqs).unwrap();
+            assert!(
+                section.len() <= pred.len(),
+                "auto ({}) > predefined ({}) (trial {trial})",
+                section.len(),
+                pred.len()
+            );
+
+            let mut out = Vec::new();
+            let mut tables = SeqTables::default();
+            let mut rep = [1u32, 4, 8];
+            decode(&section, &literals, &mut out, &mut tables, &mut rep).unwrap();
+            assert_eq!(out, expected, "auto-table round-trip mismatch (trial {trial})");
+        }
+    }
+
+    /// A channel whose distribution is far from the predefined one (literal
+    /// lengths almost always zero) must pick a per-block FSE table and produce a
+    /// strictly smaller section, while still round-tripping. Offsets and match
+    /// lengths are held constant so those two channels collapse to RLE.
+    #[test]
+    fn skewed_channel_picks_fse_and_shrinks() {
+        let mut rng = Rng(0x9090_1234_abcd_0001);
+        let mut seqs = Vec::new();
+        let mut literals = Vec::new();
+        let mut out = Vec::new();
+        let mut pending = 0u32;
+        for i in 0..1000u32 {
+            let ll = if i % 37 == 0 { 3 } else { 0 }; // mostly-zero literal runs
+            for _ in 0..ll {
+                let b = rng.next() as u8;
+                literals.push(b);
+                out.push(b);
+            }
+            pending += ll;
+            if out.len() < 4 {
+                let b = rng.next() as u8;
+                literals.push(b);
+                out.push(b);
+                pending += 1;
+                continue;
+            }
+            let offset = 1 + (rng.next() % 3); // offset_value 4..6 -> OF code 2 (constant)
+            let match_len = 4u32; // ML code 1 (constant)
+            let start = out.len() - offset as usize;
+            for k in 0..match_len as usize {
+                let b = out[start + k];
+                out.push(b);
+            }
+            seqs.push(Seq { lit_len: pending, match_len, offset_value: offset + 3 });
+            pending = 0;
+        }
+
+        let mut section = Vec::new();
+        write_sequences(&mut section, &seqs).unwrap();
+        let mut pred = Vec::new();
+        write_sequences_predefined(&mut pred, &seqs).unwrap();
+        assert!(
+            section.len() < pred.len(),
+            "expected per-block tables to beat predefined: {} vs {}",
+            section.len(),
+            pred.len()
+        );
+
+        let mut dout = Vec::new();
+        let mut tables = SeqTables::default();
+        let mut rep = [1u32, 4, 8];
+        decode(&section, &literals, &mut dout, &mut tables, &mut rep).unwrap();
+        assert_eq!(dout, out, "skewed-channel round-trip mismatch");
     }
 }

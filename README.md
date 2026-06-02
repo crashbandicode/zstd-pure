@@ -34,7 +34,8 @@ TotK BFRES frames (themselves standard magicless zstd).
 - [x] Sequence-section encoder (3-state interleaved FSE, predefined tables) — **T2.3**
 - [x] Match finder — `fast` strategy + full compressed-block assembly + `compress(data, level)` — **T2.3** (dfast/lazy/btopt + per-block FSE tables are ratio follow-ups)
 - [x] Repeat-offset codes in the `fast` finder (offset_value 1–3, cross-block `rep` threading) — **T2.3 (ratio)**
-- [ ] Stronger strategies (dfast/lazy/btopt) + per-block FSE sequence tables — T2.3 (ratio)
+- [x] Per-block FSE sequence tables — predefined/RLE/FSE (modes 0/1/2), exact-cost per-channel selection, `FSE_optimalTableLog` — **T2.3 (ratio)**
+- [ ] Stronger strategies (dfast/lazy/btopt) + sequence Repeat table mode (3) — T2.3 (ratio)
 - [ ] Long-distance matching — T2.4
 - [ ] Dictionary encode + tagged-dictionary training — T3.1
 
@@ -97,9 +98,12 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
 **Remaining is ratio engineering, not new correctness surface:**
 - **Stronger parses** — `dfast` (double hash, L2–3), `lazy`/`lazy2` (hash-chain +
   lazy eval, L4–12), `btopt`/`btultra` (binary tree + optimal parse, L13–22), wired
-  to the zstd level→param table so `level` actually selects a strategy.
-- **Per-block FSE sequence tables** (`sequences` table mode 2) + RLE/repeat modes
-  + a real `FSE_optimalTableLog`, instead of always-predefined tables.
+  to the zstd level→param table so `level` actually selects a strategy. (This is
+  the main remaining lever: the `fast` parse already beats libzstd L3 on
+  redundant/structured-record data but trails on data that needs deeper matching.)
+- **Sequence-table Repeat mode (3)** — reuse the previous compressed block's
+  LL/OF/ML table when it would beat re-describing it; needs cross-block table
+  threading with the same commit-on-use discipline as the repeat offsets.
 - **Benchmark** (`benches/`, criterion vs the `zstd` crate) + `BENCHMARKS.md`;
   the bar is beating ruzstd/structured-zstd ratio at L3+.
 - **T2.4 LDM**, and the **T1.3 no_std** gating (deferred to crate extraction —
@@ -158,11 +162,19 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
   store block leaves `rep` untouched, as the decoder does). Verified through
   libzstd + our decoder, incl. cross-block threading on a >128 KiB structured
   input.
+- **Per-block FSE sequence tables — DONE.** `encode/sequences.rs::write_sequences`
+  histograms each LL/OF/ML channel and picks the cheapest of Predefined (mode 0),
+  RLE (mode 1), and a per-block FSE table (mode 2) by *exact* bitstream cost
+  (`FseCTable::stream_cost_bits`), with a faithful `FSE_optimalTableLog`. The
+  three channels' state bits are independent, so per-channel selection minimizes
+  the whole section and the result is provably never larger than the
+  predefined-only encoding (asserted in tests). Verified through libzstd + our
+  decoder.
 - **Still TODO (ratio):** stronger parses `dfast` (L2–3) → `lazy/lazy2` (L4–12) →
   `btopt/btultra` (L13–22) wired to the zstd level→param table so `level`
-  selects a strategy; per-block FSE sequence tables (mode 2) + RLE/repeat modes +
-  `FSE_optimalTableLog`; block splitting; a ratio bench in `benches/` (criterion
-  vs the `zstd` crate) tracked in `BENCHMARKS.md`.
+  selects a strategy; the sequence-table Repeat mode (3); block splitting; a
+  ratio bench in `benches/` (criterion vs the `zstd` crate) tracked in
+  `BENCHMARKS.md`.
 
 ### T1.3 no_std + alloc
 Deferred: `zstd_pure` is currently a *module* of the std crate

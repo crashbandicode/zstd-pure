@@ -83,7 +83,7 @@ pub fn write_compressed_block(
     let (seqs, literals) = super::lz::fast_parse(block, max_offset, rep);
     let mut body = Vec::with_capacity(block.len() / 2 + 16);
     super::huff::write_literals_auto(&mut body, &literals);
-    super::sequences::write_sequences_predefined(&mut body, &seqs)?;
+    super::sequences::write_sequences(&mut body, &seqs)?;
     write_block_header(out, last, BlockType::Compressed, body.len());
     out.extend_from_slice(&body);
     Ok(())
