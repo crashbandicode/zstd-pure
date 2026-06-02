@@ -193,7 +193,9 @@ mod tests {
         let json: Vec<u8> = (0..2000u32)
             .flat_map(|i| format!("{{\"id\":{i},\"k\":\"v_{}\"}}\n", i % 39).into_bytes())
             .collect();
-        let big_rep: Vec<u8> = (0..15_000u32)
+        // ~168 KiB — still spans >1 block so the finders run across the
+        // boundary, but kept modest so the L19/22 optimal parse stays quick.
+        let big_rep: Vec<u8> = (0..8_000u32)
             .flat_map(|i| {
                 let mut u = b"REC_".to_vec();
                 u.extend_from_slice(&i.to_le_bytes());
@@ -201,6 +203,9 @@ mod tests {
                 u
             })
             .collect();
+        // Highly periodic, multi-block: the case that first exposed an
+        // offset-0 self-match bug in the optimal parser (L13+).
+        let periodic: Vec<u8> = (0..40_000u32).flat_map(|i| (i % 13).to_le_bytes()).collect();
         let cases: Vec<Vec<u8>> = vec![
             b"abcabcabc".to_vec(),
             text,
@@ -208,6 +213,7 @@ mod tests {
             json,
             vec![7u8; 5000],
             big_rep,
+            periodic,
         ];
         for data in &cases {
             for &level in &[1i32, 2, 4, 6, 9, 12, 19, 22] {

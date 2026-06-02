@@ -30,14 +30,15 @@ incompressible chunk, so only cross-block matching can shrink copies 2–3).
 |  3 | 0.66× | 1.62× | 1.02× | 0.76× | 0.25× |
 |  6 | 0.66× | **0.97×** | 1.05× | 0.93× | 1.69× |
 |  9 | 0.66× | **0.97×** | 1.05× | 1.09× | 2.50× |
-| 19 | 1.04× | 1.30× | 1.02× | 1.31× | **1.04×** |
+| 19 | 1.02× | 1.32× | 1.02× | **0.87×** | 1.08× |
 
-Reading it: `level` now scales ratio (the chain/lazy finder kicks in at L4+). The
-`records` stream goes from 1.87× of libzstd at L1 to 0.97× (beating it) at L6; the
-cross-block `3x90k-chunk` collapses from 11.7 KB → 1.45 KB (L1 → L19), ending
-within 4 % of libzstd. We trail libzstd most on `json` and `records` at the top
-levels — exactly where libzstd's `btopt`/`btultra` optimal parse wins and we
-currently fall back to `lazy2`.
+Reading it: `level` scales ratio — the chain/lazy finder kicks in at L4+, and the
+`btopt` optimal parse at L13+. The `records` stream goes from 1.87× of libzstd at
+L1 to 0.97× (beating it) at L6; the cross-block `3x90k-chunk` collapses from 11.7 KB
+→ 1.5 KB (L1 → L19), within ~8 % of libzstd; and dense `json` — our worst high-level
+case before the optimal parse — now **beats** libzstd at L19 (0.87×). The remaining
+soft spot is `records` at the top levels (~1.3×): the opt price model is a fixed
+predefined-table proxy, so it leaves a little on near-random data.
 
 ## Throughput (indicative)
 
@@ -48,22 +49,23 @@ shape matters, absolute numbers are machine-specific**:
 |---|---:|---:|
 | compress L3  | ~120 MiB/s | ~380 MiB/s |
 | compress L9  | ~36 MiB/s  | ~96 MiB/s  |
-| compress L19 | ~13 MiB/s  | ~3 MiB/s   |
+| compress L19 | ~2.4 MiB/s | ~3 MiB/s   |
 | decompress   | ~320 MiB/s | faster     |
 
-The encoder is slower than libzstd at low/mid levels (a simpler parse, no SIMD),
-but **faster at L19**: libzstd spends heavily on its `btultra2` optimal parse
-there while we run `lazy2`. That is the same trade-off the ratio table shows —
-we leave ratio on the table at the top end in exchange for speed, until the
-optimal parse lands.
+The encoder is slower than libzstd at low/mid levels (a simpler parse, no SIMD).
+At L19 both run an optimal parse and land in the same ballpark (~2–3 MiB/s); ours
+is a hash-chain DP rather than libzstd's binary tree, so a deeper/bigger corpus
+would widen libzstd's lead — a binary-tree match finder is the way to close it.
 
 ## Standing & next levers
 
-- **Strong:** redundant / repeating / cross-block data (often ≤ libzstd).
+- **Strong:** redundant / repeating / cross-block data (often ≤ libzstd); dense
+  structured data at L19 (`json` 0.87×) after the optimal parse.
 - **Competitive:** mid levels on mixed data after the lazy finder (L6–L9).
-- **Behind:** top levels and dense structured data (`json`) — needs `btopt`.
+- **Soft spots:** near-random record data at the top levels (~1.3×).
 
-Next ratio levers (see `README.md` handoff): `dfast` (L2–3), the `btopt`/`btultra`
-optimal parse (L13+, today `lazy2`), the sequence-table Repeat mode (3), and
-block splitting. A future decode-speed comparison against the pure-Rust `ruzstd`
-decoder would round out the peer set.
+Next ratio levers (see `README.md` handoff): `dfast` (L2–3); a binary-tree match
+finder to make the optimal parse both faster and deeper; refining the opt price
+model with per-block statistics (libzstd's `btultra2` second pass); the
+sequence-table Repeat mode (3); block splitting. A future decode-speed comparison
+against the pure-Rust `ruzstd` decoder would round out the peer set.

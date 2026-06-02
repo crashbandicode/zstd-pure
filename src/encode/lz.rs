@@ -17,8 +17,8 @@
 
 #[allow(unused_imports)]
 use crate::alloc_prelude::*;
-use super::super::sequences::resolve_offset;
-use super::sequences::Seq;
+use super::super::sequences::{resolve_offset, LL_BITS, LL_DEFAULT, ML_BITS, ML_DEFAULT, OF_DEFAULT};
+use super::sequences::{ll_code, ml_code, of_code, Seq};
 
 /// Minimum match length (in bytes) the fast parser will emit.
 const MIN_MATCH: usize = 4;
@@ -255,6 +255,67 @@ impl ChainState {
             (0, 0)
         }
     }
+
+    /// Collect the Pareto-optimal matches for `ip` into `out` as `(len, offset)`
+    /// pairs of **strictly increasing length** — each the smallest offset that
+    /// first reaches that length while walking up to `depth` chained candidates
+    /// within the window. Match extension is capped at `cap` (and the walk stops
+    /// once a candidate reaches `cap`): the optimal parser only needs to know a
+    /// match is "long enough", then extends the chosen one fully — this keeps
+    /// the per-position cost bounded on highly repetitive data.
+    pub(crate) fn find_matches(
+        &self,
+        data: &[u8],
+        range: core::ops::Range<usize>,
+        max_offset: usize,
+        depth: usize,
+        cap: usize,
+        out: &mut Vec<(u32, u32)>,
+    ) {
+        let (ip, end) = (range.start, range.end);
+        out.clear();
+        let h = hash4(read_u32(data, ip), self.hash_log);
+        let mut cand = self.head[h];
+        let mut best_ml = MIN_MATCH - 1;
+        let mut steps = 0usize;
+        while cand >= 0 && steps < depth {
+            let c = cand as usize;
+            let offset = ip - c;
+            if offset > max_offset {
+                break;
+            }
+            if ip + best_ml < end && data[c + best_ml] == data[ip + best_ml] {
+                let mut ml = 0usize;
+                while ip + ml < end && ml < cap && data[c + ml] == data[ip + ml] {
+                    ml += 1;
+                }
+                if ml > best_ml {
+                    best_ml = ml;
+                    out.push((ml as u32, offset as u32));
+                    if best_ml >= cap {
+                        break; // "long enough"; the parser extends this one fully
+                    }
+                }
+            }
+            let next = self.chain[c & self.chain_mask];
+            if next < 0 || next as usize >= c {
+                break;
+            }
+            cand = next;
+            steps += 1;
+        }
+    }
+
+    /// Full (uncapped) match length at `c = ip - offset` against `ip`, for
+    /// extending a "long enough" match the [`find_matches`] cap truncated.
+    #[inline]
+    fn extend_full(&self, data: &[u8], ip: usize, c: usize, end: usize) -> usize {
+        let mut ml = 0usize;
+        while ip + ml < end && data[c + ml] == data[ip + ml] {
+            ml += 1;
+        }
+        ml
+    }
 }
 
 /// Parse `data[range]` with the hash-chain finder, `lazy_steps` of lazy
@@ -341,16 +402,249 @@ pub fn lazy_parse_block(
     (seqs, literals)
 }
 
+/// Fixed-point `log2(x) * 256` (8 fractional bits), `x >= 1`. `no_std`-friendly
+/// (no float `log2`): integer `highbit` for the whole part, linear interpolation
+/// for the fraction. Monotonic, which is all the price model needs.
+#[inline]
+fn log2_fp(x: u32) -> u32 {
+    debug_assert!(x >= 1);
+    let hb = 31 - x.leading_zeros();
+    let frac = ((((x as u64) << 8) >> hb) as u32) & 0xFF;
+    (hb << 8) | frac
+}
+
+/// One dynamic-programming cell: the cheapest way to encode the block prefix
+/// ending here, how we reached it (for backtracking), and the repeat-offset
+/// state along that path.
+#[derive(Clone, Copy)]
+struct Opt {
+    price: u64,    // fixed-point bits (1/256) to encode [block_start, here)
+    mlen: u32,     // arriving match length (0 = reached by extending literals)
+    litlen: u32,   // arriving sequence's literal run (mlen>0) / pending run (mlen==0)
+    offval: u32,   // arriving match's offset_value (when mlen>0)
+    rep: [u32; 3], // repeat offsets at this position along the best path
+}
+
+/// Optimal parse (`btopt`): a rep-aware dynamic program over a fixed-point cost
+/// model. At each position the chain finder enumerates candidate matches; the DP
+/// picks the globally cheapest sequence of literals and matches — so a shorter
+/// match now can win when it enables a cheaper continuation, and rep matches are
+/// preferred because their offset code is tiny. `depth` bounds the chain walk;
+/// `sufficient_len` caps the per-position length search (longer matches are
+/// taken whole). Same contract as [`parse_block`] (persistent `state`,
+/// cross-block offsets, `rep` updated in decoder lockstep).
+pub fn opt_parse_block(
+    data: &[u8],
+    range: core::ops::Range<usize>,
+    state: &mut ChainState,
+    max_offset: usize,
+    rep: &mut [u32; 3],
+    depth: usize,
+    sufficient_len: usize,
+) -> (Vec<Seq>, Vec<u8>) {
+    let (start, end) = (range.start, range.end);
+    let n = end - start;
+    let mut literals = Vec::new();
+    if n < MIN_MATCH + 1 {
+        literals.extend_from_slice(&data[start..end]);
+        return (Vec::new(), literals);
+    }
+
+    // --- price model (fixed-point 1/256 bit) ---
+    // Literal byte cost from a block-wide histogram prior (it overcounts matched
+    // bytes, but serves only as a relative literal-vs-match prior).
+    let mut freq = [0u32; 256];
+    for &b in &data[start..end] {
+        freq[b as usize] += 1;
+    }
+    let l_total = log2_fp(n as u32);
+    let lit_price = |b: u8| -> u64 {
+        let f = freq[b as usize].max(1);
+        (l_total.saturating_sub(log2_fp(f)) as u64).max(16) // >= 1/16 bit
+    };
+    // Sequence-code prices from the predefined tables (a fixed prior; the actual
+    // encoding re-picks tables in `write_sequences`). Predefined accuracy logs:
+    // LL 6 / OF 5 / ML 6, matching the decoder's `resolve_table`.
+    let code_price = |count: i16, log: u32| -> u64 {
+        let c = if count <= 0 { 1u32 } else { count as u32 };
+        ((log * 256).saturating_sub(log2_fp(c))) as u64
+    };
+    let mut ll_price = [0u64; 36];
+    for (c, p) in ll_price.iter_mut().enumerate() {
+        *p = code_price(LL_DEFAULT[c], 6) + (LL_BITS[c] as u64) * 256;
+    }
+    let mut ml_price = [0u64; 53];
+    for (c, p) in ml_price.iter_mut().enumerate() {
+        *p = code_price(ML_DEFAULT[c], 6) + (ML_BITS[c] as u64) * 256;
+    }
+    let mut off_price = [0u64; 32];
+    for (c, p) in off_price.iter_mut().enumerate() {
+        let count = if c < OF_DEFAULT.len() { OF_DEFAULT[c] } else { -1 };
+        *p = code_price(count, 5) + (c as u64) * 256;
+    }
+
+    let big = u64::MAX / 4;
+    let mut opt = vec![Opt { price: big, mlen: 0, litlen: 0, offval: 0, rep: [0; 3] }; n + 1];
+    opt[0] = Opt { price: 0, mlen: 0, litlen: 0, offval: 0, rep: *rep };
+
+    let suff = sufficient_len.max(MIN_MATCH);
+    // Search cap for the chain walk: large enough that `find_matches` keeps
+    // looking past a merely-`suff`-long candidate for the genuinely longest
+    // match (the chosen one is then extended fully), but bounded so repetitive
+    // data — where the first candidate blows past it — stays cheap.
+    let find_cap = suff.max(512);
+    // Cap the per-position sub-length search; lengths past this are only placed
+    // at their full value (composed via shorter matches when finer is needed).
+    const MAX_SUBLEN: usize = 64;
+    let mut matches: Vec<(u32, u32)> = Vec::new();
+    let mut inserted = start;
+    // Positions before `skip_until` lie inside a committed long match — index
+    // them but don't search (this is what keeps repetitive data O(n)).
+    let mut skip_until = start;
+
+    for i in 0..n {
+        let base = opt[i].price;
+        let pend = if opt[i].mlen > 0 { 0 } else { opt[i].litlen as usize };
+
+        // Literal extension i -> i+1. Pre-pay the literal-length code so a
+        // closing match adds no further ll cost; opening a run pays the ll code
+        // for length 1, growing it pays the delta.
+        let ll_add = if pend == 0 {
+            ll_price[ll_code(1)]
+        } else {
+            ll_price[ll_code(pend as u32 + 1)].saturating_sub(ll_price[ll_code(pend as u32)])
+        };
+        let cand = base + lit_price(data[start + i]) + ll_add;
+        if cand < opt[i + 1].price {
+            opt[i + 1] = Opt { price: cand, mlen: 0, litlen: pend as u32 + 1, offval: 0, rep: opt[i].rep };
+        }
+
+        let ap = start + i;
+        if ap + MIN_MATCH > end {
+            continue;
+        }
+        // Index every position strictly before `ap` so the search sees only
+        // earlier positions — never `ap` itself, which would be an offset-0
+        // self-match. (`ap` is indexed *after* the search below.)
+        while inserted < ap {
+            state.insert(data, inserted);
+            inserted += 1;
+        }
+        if ap < skip_until {
+            // inside a committed long match — index `ap` and move on.
+            if inserted == ap {
+                state.insert(data, ap);
+                inserted = ap + 1;
+            }
+            continue;
+        }
+
+        state.find_matches(data, ap..end, max_offset, depth, find_cap, &mut matches);
+        if inserted == ap {
+            state.insert(data, ap);
+            inserted = ap + 1;
+        }
+        let best = match matches.last() {
+            Some(&b) => b,
+            None => continue,
+        };
+        let ll0 = pend == 0;
+        // ll code is pre-paid for pend>0; a zero-literal match still owes the ll
+        // code for length 0.
+        let ll_owed = if pend == 0 { ll_price[ll_code(0)] } else { 0 };
+
+        // If the longest match hit the search cap it may be far longer — extend
+        // it fully and, if it's "sufficient", commit it whole and skip ahead.
+        let (best_len, best_off) = best;
+        let mut long_len = best_len as usize;
+        if long_len >= suff {
+            long_len = state.extend_full(data, ap, ap - best_off as usize, end);
+        }
+        if long_len >= suff {
+            let offval = encode_offset(&opt[i].rep, best_off, ll0);
+            let ocost = off_price[of_code(offval).min(31)];
+            let mut new_rep = opt[i].rep;
+            resolve_offset(&mut new_rep, offval, ll0);
+            let j = i + long_len;
+            let price = base + ll_owed + ocost + ml_price[ml_code(long_len as u32)];
+            if price < opt[j].price {
+                opt[j] = Opt { price, mlen: long_len as u32, litlen: pend as u32, offval, rep: new_rep };
+            }
+            skip_until = ap + long_len;
+            continue;
+        }
+
+        // Short-match region: weigh each candidate length — where the optimal
+        // parse earns its keep. Each length is provided most cheaply by the
+        // first Pareto entry reaching it, so cover only (prev_len, len_k].
+        let mut prev_len = MIN_MATCH - 1;
+        for &(len_k, off_k) in &matches {
+            let len_k = len_k as usize;
+            let offval = encode_offset(&opt[i].rep, off_k, ll0);
+            let ocost = off_price[of_code(offval).min(31)];
+            let mut new_rep = opt[i].rep;
+            resolve_offset(&mut new_rep, offval, ll0);
+            let hi = len_k.min(MAX_SUBLEN);
+            for l in (prev_len + 1).max(MIN_MATCH)..=hi {
+                let j = i + l;
+                let price = base + ll_owed + ocost + ml_price[ml_code(l as u32)];
+                if price < opt[j].price {
+                    opt[j] = Opt { price, mlen: l as u32, litlen: pend as u32, offval, rep: new_rep };
+                }
+            }
+            if len_k > MAX_SUBLEN {
+                let j = i + len_k;
+                let price = base + ll_owed + ocost + ml_price[ml_code(len_k as u32)];
+                if price < opt[j].price {
+                    opt[j] = Opt { price, mlen: len_k as u32, litlen: pend as u32, offval, rep: new_rep };
+                }
+            }
+            prev_len = len_k;
+        }
+    }
+
+    // Backtrack the cheapest full-block path into sequences (forward order).
+    let mut seqs: Vec<Seq> = Vec::new();
+    let mut pos = n;
+    if opt[pos].mlen == 0 {
+        // trailing literal run (no sequence) — skip to the last match end.
+        pos -= opt[pos].litlen as usize;
+    }
+    while pos > 0 {
+        let m = opt[pos].mlen as usize;
+        let ll = opt[pos].litlen as usize;
+        debug_assert!(m >= MIN_MATCH, "backtrack landed off a match boundary");
+        seqs.push(Seq { lit_len: ll as u32, match_len: m as u32, offset_value: opt[pos].offval });
+        pos -= m + ll;
+    }
+    seqs.reverse();
+
+    // Materialize literals and commit the post-block repeat-offset state.
+    let mut p = start;
+    for s in &seqs {
+        literals.extend_from_slice(&data[p..p + s.lit_len as usize]);
+        p += s.lit_len as usize + s.match_len as usize;
+    }
+    literals.extend_from_slice(&data[p..end]);
+    *rep = opt[n].rep;
+    (seqs, literals)
+}
+
 /// The active match finder for a frame, selected from the level's strategy.
-/// `Fast`/`Dfast` use the single-slot [`MatchState`]; every richer strategy
-/// uses the hash-chain [`ChainState`] with `lazy_steps` look-ahead (the `bt*`
-/// strategies map to `lazy2` until the optimal parse lands).
+/// `Fast`/`Dfast` use the single-slot [`MatchState`]; `greedy`/`lazy`/`lazy2`
+/// (and `btlazy2`) use the hash-chain [`ChainState`]; `btopt`/`btultra`(2) use
+/// the optimal parse over that same chain finder.
 pub enum Finder {
     Fast(MatchState),
     Chain {
         state: ChainState,
         lazy_steps: u32,
         depth: usize,
+    },
+    Opt {
+        state: ChainState,
+        depth: usize,
+        sufficient_len: usize,
     },
 }
 
@@ -360,11 +654,21 @@ impl Finder {
         use super::params::Strategy::*;
         match params.strategy {
             Fast | Dfast => Finder::Fast(MatchState::new(params.hash_log)),
+            Btopt | Btultra | Btultra2 => Finder::Opt {
+                state: ChainState::new(params.hash_log, params.chain_log),
+                // The optimal parse visits every position, so the per-position
+                // chain walk is the dominant cost — keep it moderate. Long
+                // matches are committed greedily (`sufficient_len`) and skip
+                // their interior, so this depth only governs short-match regions.
+                depth: (1usize << params.search_log.min(7)).min(128),
+                sufficient_len: (params.target_length as usize).clamp(32, 256),
+            },
             strat => {
+                // Greedy / Lazy / Lazy2 / BtLazy2 (the last as plain lazy2).
                 let lazy_steps = match strat {
                     Greedy => 0,
                     Lazy => 1,
-                    _ => 2, // lazy2 and the bt* strategies (mapped to lazy2 for now)
+                    _ => 2,
                 };
                 Finder::Chain {
                     state: ChainState::new(params.hash_log, params.chain_log),
@@ -387,6 +691,9 @@ impl Finder {
             Finder::Fast(state) => parse_block(data, range, state, max_offset, rep),
             Finder::Chain { state, lazy_steps, depth } => {
                 lazy_parse_block(data, range, state, max_offset, rep, *lazy_steps, *depth)
+            }
+            Finder::Opt { state, depth, sufficient_len } => {
+                opt_parse_block(data, range, state, max_offset, rep, *depth, *sufficient_len)
             }
         }
     }

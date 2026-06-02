@@ -53,20 +53,21 @@ fn highbit32(x: u32) -> u32 {
 }
 
 /// Literals-length code for `lit_len` (largest code whose baseline fits).
+/// `pub(crate)` so the optimal parser can price literal-length codes.
 #[inline]
-fn ll_code(lit_len: u32) -> usize {
+pub(crate) fn ll_code(lit_len: u32) -> usize {
     (0..LL_BASE.len()).rev().find(|&c| LL_BASE[c] <= lit_len).unwrap()
 }
 
 /// Match-length code for `match_len` (`match_len >= 3`).
 #[inline]
-fn ml_code(match_len: u32) -> usize {
+pub(crate) fn ml_code(match_len: u32) -> usize {
     (0..ML_BASE.len()).rev().find(|&c| ML_BASE[c] <= match_len).unwrap()
 }
 
 /// Offset code = `floor(log2(offset_value))` (`offset_value >= 1`).
 #[inline]
-fn of_code(offset_value: u32) -> usize {
+pub(crate) fn of_code(offset_value: u32) -> usize {
     highbit32(offset_value) as usize
 }
 

@@ -37,7 +37,8 @@ TotK BFRES frames (themselves standard magicless zstd).
 - [x] Per-block FSE sequence tables — predefined/RLE/FSE (modes 0/1/2), exact-cost per-channel selection, `FSE_optimalTableLog` — **T2.3 (ratio)**
 - [x] Level→param table (`encode::params`) + cross-block (persistent-window) matching, so `level` selects the window/hash sizes and back-refs span the 128 KiB block boundary — **T2.3 (ratio)**
 - [x] Hash-chain greedy/lazy/lazy2 parser wired to `params.strategy` (levels 4+); `level` now scales ratio — **T2.3 (ratio)**
-- [ ] Remaining parse strategies: `dfast` (L2–3) and the `btopt`/`btultra` optimal parse (L13+, currently mapped to lazy2) + sequence Repeat table mode (3) — T2.3 (ratio)
+- [x] `btopt`/`btultra` optimal parse (L13+): rep-aware DP over a fixed-point cost model (`encode::lz::opt_parse_block`); beats libzstd ratio on dense JSON at L19 — **T2.3 (ratio)**
+- [ ] Remaining parse strategies: `dfast` (L2–3, currently `fast`) + sequence Repeat table mode (3) — T2.3 (ratio)
 - [ ] Long-distance matching — T2.4
 - [ ] Dictionary encode + tagged-dictionary training — T3.1
 
@@ -101,13 +102,13 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
 
 **Remaining is ratio engineering, not new correctness surface:**
 - **Stronger parses** — `fast` (L1–3), `greedy`/`lazy`/`lazy2` (hash-chain, L4–12),
-  and the level→param table + cross-block persistent-window finder are all in
-  place (`encode::params`, `lz::{MatchState, ChainState, Finder}`). `level` now
-  scales ratio: e.g. a less-redundant record stream goes 1.87× → 0.97× of libzstd
-  from L1 → L6. **Remaining:** `dfast` (double-hash, L2–3, currently using the
-  single-slot `fast` finder) and `btopt`/`btultra` (binary-tree optimal parse,
-  L13–22, currently mapped to `lazy2`). Optimal parse is the big lever for the
-  high levels and for data libzstd's `btopt` still wins (e.g. dense JSON).
+  and the `btopt`/`btultra` rep-aware optimal parse (L13+) are all in place
+  (`encode::params`, `lz::{MatchState, ChainState, Finder, opt_parse_block}`).
+  `level` scales ratio: a less-redundant record stream 1.87× → 0.97× of libzstd
+  (L1 → L6); dense JSON 0.91× → 0.88× and now **beats** libzstd at L19. **Remaining:**
+  `dfast` (double-hash, L2–3, currently the single-slot `fast` finder) — a modest
+  win — and tuning the opt price model (it's a fixed predefined-table proxy, so it
+  can be ~1 % off lazy2 on some inputs).
 - **Sequence-table Repeat mode (3)** — reuse the previous compressed block's
   LL/OF/ML table when it would beat re-describing it; needs cross-block table
   threading with the same commit-on-use discipline as the repeat offsets.
@@ -195,10 +196,19 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
   `level` now scales ratio (a record stream: 1.87× → 0.97× of libzstd, L1 → L6;
   a 270 KiB cross-block repeat: 7869 → 1450 bytes, L3 → L19 ≈ libzstd). Verified
   across levels 1–22 through libzstd + our decoder, incl. a >128 KiB input.
-- **Still TODO (ratio):** `dfast` (double-hash, L2–3); the `btopt`/`btultra`
-  optimal parse (L13+, currently lazy2) — the lever for high levels and dense
-  data; the sequence-table Repeat mode (3); block splitting; a ratio bench in
-  `benches/` (criterion vs the `zstd` crate) tracked in `BENCHMARKS.md`.
+- **Optimal parse (`btopt`/`btultra`) — DONE.** `encode/lz.rs::opt_parse_block`:
+  a rep-aware dynamic program over a fixed-point (`log2_fp`) cost model. The chain
+  finder enumerates the Pareto match set per position (`find_matches`); the DP
+  carries per-position price + repeat-offset state + a backpointer and picks the
+  globally cheapest literal/match sequence (short-now-for-longer-later, rep
+  matches priced cheap via their tiny offset code). `depth`/`sufficient_len`
+  capped for tractability. `Finder::Opt` handles `Btopt`/`Btultra`/`Btultra2`.
+  Beats libzstd ratio on dense JSON at L19 (0.88×); verified across L1–22 through
+  libzstd + our decoder. The price model is a fixed predefined-table proxy, so it
+  can be ~1 % off lazy2 on some inputs — refining it (per-block stats, like
+  `btultra2`'s second pass) is future tuning.
+- **Still TODO (ratio):** `dfast` (double-hash, L2–3, currently `fast`); the
+  sequence-table Repeat mode (3); block splitting; opt price-model refinement.
 
 ### T1.3 no_std + alloc
 Deferred: `zstd_pure` is currently a *module* of the std crate
