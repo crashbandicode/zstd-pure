@@ -35,7 +35,8 @@ TotK BFRES frames (themselves standard magicless zstd).
 - [x] Match finder — `fast` strategy + full compressed-block assembly + `compress(data, level)` — **T2.3** (dfast/lazy/btopt + per-block FSE tables are ratio follow-ups)
 - [x] Repeat-offset codes in the `fast` finder (offset_value 1–3, cross-block `rep` threading) — **T2.3 (ratio)**
 - [x] Per-block FSE sequence tables — predefined/RLE/FSE (modes 0/1/2), exact-cost per-channel selection, `FSE_optimalTableLog` — **T2.3 (ratio)**
-- [ ] Stronger strategies (dfast/lazy/btopt) + sequence Repeat table mode (3) — T2.3 (ratio)
+- [x] Level→param table (`encode::params`) + cross-block (persistent-window) matching, so `level` selects the window/hash sizes and back-refs span the 128 KiB block boundary — **T2.3 (ratio)**
+- [ ] Stronger parse strategies (dfast/lazy/btopt) + sequence Repeat table mode (3) — T2.3 (ratio)
 - [ ] Long-distance matching — T2.4
 - [ ] Dictionary encode + tagged-dictionary training — T3.1
 
@@ -97,10 +98,14 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
 
 **Remaining is ratio engineering, not new correctness surface:**
 - **Stronger parses** — `dfast` (double hash, L2–3), `lazy`/`lazy2` (hash-chain +
-  lazy eval, L4–12), `btopt`/`btultra` (binary tree + optimal parse, L13–22), wired
-  to the zstd level→param table so `level` actually selects a strategy. (This is
-  the main remaining lever: the `fast` parse already beats libzstd L3 on
-  redundant/structured-record data but trails on data that needs deeper matching.)
+  lazy eval, L4–12), `btopt`/`btultra` (binary tree + optimal parse, L13–22). The
+  level→param table and a cross-block persistent-window match finder are now in
+  place (`encode::params`, `lz::MatchState`/`parse_block`); every level still
+  runs the `fast` finder, so wiring `params.strategy` to real `dfast`/`lazy`/
+  `btopt` finders is the main remaining lever. The `fast` parse already beats
+  libzstd L3 on redundant/repeating data (cross-block) but trails on data that
+  needs deeper matching (e.g. less-redundant records, and high levels where a
+  single-slot hash leaves matches on the table).
 - **Sequence-table Repeat mode (3)** — reuse the previous compressed block's
   LL/OF/ML table when it would beat re-describing it; needs cross-block table
   threading with the same commit-on-use discipline as the repeat offsets.
@@ -170,11 +175,21 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
   the whole section and the result is provably never larger than the
   predefined-only encoding (asserted in tests). Verified through libzstd + our
   decoder.
-- **Still TODO (ratio):** stronger parses `dfast` (L2–3) → `lazy/lazy2` (L4–12) →
-  `btopt/btultra` (L13–22) wired to the zstd level→param table so `level`
-  selects a strategy; the sequence-table Repeat mode (3); block splitting; a
-  ratio bench in `benches/` (criterion vs the `zstd` crate) tracked in
-  `BENCHMARKS.md`.
+- **Level→param table + cross-block matching — DONE.** `encode/params.rs` ports
+  libzstd's default cparams (window/hash/chain/search/min_match/target_length/
+  strategy) per level + the `ZSTD_adjustCParams` small-input window shrink.
+  `encode/lz.rs` now carries a persistent `MatchState` across a frame's blocks
+  (`parse_block` parses one block's range against the whole input), so
+  back-references span the 128 KiB block boundary up to the level-selected
+  window, and `compress` emits that window log in the frame header. The match
+  table needs no rollback on store blocks (their bytes remain in the decoder's
+  output). Verified through libzstd (offsets stay in-window) + our decoder, incl.
+  a 270 KiB cross-block-repeat case. NB: every level still runs the `fast`
+  finder — `params.strategy` is selected but not yet dispatched.
+- **Still TODO (ratio):** dispatch `params.strategy` to real parses — `dfast`
+  (L2–3) → `lazy/lazy2` (L4–12) → `btopt/btultra` (L13–22); the sequence-table
+  Repeat mode (3); block splitting; a ratio bench in `benches/` (criterion vs the
+  `zstd` crate) tracked in `BENCHMARKS.md`.
 
 ### T1.3 no_std + alloc
 Deferred: `zstd_pure` is currently a *module* of the std crate

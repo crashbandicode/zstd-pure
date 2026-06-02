@@ -75,42 +75,56 @@ pub fn compress_store(data: &[u8], checksum: bool, expect_magic: bool) -> Vec<u8
 /// spec-conformant frame that libzstd and this crate's decoder both accept, and
 /// is never larger than [`compress_store`].
 ///
-/// `level` is accepted for forward compatibility but currently selects only the
-/// `fast` strategy (the stronger strategies are a later ratio refinement).
+/// `level` selects the compression parameters (window/hash sizes and, once the
+/// stronger strategies land, the parse strategy) from the zstd level table; see
+/// [`super::params`]. Today every level uses the `fast` finder, but `level`
+/// already drives the window log (back-reference reach + frame header) and the
+/// match-table size.
 pub fn compress(data: &[u8], level: i32, checksum: bool, expect_magic: bool) -> Vec<u8> {
-    let _ = level;
+    let params = super::params::params_for_level(level, data.len());
+    let window_log = params.window_log;
+    let max_offset = 1usize << window_log;
+
     let mut out = Vec::with_capacity(data.len() / 2 + 64);
     if expect_magic {
         out.extend_from_slice(&ZSTD_MAGIC.to_le_bytes());
     }
-    write_frame_header(&mut out, data.len() as u64, checksum, STORE_WINDOW_LOG);
+    write_frame_header(&mut out, data.len() as u64, checksum, window_log);
 
-    let max_offset = 1usize << STORE_WINDOW_LOG;
     if data.is_empty() {
         super::block::write_raw_block(&mut out, true, &[]);
     } else {
         // Repeat offsets persist across blocks within a frame (the decoder only
-        // updates them on compressed blocks). Thread the running state here,
-        // committing a block's evolution only when we actually emit it
-        // compressed — a store block leaves the decoder's `rep` untouched.
+        // updates them on compressed blocks). The match finder also persists,
+        // so back-references span block boundaries up to the window. Thread both
+        // here, committing a block's `rep` evolution only when we actually emit
+        // it compressed — a store block leaves the decoder's `rep` untouched.
+        // (The match table needs no rollback: a stored block's bytes are still
+        // in the decoder's output, so indexing them stays valid.)
         let mut rep = [1u32, 4, 8];
-        let mut chunks = data.chunks(BLOCK_SIZE_MAX).peekable();
-        while let Some(chunk) = chunks.next() {
-            let last = chunks.peek().is_none();
+        let mut state = super::lz::MatchState::new(params.hash_log);
+        let n = data.len();
+        let mut start = 0usize;
+        while start < n {
+            let end = (start + BLOCK_SIZE_MAX).min(n);
+            let last = end == n;
             let mut store = Vec::new();
-            write_store_block(&mut store, last, chunk);
+            write_store_block(&mut store, last, &data[start..end]);
 
             let mut comp = Vec::new();
             let mut rep_trial = rep;
-            let use_comp =
-                write_compressed_block(&mut comp, last, chunk, max_offset, &mut rep_trial).is_ok()
-                    && comp.len() < store.len();
+            let use_comp = write_compressed_block(
+                &mut comp, last, data, start..end, &mut state, max_offset, &mut rep_trial,
+            )
+            .is_ok()
+                && comp.len() < store.len();
             if use_comp {
                 rep = rep_trial;
                 out.extend_from_slice(&comp);
             } else {
                 out.extend_from_slice(&store);
             }
+            start = end;
         }
     }
 

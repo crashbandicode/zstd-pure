@@ -7,8 +7,12 @@
 //! running repeat offsets is coded as a **repeat-offset code** (`offset_value`
 //! 1–3) instead of the literal form `offset + 3`, which is cheaper and is what
 //! makes structured/periodic data compress well. The stronger strategies
-//! (dfast/lazy/btopt) are later ratio refinements. Matching is **block-local**
-//! — offsets are relative to the block start, which the decoder reconstructs
+//! (dfast/lazy/btopt) are later ratio refinements.
+//!
+//! The match table is **persistent across a frame's blocks** ([`MatchState`]):
+//! [`parse_block`] parses one block's position range against the whole input,
+//! so a match can reference any earlier block up to the window (`max_offset`),
+//! and offsets are absolute back-distances — which the decoder reconstructs
 //! correctly because its copy offset is relative to the current output end.
 
 #[allow(unused_imports)]
@@ -18,8 +22,12 @@ use super::sequences::Seq;
 
 /// Minimum match length (in bytes) the fast parser will emit.
 const MIN_MATCH: usize = 4;
-/// Hash-table log (entries = `1 << HASH_LOG`).
-const HASH_LOG: u32 = 17;
+/// Hash log used by the single-block [`fast_parse`] convenience wrapper.
+const DEFAULT_HASH_LOG: u32 = 17;
+/// Clamp for a [`MatchState`] hash log: floor avoids a degenerate table, ceiling
+/// caps the allocation at `1 << 22` entries (16 MiB) for very high levels.
+const MIN_HASH_LOG: u32 = 6;
+const MAX_HASH_LOG: u32 = 22;
 
 #[inline]
 fn read_u32(data: &[u8], p: usize) -> u32 {
@@ -27,8 +35,8 @@ fn read_u32(data: &[u8], p: usize) -> u32 {
 }
 
 #[inline]
-fn hash4(v: u32) -> usize {
-    (v.wrapping_mul(2654435761) >> (32 - HASH_LOG)) as usize
+fn hash4(v: u32, hash_log: u32) -> usize {
+    (v.wrapping_mul(2654435761) >> (32 - hash_log)) as usize
 }
 
 /// Pick the cheapest `offset_value` that encodes back-distance `offset` at the
@@ -53,47 +61,81 @@ fn encode_offset(rep: &[u32; 3], offset: u32, ll0: bool) -> u32 {
     offset + 3
 }
 
-/// Parse `data` into `(sequences, literals)`. `literals` is the concatenation of
-/// every literal run (including the trailing run after the last match);
-/// reconstructing it requires copying `lit_len` literals then the match, per
-/// sequence, exactly as [`crate::sequences::decode`] does.
+/// Persistent match-finder state across a frame's blocks: one slot per 4-byte
+/// hash holding the most recent **absolute** position, so a match in any block
+/// can reference earlier blocks (subject to the window). Carrying it across
+/// blocks is what lets back-references span the 128 KiB block boundary.
+pub struct MatchState {
+    table: Vec<i32>, // absolute position per hash, -1 = empty
+    hash_log: u32,
+}
+
+impl MatchState {
+    /// Allocate a fresh (empty) match table for the given hash log (clamped to
+    /// `[MIN_HASH_LOG, MAX_HASH_LOG]`).
+    pub fn new(hash_log: u32) -> Self {
+        let hash_log = hash_log.clamp(MIN_HASH_LOG, MAX_HASH_LOG);
+        MatchState {
+            table: vec![-1i32; 1usize << hash_log],
+            hash_log,
+        }
+    }
+}
+
+/// Parse the block `data[start..end]` into `(sequences, literals)`, using and
+/// updating the persistent `state` so matches can reference earlier blocks.
+/// `literals` is the concatenation of this block's literal runs (including the
+/// trailing run after the last match); reconstructing the block copies
+/// `lit_len` literals then the match per sequence, exactly as
+/// [`crate::sequences::decode`] does.
 ///
-/// `max_offset` bounds back-references to the advertised window. `rep` carries
-/// the three running repeat offsets (the decoder's per-frame state, `[1, 4, 8]`
-/// at frame start); it is read to detect repeat-offset codes and updated in
-/// lockstep with the decoder for every sequence emitted. The caller must commit
-/// the updated `rep` only if this block's compressed form is actually used (a
-/// raw/RLE block leaves the decoder's `rep` untouched).
-pub fn fast_parse(data: &[u8], max_offset: usize, rep: &mut [u32; 3]) -> (Vec<Seq>, Vec<u8>) {
-    let n = data.len();
+/// Match candidates may lie anywhere before `p` within `max_offset` (the
+/// advertised window); the matched bytes never cross `end`, so the block's
+/// regenerated size stays bounded. `rep` carries the three running repeat
+/// offsets (the decoder's per-frame state, `[1, 4, 8]` at frame start); it is
+/// read to detect repeat-offset codes and updated in lockstep with the decoder.
+/// The caller must commit the updated `rep` only if this block's compressed
+/// form is actually used (a raw/RLE block leaves the decoder's `rep` untouched).
+pub fn parse_block(
+    data: &[u8],
+    start: usize,
+    end: usize,
+    state: &mut MatchState,
+    max_offset: usize,
+    rep: &mut [u32; 3],
+) -> (Vec<Seq>, Vec<u8>) {
     let mut seqs = Vec::new();
     let mut literals = Vec::new();
+    let hash_log = state.hash_log;
 
-    if n < MIN_MATCH + 1 {
-        literals.extend_from_slice(data);
+    if end < start + MIN_MATCH + 1 {
+        // Too short to start a match; emit verbatim (these bytes are still
+        // visible to later blocks through `data`, just not indexed here).
+        literals.extend_from_slice(&data[start..end]);
         return (seqs, literals);
     }
 
-    let mut table = vec![-1i32; 1usize << HASH_LOG];
-    let mut anchor = 0usize; // start of the pending literal run
-    let mut p = 0usize;
-    let limit = n - MIN_MATCH; // last position with 4 readable bytes
+    let mut anchor = start; // start of the pending literal run
+    let mut p = start;
+    let limit = end - MIN_MATCH; // last in-block position with 4 readable bytes
 
     while p <= limit {
         let v = read_u32(data, p);
-        let h = hash4(v);
-        let cand = table[h];
-        table[h] = p as i32;
+        let h = hash4(v, hash_log);
+        let cand = state.table[h];
+        state.table[h] = p as i32;
 
         if cand >= 0 {
             let c = cand as usize;
             let offset = p - c;
             if offset <= max_offset && offset >= 1 && data[c..c + MIN_MATCH] == data[p..p + MIN_MATCH]
             {
-                // Extend the match forward (overlap-safe: comparing against the
-                // original data validates the decoder's repeating copy).
+                // Extend the match forward, bounded by this block's `end` (the
+                // matched bytes belong to this block's output). Overlap-safe:
+                // comparing against the original data validates the decoder's
+                // repeating copy.
                 let mut ml = MIN_MATCH;
-                while p + ml < n && data[c + ml] == data[p + ml] {
+                while p + ml < end && data[c + ml] == data[p + ml] {
                     ml += 1;
                 }
 
@@ -109,12 +151,12 @@ pub fn fast_parse(data: &[u8], max_offset: usize, rep: &mut [u32; 3]) -> (Vec<Se
                     offset_value,
                 });
 
-                // Insert a couple of interior positions so later matches can
-                // reference inside this one (cheap ratio win for `fast`).
+                // Insert interior positions so later matches can reference
+                // inside this one (cheap ratio win for `fast`).
                 let mut q = p + 1;
                 let stop = (p + ml).min(limit + 1);
                 while q < stop {
-                    table[hash4(read_u32(data, q))] = q as i32;
+                    state.table[hash4(read_u32(data, q), hash_log)] = q as i32;
                     q += 1;
                 }
 
@@ -126,8 +168,16 @@ pub fn fast_parse(data: &[u8], max_offset: usize, rep: &mut [u32; 3]) -> (Vec<Se
         p += 1;
     }
 
-    literals.extend_from_slice(&data[anchor..]);
+    literals.extend_from_slice(&data[anchor..end]);
     (seqs, literals)
+}
+
+/// Single-block convenience parse from a fresh match state (offsets relative to
+/// `data`'s start). Used in tests; the frame encoder uses [`parse_block`] with a
+/// persistent [`MatchState`] so matches span block boundaries.
+pub fn fast_parse(data: &[u8], max_offset: usize, rep: &mut [u32; 3]) -> (Vec<Seq>, Vec<u8>) {
+    let mut state = MatchState::new(DEFAULT_HASH_LOG);
+    parse_block(data, 0, data.len(), &mut state, max_offset, rep)
 }
 
 #[cfg(test)]

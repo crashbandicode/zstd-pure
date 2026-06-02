@@ -19,6 +19,7 @@ pub mod frame;
 pub mod fse;
 pub mod huff;
 pub mod lz;
+pub mod params;
 pub mod sequences;
 
 pub use frame::{compress, compress_huffman_literals, compress_store};
@@ -208,6 +209,31 @@ mod tests {
             data.len()
         );
         assert_eq!(decompress(&frame).unwrap(), data);
+    }
+
+    #[test]
+    fn cross_block_matches_span_boundaries() {
+        // Three copies of a 100 KiB incompressible chunk. The 2nd and 3rd copies
+        // live in later 128 KiB blocks and can only be compressed by referencing
+        // the first copy across the block boundary (offset ~100 KiB, within the
+        // level-selected window). Block-local matching would barely shrink this;
+        // cross-block it collapses to roughly one chunk.
+        let chunk: Vec<u8> = (0..100_000u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
+        let data = chunk.repeat(3);
+        let frame = compress(&data, 3, false, true);
+        assert!(
+            frame.len() < data.len() / 2,
+            "cross-block matching should collapse repeats: {} from {}",
+            frame.len(),
+            data.len()
+        );
+        // Decodes through libzstd (proving the offsets stay within the
+        // advertised window) and through our own decoder.
+        let by_libzstd = zstd::bulk::decompress(&frame, data.len() + 64).unwrap();
+        assert_eq!(by_libzstd, data, "libzstd mismatch");
+        assert_eq!(decompress(&frame).unwrap(), data, "self mismatch");
     }
 
     #[test]
