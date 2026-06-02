@@ -36,7 +36,8 @@ TotK BFRES frames (themselves standard magicless zstd).
 - [x] Repeat-offset codes in the `fast` finder (offset_value 1–3, cross-block `rep` threading) — **T2.3 (ratio)**
 - [x] Per-block FSE sequence tables — predefined/RLE/FSE (modes 0/1/2), exact-cost per-channel selection, `FSE_optimalTableLog` — **T2.3 (ratio)**
 - [x] Level→param table (`encode::params`) + cross-block (persistent-window) matching, so `level` selects the window/hash sizes and back-refs span the 128 KiB block boundary — **T2.3 (ratio)**
-- [ ] Stronger parse strategies (dfast/lazy/btopt) + sequence Repeat table mode (3) — T2.3 (ratio)
+- [x] Hash-chain greedy/lazy/lazy2 parser wired to `params.strategy` (levels 4+); `level` now scales ratio — **T2.3 (ratio)**
+- [ ] Remaining parse strategies: `dfast` (L2–3) and the `btopt`/`btultra` optimal parse (L13+, currently mapped to lazy2) + sequence Repeat table mode (3) — T2.3 (ratio)
 - [ ] Long-distance matching — T2.4
 - [ ] Dictionary encode + tagged-dictionary training — T3.1
 
@@ -97,15 +98,14 @@ finder, and a `compress(data, level)` entry that emits compressed/raw/RLE blocks
 decoder** (lib unit tests + the corpus harness's encoder sweep).
 
 **Remaining is ratio engineering, not new correctness surface:**
-- **Stronger parses** — `dfast` (double hash, L2–3), `lazy`/`lazy2` (hash-chain +
-  lazy eval, L4–12), `btopt`/`btultra` (binary tree + optimal parse, L13–22). The
-  level→param table and a cross-block persistent-window match finder are now in
-  place (`encode::params`, `lz::MatchState`/`parse_block`); every level still
-  runs the `fast` finder, so wiring `params.strategy` to real `dfast`/`lazy`/
-  `btopt` finders is the main remaining lever. The `fast` parse already beats
-  libzstd L3 on redundant/repeating data (cross-block) but trails on data that
-  needs deeper matching (e.g. less-redundant records, and high levels where a
-  single-slot hash leaves matches on the table).
+- **Stronger parses** — `fast` (L1–3), `greedy`/`lazy`/`lazy2` (hash-chain, L4–12),
+  and the level→param table + cross-block persistent-window finder are all in
+  place (`encode::params`, `lz::{MatchState, ChainState, Finder}`). `level` now
+  scales ratio: e.g. a less-redundant record stream goes 1.87× → 0.97× of libzstd
+  from L1 → L6. **Remaining:** `dfast` (double-hash, L2–3, currently using the
+  single-slot `fast` finder) and `btopt`/`btultra` (binary-tree optimal parse,
+  L13–22, currently mapped to `lazy2`). Optimal parse is the big lever for the
+  high levels and for data libzstd's `btopt` still wins (e.g. dense JSON).
 - **Sequence-table Repeat mode (3)** — reuse the previous compressed block's
   LL/OF/ML table when it would beat re-describing it; needs cross-block table
   threading with the same commit-on-use discipline as the repeat offsets.
@@ -184,12 +184,19 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
   window, and `compress` emits that window log in the frame header. The match
   table needs no rollback on store blocks (their bytes remain in the decoder's
   output). Verified through libzstd (offsets stay in-window) + our decoder, incl.
-  a 270 KiB cross-block-repeat case. NB: every level still runs the `fast`
-  finder — `params.strategy` is selected but not yet dispatched.
-- **Still TODO (ratio):** dispatch `params.strategy` to real parses — `dfast`
-  (L2–3) → `lazy/lazy2` (L4–12) → `btopt/btultra` (L13–22); the sequence-table
-  Repeat mode (3); block splitting; a ratio bench in `benches/` (criterion vs the
-  `zstd` crate) tracked in `BENCHMARKS.md`.
+  a 270 KiB cross-block-repeat case.
+- **Greedy/lazy/lazy2 parser — DONE.** `encode/lz.rs::lazy_parse_block` +
+  `ChainState` (head + chain tables) walk up to `1 << search_log` candidates per
+  position keeping the longest match, with `lazy_steps` look-ahead (0 greedy / 1
+  lazy / 2 lazy2). `Finder::new(params)` dispatches: `Fast`/`Dfast` → the
+  single-slot finder, everything else → the chain finder (`bt*` → lazy2 for now).
+  `level` now scales ratio (a record stream: 1.87× → 0.97× of libzstd, L1 → L6;
+  a 270 KiB cross-block repeat: 7869 → 1450 bytes, L3 → L19 ≈ libzstd). Verified
+  across levels 1–22 through libzstd + our decoder, incl. a >128 KiB input.
+- **Still TODO (ratio):** `dfast` (double-hash, L2–3); the `btopt`/`btultra`
+  optimal parse (L13+, currently lazy2) — the lever for high levels and dense
+  data; the sequence-table Repeat mode (3); block splitting; a ratio bench in
+  `benches/` (criterion vs the `zstd` crate) tracked in `BENCHMARKS.md`.
 
 ### T1.3 no_std + alloc
 Deferred: `zstd_pure` is currently a *module* of the std crate

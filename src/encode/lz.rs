@@ -98,12 +98,12 @@ impl MatchState {
 /// form is actually used (a raw/RLE block leaves the decoder's `rep` untouched).
 pub fn parse_block(
     data: &[u8],
-    start: usize,
-    end: usize,
+    range: core::ops::Range<usize>,
     state: &mut MatchState,
     max_offset: usize,
     rep: &mut [u32; 3],
 ) -> (Vec<Seq>, Vec<u8>) {
+    let (start, end) = (range.start, range.end);
     let mut seqs = Vec::new();
     let mut literals = Vec::new();
     let hash_log = state.hash_log;
@@ -177,7 +177,219 @@ pub fn parse_block(
 /// persistent [`MatchState`] so matches span block boundaries.
 pub fn fast_parse(data: &[u8], max_offset: usize, rep: &mut [u32; 3]) -> (Vec<Seq>, Vec<u8>) {
     let mut state = MatchState::new(DEFAULT_HASH_LOG);
-    parse_block(data, 0, data.len(), &mut state, max_offset, rep)
+    parse_block(data, 0..data.len(), &mut state, max_offset, rep)
+}
+
+/// Hash-chain match-finder state for the greedy/lazy strategies. `head[h]` is
+/// the most recent position for hash `h`; `chain[p & chain_mask]` links to the
+/// previous position that hashed the same, so a search walks several candidates
+/// (depth-bounded) keeping the longest match. Persistent across a frame's
+/// blocks, like [`MatchState`].
+pub struct ChainState {
+    head: Vec<i32>,
+    chain: Vec<i32>,
+    hash_log: u32,
+    chain_mask: usize,
+}
+
+impl ChainState {
+    /// Allocate empty head + chain tables (logs clamped to a sane range).
+    pub fn new(hash_log: u32, chain_log: u32) -> Self {
+        let hash_log = hash_log.clamp(MIN_HASH_LOG, MAX_HASH_LOG);
+        let chain_log = chain_log.clamp(MIN_HASH_LOG, MAX_HASH_LOG);
+        ChainState {
+            head: vec![-1i32; 1usize << hash_log],
+            chain: vec![-1i32; 1usize << chain_log],
+            hash_log,
+            chain_mask: (1usize << chain_log) - 1,
+        }
+    }
+
+    /// Index `pos` (which must have 4 readable bytes): push it onto its hash
+    /// chain. Each position is inserted exactly once by the parser.
+    #[inline]
+    fn insert(&mut self, data: &[u8], pos: usize) {
+        let h = hash4(read_u32(data, pos), self.hash_log);
+        self.chain[pos & self.chain_mask] = self.head[h];
+        self.head[h] = pos as i32;
+    }
+
+    /// Longest match for `ip` among up to `depth` chained candidates within the
+    /// window — `(match_len, match_pos)`, or `(0, 0)` if none reaches
+    /// `MIN_MATCH`. Read-only; the caller inserts positions via [`Self::insert`].
+    fn find(&self, data: &[u8], ip: usize, end: usize, max_offset: usize, depth: usize) -> (usize, usize) {
+        let h = hash4(read_u32(data, ip), self.hash_log);
+        let mut cand = self.head[h];
+        let mut best_ml = MIN_MATCH - 1; // a candidate must beat this to count
+        let mut best_pos = 0usize;
+        let mut steps = 0usize;
+        while cand >= 0 && steps < depth {
+            let c = cand as usize;
+            if ip - c > max_offset {
+                break; // chain is ordered newest-first; older ones are further still
+            }
+            // Only bother extending if this candidate can beat the current best
+            // (the byte just past `best_ml` must match) — the standard speedup.
+            if ip + best_ml < end && data[c + best_ml] == data[ip + best_ml] {
+                let mut ml = 0usize;
+                while ip + ml < end && data[c + ml] == data[ip + ml] {
+                    ml += 1;
+                }
+                if ml > best_ml {
+                    best_ml = ml;
+                    best_pos = c;
+                }
+            }
+            let next = self.chain[c & self.chain_mask];
+            // Chains must strictly recede; a stale alias that doesn't is a dead
+            // end (and guards against cycles).
+            if next < 0 || next as usize >= c {
+                break;
+            }
+            cand = next;
+            steps += 1;
+        }
+        if best_ml >= MIN_MATCH {
+            (best_ml, best_pos)
+        } else {
+            (0, 0)
+        }
+    }
+}
+
+/// Parse `data[range]` with the hash-chain finder, `lazy_steps` of lazy
+/// look-ahead (0 = greedy, 1 = lazy, 2 = lazy2) and a per-position chain `depth`.
+/// Otherwise identical in contract to [`parse_block`] (persistent `state`,
+/// cross-block offsets, `rep` updated in decoder lockstep). The lazy rule defers
+/// to a strictly-longer match found one byte later, trading a literal for the
+/// bigger match.
+pub fn lazy_parse_block(
+    data: &[u8],
+    range: core::ops::Range<usize>,
+    state: &mut ChainState,
+    max_offset: usize,
+    rep: &mut [u32; 3],
+    lazy_steps: u32,
+    depth: usize,
+) -> (Vec<Seq>, Vec<u8>) {
+    let (start, end) = (range.start, range.end);
+    let mut seqs = Vec::new();
+    let mut literals = Vec::new();
+    if end < start + MIN_MATCH + 1 {
+        literals.extend_from_slice(&data[start..end]);
+        return (seqs, literals);
+    }
+    let ilimit = end - MIN_MATCH; // last position with 4 readable in-block bytes
+    let mut anchor = start;
+    let mut ip = start;
+    let mut inserted = start; // positions [start, inserted) are on the chains
+
+    while ip <= ilimit {
+        // Index every position strictly before `ip` so `find(ip)` searches only
+        // earlier positions (never `ip` itself).
+        while inserted < ip {
+            state.insert(data, inserted);
+            inserted += 1;
+        }
+        let (mut ml, mut mpos) = state.find(data, ip, end, max_offset, depth);
+        if ml < MIN_MATCH {
+            ip += 1;
+            continue;
+        }
+        // Lazy: if a strictly-longer match starts one byte later, defer to it
+        // (emit one more literal). `lazy2` repeats the check once more.
+        let mut steps = lazy_steps;
+        while steps > 0 && ip < ilimit {
+            while inserted <= ip {
+                state.insert(data, inserted);
+                inserted += 1;
+            }
+            let (ml1, mpos1) = state.find(data, ip + 1, end, max_offset, depth);
+            if ml1 > ml {
+                ml = ml1;
+                mpos = mpos1;
+                ip += 1;
+                steps -= 1;
+            } else {
+                break;
+            }
+        }
+
+        let lit_len = ip - anchor;
+        literals.extend_from_slice(&data[anchor..ip]);
+        let offset = ip - mpos;
+        let ll0 = lit_len == 0;
+        let offset_value = encode_offset(rep, offset as u32, ll0);
+        resolve_offset(rep, offset_value, ll0);
+        seqs.push(Seq {
+            lit_len: lit_len as u32,
+            match_len: ml as u32,
+            offset_value,
+        });
+
+        // Index the match interior so later matches can reference inside it.
+        let match_end = ip + ml;
+        while inserted < match_end && inserted <= ilimit {
+            state.insert(data, inserted);
+            inserted += 1;
+        }
+        ip = match_end;
+        anchor = ip;
+    }
+
+    literals.extend_from_slice(&data[anchor..end]);
+    (seqs, literals)
+}
+
+/// The active match finder for a frame, selected from the level's strategy.
+/// `Fast`/`Dfast` use the single-slot [`MatchState`]; every richer strategy
+/// uses the hash-chain [`ChainState`] with `lazy_steps` look-ahead (the `bt*`
+/// strategies map to `lazy2` until the optimal parse lands).
+pub enum Finder {
+    Fast(MatchState),
+    Chain {
+        state: ChainState,
+        lazy_steps: u32,
+        depth: usize,
+    },
+}
+
+impl Finder {
+    /// Build the finder dictated by `params.strategy` and the level's sizes.
+    pub fn new(params: &super::params::CParams) -> Self {
+        use super::params::Strategy::*;
+        match params.strategy {
+            Fast | Dfast => Finder::Fast(MatchState::new(params.hash_log)),
+            strat => {
+                let lazy_steps = match strat {
+                    Greedy => 0,
+                    Lazy => 1,
+                    _ => 2, // lazy2 and the bt* strategies (mapped to lazy2 for now)
+                };
+                Finder::Chain {
+                    state: ChainState::new(params.hash_log, params.chain_log),
+                    lazy_steps,
+                    depth: 1usize << params.search_log.min(10),
+                }
+            }
+        }
+    }
+
+    /// Parse one block's `range`, dispatching to the chosen finder.
+    pub fn parse(
+        &mut self,
+        data: &[u8],
+        range: core::ops::Range<usize>,
+        max_offset: usize,
+        rep: &mut [u32; 3],
+    ) -> (Vec<Seq>, Vec<u8>) {
+        match self {
+            Finder::Fast(state) => parse_block(data, range, state, max_offset, rep),
+            Finder::Chain { state, lazy_steps, depth } => {
+                lazy_parse_block(data, range, state, max_offset, rep, *lazy_steps, *depth)
+            }
+        }
+    }
 }
 
 #[cfg(test)]

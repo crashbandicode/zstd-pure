@@ -102,7 +102,7 @@ pub fn compress(data: &[u8], level: i32, checksum: bool, expect_magic: bool) -> 
         // (The match table needs no rollback: a stored block's bytes are still
         // in the decoder's output, so indexing them stays valid.)
         let mut rep = [1u32, 4, 8];
-        let mut state = super::lz::MatchState::new(params.hash_log);
+        let mut finder = super::lz::Finder::new(&params);
         let n = data.len();
         let mut start = 0usize;
         while start < n {
@@ -114,7 +114,7 @@ pub fn compress(data: &[u8], level: i32, checksum: bool, expect_magic: bool) -> 
             let mut comp = Vec::new();
             let mut rep_trial = rep;
             let use_comp = write_compressed_block(
-                &mut comp, last, data, start..end, &mut state, max_offset, &mut rep_trial,
+                &mut comp, last, data, start..end, &mut finder, max_offset, &mut rep_trial,
             )
             .is_ok()
                 && comp.len() < store.len();

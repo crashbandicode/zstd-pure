@@ -67,25 +67,24 @@ pub fn write_huffman_literals_block(out: &mut Vec<u8>, last: bool, literals: &[u
     Ok(())
 }
 
-/// Write one fully compressed block covering `data[start..end]`: LZ-parse it
-/// against the whole `data` (so back-references can reach earlier blocks),
-/// emit a literals section (raw or Huffman, whichever is smaller) + a
-/// best-mode sequences section. `state` is the persistent match finder,
-/// `max_offset` bounds back-references to the frame window, and `rep` carries
-/// the running repeat offsets and is updated by the parse; the caller must only
-/// commit that update if this compressed block is actually used (see
-/// [`super::frame::compress`]).
+/// Write one fully compressed block covering `data[range]`: LZ-parse it against
+/// the whole `data` (so back-references can reach earlier blocks) with the
+/// frame's `finder`, emit a literals section (raw or Huffman, whichever is
+/// smaller) + a best-mode sequences section. `max_offset` bounds back-references
+/// to the frame window, and `rep` carries the running repeat offsets and is
+/// updated by the parse; the caller must only commit that update if this
+/// compressed block is actually used (see [`super::frame::compress`]).
 pub fn write_compressed_block(
     out: &mut Vec<u8>,
     last: bool,
     data: &[u8],
     range: core::ops::Range<usize>,
-    state: &mut super::lz::MatchState,
+    finder: &mut super::lz::Finder,
     max_offset: usize,
     rep: &mut [u32; 3],
 ) -> Result<()> {
     let body_hint = range.len() / 2 + 16;
-    let (seqs, literals) = super::lz::parse_block(data, range.start, range.end, state, max_offset, rep);
+    let (seqs, literals) = finder.parse(data, range, max_offset, rep);
     let mut body = Vec::with_capacity(body_hint);
     super::huff::write_literals_auto(&mut body, &literals);
     super::sequences::write_sequences(&mut body, &seqs)?;

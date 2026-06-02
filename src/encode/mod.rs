@@ -164,6 +164,58 @@ mod tests {
         );
     }
 
+    /// Compressed frame at an explicit level must round-trip through BOTH
+    /// libzstd and our decoder, and never exceed the store encoding.
+    fn assert_compress_roundtrips_at(data: &[u8], level: i32, checksum: bool) {
+        let frame = compress(data, level, checksum, true);
+        let by_libzstd = zstd::bulk::decompress(&frame, data.len() + 64)
+            .unwrap_or_else(|e| panic!("libzstd decode (L{level}, {} bytes): {e}", data.len()));
+        assert_eq!(by_libzstd, data, "libzstd mismatch L{level} ({} bytes)", data.len());
+        assert_eq!(decompress(&frame).unwrap(), data, "self mismatch L{level}");
+        assert!(
+            frame.len() <= compress_store(data, checksum, true).len(),
+            "L{level} compressed ({}) larger than store ({})",
+            frame.len(),
+            compress_store(data, checksum, true).len(),
+        );
+    }
+
+    #[test]
+    fn compress_roundtrips_across_levels() {
+        // Levels 1-3 use the fast finder; 4-12 the greedy/lazy/lazy2 chain
+        // finder; 13+ map to lazy2 for now. Exercise all of them — including a
+        // >128 KiB input so the chain finder runs across block boundaries — and
+        // both compressible and incompressible data.
+        let text = b"the quick brown fox jumps over the lazy dog. ".repeat(120);
+        let structured: Vec<u8> = (0..40_000u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 11) as u8)
+            .collect();
+        let json: Vec<u8> = (0..2000u32)
+            .flat_map(|i| format!("{{\"id\":{i},\"k\":\"v_{}\"}}\n", i % 39).into_bytes())
+            .collect();
+        let big_rep: Vec<u8> = (0..15_000u32)
+            .flat_map(|i| {
+                let mut u = b"REC_".to_vec();
+                u.extend_from_slice(&i.to_le_bytes());
+                u.extend_from_slice(b"....const....");
+                u
+            })
+            .collect();
+        let cases: Vec<Vec<u8>> = vec![
+            b"abcabcabc".to_vec(),
+            text,
+            structured,
+            json,
+            vec![7u8; 5000],
+            big_rep,
+        ];
+        for data in &cases {
+            for &level in &[1i32, 2, 4, 6, 9, 12, 19, 22] {
+                assert_compress_roundtrips_at(data, level, level % 4 == 0);
+            }
+        }
+    }
+
     #[test]
     fn compress_roundtrips_across_inputs() {
         let text = b"the quick brown fox jumps over the lazy dog. ".repeat(200);
