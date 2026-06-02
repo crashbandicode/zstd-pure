@@ -227,15 +227,24 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
   greedy best-of-two per position. `Finder::DFast` handles `Dfast` (L2–3). Big
   L3 wins: a record stream 2668 → 1681 bytes (≈ libzstd), a cross-block repeat
   7869 → 3841. Verified through libzstd + our decoder.
-- **Still TODO (ratio):** a **faithful** binary-tree match finder for the optimal
-  parse. (A *bounded* tree was tried — extension capped + early-break to stay
-  tractable on repetitive data — but the cap-induced subtree truncation produced
-  lower-quality matches than the tuned hash-chain opt: `json` regressed ~3 %
-  (13058 → 13406) and it ran slightly slower, so it was dropped. The real win
-  needs the unbounded zstd tree with proper long-match handling, which avoids the
-  O(n²) trap differently.) Also: `btlazy2`; the sequence-table Repeat mode (3);
-  block splitting; opt price-model refinement (per-block stats / `btultra2`
-  second pass).
+- **Still TODO (ratio):** a **faithful** (unbounded) binary-tree match finder for
+  the optimal parse. Three tree variants were implemented and measured against
+  the tuned hash-chain opt, and **all lost**, so none shipped:
+  1. *bounded* (extension-capped + early-break): regressed `json` ~3 % and slower;
+  2. *faithful + skip-no-insert* (full extension, don't index greedy-match
+     interiors to stay O(n)): the sparse index regressed everything
+     (`records` 1375→1645, `3x90k` 1503→1966);
+  3. *complete index + capped insertion* (index every position, cap only the
+     insertion-time extension): matched the chain on `records`/`3x90k`/`redundant`
+     but still `json` ~3 % worse and ~2× slower.
+  The chain's **O(1) insert + complete index + depth-bounded recency search** is
+  the thing to beat, and the tree can't without zstd's exact O(n·log n) machinery
+  (full extension + complete index simultaneously) — the cap I needed for
+  tractability degrades tree placement, costing `json`. A from-scratch faithful
+  port (no cap, zstd's window/`btLow` handling) is the real path; budget it as
+  genuine R&D, not a quick batch. Also still open: `btlazy2`; the sequence-table
+  Repeat mode (3); block splitting; opt price-model refinement (per-block stats /
+  `btultra2` second pass).
 
 ### T1.3 no_std + alloc
 Deferred: `zstd_pure` is currently a *module* of the std crate
