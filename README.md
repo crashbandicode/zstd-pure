@@ -251,9 +251,9 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
   greedy best-of-two per position. `Finder::DFast` handles `Dfast` (L2–3). Big
   L3 wins: a record stream 2668 → 1681 bytes (≈ libzstd), a cross-block repeat
   7869 → 3841. Verified through libzstd + our decoder.
-- **Still TODO (ratio):** a **faithful** (unbounded) binary-tree match finder for
-  the optimal parse. Three tree variants were implemented and measured against
-  the tuned hash-chain opt, and **all lost**, so none shipped:
+- **Still TODO (ratio):** a binary-tree match finder that **beats** the tuned
+  hash-chain opt for the optimal parse. Four variants have now been implemented
+  and measured against the chain-opt, and **all lost**, so none shipped:
   1. *bounded* (extension-capped + early-break): regressed `json` ~3 % and slower;
   2. *faithful + skip-no-insert* (full extension, don't index greedy-match
      interiors to stay O(n)): the sparse index regressed everything
@@ -261,13 +261,32 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
   3. *complete index + capped insertion* (index every position, cap only the
      insertion-time extension): matched the chain on `records`/`3x90k`/`redundant`
      but still `json` ~3 % worse and ~2× slower.
-  The chain's **O(1) insert + complete index + depth-bounded recency search** is
-  the thing to beat, and the tree can't without zstd's exact O(n·log n) machinery
-  (full extension + complete index simultaneously) — the cap I needed for
-  tractability degrades tree placement, costing `json`. A from-scratch faithful
-  port (no cap, zstd's window/`btLow` handling) is the real path; budget it as
-  genuine R&D, not a quick batch — and it remains the last lever on the
-  near-random `records` soft spot (now 1.12× at L19). Also still open: `btlazy2`.
+  4. *faithful port* (preserved, unmerged, on branch `experiment/bt-finder`): a
+     from-scratch port of zstd's `ZSTD_insertBt*` — complete index, **uncapped**
+     search extension via the `commonLength` bound, window/`btLow` handling — with
+     only the *insert-only* path (positions skipped inside a committed long match)
+     capped, to bound the periodic-data O(n²) blowup while leaving the **search**
+     path exact. **Correct and tractable** (round-trips through libzstd + our
+     decoder; the across-levels test runs in <1 s — the first variant to achieve
+     both). Still **ties** the chain on `records` (1163) / `3x90k` (1412) /
+     `redundant` (55) and **loses** `json` (11812→12163, +3 %), `text`, `mixed` —
+     the same shape as 1–3.
+  **Why (the faithful port's real payoff — a precise diagnosis):** the chain walks
+  candidates **newest-first**, so its Pareto set carries the **smallest offset per
+  length**; the tree descends in **suffix order**, returning some — often larger —
+  offset per length. Under our entropy cost model smaller offsets are cheaper (the
+  offset code itself, and the chance it coincides with a repeat code), and this
+  corpus's good matches all sit **within the chain's depth**, so the tree's
+  recency-independent reach only adds length the DP doesn't need while costing
+  offset precision. zstd compensates with explicit **rep-offset candidates** in the
+  finder; our **collect-then-DP** split — which the `btultra2` two-pass match-set
+  reuse depends on — can't supply those with the per-cell evolving `rep`. So the
+  tree is the right tool for a **deeper/bigger corpus**, where the chain's depth
+  bound is the binding constraint, not this ≤270 KB one. Promising next angles:
+  rep-offset candidates threaded through a greedy-rep pass; a chain/tree hybrid
+  (chain for the small-offset Pareto set, tree for the long-match reach); or a
+  large-input benchmark to demonstrate the win the chain's depth bound hides.
+  Also still open: `btlazy2`.
   (Sequence-table Repeat mode (3), the opt price-model refinement — the
   `btultra2` second pass — and block splitting are now done; see the Encoder
   checklist.)

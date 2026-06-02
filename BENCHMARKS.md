@@ -95,7 +95,13 @@ parity, and let `mixed` beat libzstd. The predefined-prior single pass remains
 for `btopt`/`btultra` (L13–18), and the splitter is off below L16 to keep the
 fast/lazy levels' throughput untouched.
 
-Next ratio levers (see `README.md` handoff): a binary-tree match finder to make
-the optimal parse both faster and deeper — the remaining `records` gap. A future
+The remaining `records` gap is libzstd's binary-tree match finder. A faithful,
+correct, tractable port now exists (branch `experiment/bt-finder`) but does **not
+beat** the hash-chain opt on this ≤270 KB corpus — it ties the repetitive
+profiles and loses `json` ~3 %, because the chain's newest-first walk yields
+smaller offsets per length (cheaper here) and the corpus's good matches sit
+within the chain's depth. The tree is the lever for a **deeper/bigger** corpus,
+where that depth bound binds; see the `README.md` handoff for the full diagnosis
+and next angles (rep-offset candidates, a chain/tree hybrid). A future
 decode-speed comparison against the pure-Rust `ruzstd` decoder would round out
 the peer set.
