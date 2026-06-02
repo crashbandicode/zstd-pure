@@ -227,9 +227,15 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
   greedy best-of-two per position. `Finder::DFast` handles `Dfast` (L2–3). Big
   L3 wins: a record stream 2668 → 1681 bytes (≈ libzstd), a cross-block repeat
   7869 → 3841. Verified through libzstd + our decoder.
-- **Still TODO (ratio):** a binary-tree match finder (faster + deeper optimal
-  parse, and `btlazy2`); the sequence-table Repeat mode (3); block splitting; opt
-  price-model refinement (per-block stats / `btultra2` second pass).
+- **Still TODO (ratio):** a **faithful** binary-tree match finder for the optimal
+  parse. (A *bounded* tree was tried — extension capped + early-break to stay
+  tractable on repetitive data — but the cap-induced subtree truncation produced
+  lower-quality matches than the tuned hash-chain opt: `json` regressed ~3 %
+  (13058 → 13406) and it ran slightly slower, so it was dropped. The real win
+  needs the unbounded zstd tree with proper long-match handling, which avoids the
+  O(n²) trap differently.) Also: `btlazy2`; the sequence-table Repeat mode (3);
+  block splitting; opt price-model refinement (per-block stats / `btultra2`
+  second pass).
 
 ### T1.3 no_std + alloc
 Deferred: `zstd_pure` is currently a *module* of the std crate
