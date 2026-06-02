@@ -252,8 +252,9 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
   L3 wins: a record stream 2668 → 1681 bytes (≈ libzstd), a cross-block repeat
   7869 → 3841. Verified through libzstd + our decoder.
 - **Still TODO (ratio):** a binary-tree match finder that **beats** the tuned
-  hash-chain opt for the optimal parse. Four variants have now been implemented
-  and measured against the chain-opt, and **all lost**, so none shipped:
+  hash-chain opt for the optimal parse. Five variants have now been implemented
+  and measured against the chain-opt, and **all lost** (tied at best), so none
+  shipped:
   1. *bounded* (extension-capped + early-break): regressed `json` ~3 % and slower;
   2. *faithful + skip-no-insert* (full extension, don't index greedy-match
      interiors to stay O(n)): the sparse index regressed everything
@@ -270,23 +271,33 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
      decoder; the across-levels test runs in <1 s — the first variant to achieve
      both). Still **ties** the chain on `records` (1163) / `3x90k` (1412) /
      `redundant` (55) and **loses** `json` (11812→12163, +3 %), `text`, `mixed` —
-     the same shape as 1–3.
-  **Why (the faithful port's real payoff — a precise diagnosis):** the chain walks
-  candidates **newest-first**, so its Pareto set carries the **smallest offset per
-  length**; the tree descends in **suffix order**, returning some — often larger —
-  offset per length. Under our entropy cost model smaller offsets are cheaper (the
-  offset code itself, and the chance it coincides with a repeat code), and this
-  corpus's good matches all sit **within the chain's depth**, so the tree's
-  recency-independent reach only adds length the DP doesn't need while costing
-  offset precision. zstd compensates with explicit **rep-offset candidates** in the
-  finder; our **collect-then-DP** split — which the `btultra2` two-pass match-set
-  reuse depends on — can't supply those with the per-cell evolving `rep`. So the
-  tree is the right tool for a **deeper/bigger corpus**, where the chain's depth
-  bound is the binding constraint, not this ≤270 KB one. Promising next angles:
-  rep-offset candidates threaded through a greedy-rep pass; a chain/tree hybrid
-  (chain for the small-offset Pareto set, tree for the long-match reach); or a
-  large-input benchmark to demonstrate the win the chain's depth bound hides.
-  Also still open: `btlazy2`.
+     the same shape as 1–3, because it *replaces* the chain's small-offset set.
+  5. *chain/tree hybrid* (preserved, unmerged, on branch `experiment/bt-hybrid`):
+     keep the chain's small-offset Pareto set and *add* the tree's longest match,
+     but **only when it is `≥ suff`** (a committable long match longer than the
+     chain's reach) — merging shorter tree matches re-introduces the `json`
+     regression (the DP minimises a predefined-price *proxy*, not the real FSE
+     cost, so a longer/larger-offset match looks cheap but isn't). With that
+     restriction it finally **does not regress** — ties the chain-opt gate exactly
+     on the whole corpus — but it still doesn't *beat* it: only `3x90k` 1412→1406
+     (−6 B). An attempt to demonstrate a far-back win (a `farback` profile: a long
+     marker recurring past >`depth` decoys that share its lead hash) **failed** —
+     with the tree disabled the chain gets the identical size.
+  **Why — the generalized finding (the real payoff of variants 4–5):** the chain
+  indexes *every* position, so it finds a far-back match through *any* distinctive
+  4-byte window inside it; its depth bound only blocks a hash that is *saturated*
+  by recent collisions. A useful match is therefore almost always reachable: it is
+  either **distinctive** (some window is unique → the chain finds it regardless of
+  recency) or **repetitive** (a recent occurrence exists → rep/short matches find
+  it). The binary tree only wins when a match is *neither* — pathological hash
+  saturation across its whole length — which realistic data doesn't exhibit. And
+  where the tree *does* surface an extra long match, our entropy cost model
+  prefers the chain's smaller offsets anyway (the `json` regression). Net: the
+  tree/hybrid buys no realistic ratio over the chain, at the cost of the tree's
+  memory + ~2× match time at L16+. The remaining lever for `records` is therefore
+  **not** the match finder but the **cost model** (e.g. rep-offset candidates
+  priced with the per-cell `rep`, which our collect-then-DP split — needed for the
+  `btultra2` two-pass — can't currently supply). Also still open: `btlazy2`.
   (Sequence-table Repeat mode (3), the opt price-model refinement — the
   `btultra2` second pass — and block splitting are now done; see the Encoder
   checklist.)

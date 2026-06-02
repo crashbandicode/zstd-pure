@@ -95,13 +95,15 @@ parity, and let `mixed` beat libzstd. The predefined-prior single pass remains
 for `btopt`/`btultra` (L13–18), and the splitter is off below L16 to keep the
 fast/lazy levels' throughput untouched.
 
-The remaining `records` gap is libzstd's binary-tree match finder. A faithful,
-correct, tractable port now exists (branch `experiment/bt-finder`) but does **not
-beat** the hash-chain opt on this ≤270 KB corpus — it ties the repetitive
-profiles and loses `json` ~3 %, because the chain's newest-first walk yields
-smaller offsets per length (cheaper here) and the corpus's good matches sit
-within the chain's depth. The tree is the lever for a **deeper/bigger** corpus,
-where that depth bound binds; see the `README.md` handoff for the full diagnosis
-and next angles (rep-offset candidates, a chain/tree hybrid). A future
-decode-speed comparison against the pure-Rust `ruzstd` decoder would round out
-the peer set.
+The `records` gap was investigated as a binary-tree match finder: a faithful port
+(branch `experiment/bt-finder`) and a chain/tree hybrid (branch
+`experiment/bt-hybrid`) were both built, correct and tractable, but neither
+**beats** the hash-chain opt. The hybrid (chain's small-offset matches + the
+tree's long-range match, merged only for long matches) at least **ties** the
+corpus exactly without regressing, but adds no ratio. The generalized reason: the
+chain indexes every position and finds a far-back match through any *distinctive*
+4-byte window, so its depth bound only blocks hashes *saturated* by recent
+collisions — which realistic matches (distinctive, or repetitive→recent) avoid.
+So the remaining `records` lever is the **cost model**, not the match finder (see
+the `README.md` handoff). A future decode-speed comparison against the pure-Rust
+`ruzstd` decoder would round out the peer set.
