@@ -379,6 +379,24 @@ pub fn write_literals_auto(out: &mut Vec<u8>, lits: &[u8]) {
     out.extend_from_slice(if use_huf { &huf } else { &raw });
 }
 
+/// Write a standalone Huffman table description (the weight header) for a
+/// **structured dictionary**'s entropy section, built from the literal-byte
+/// histogram `freq`. This is the same tree description that prefixes a Huffman
+/// literals block — exactly what [`huff::read_table`] and libzstd's dictionary
+/// loader read back. Errors (so the caller can fall back) when fewer than two
+/// distinct symbols are present, since a Huffman alphabet needs at least two.
+pub(crate) fn write_dict_huffman_table(out: &mut Vec<u8>, freq: &[u32; 256]) -> Result<()> {
+    if freq.iter().filter(|&&f| f > 0).count() < 2 {
+        return Err(ZstdError::Invalid {
+            what: "dictionary huffman table",
+            detail: "fewer than two distinct literal symbols".into(),
+        });
+    }
+    let lengths = code_lengths(freq);
+    let table = build_code_table(&lengths)?;
+    write_weight_header(out, &table)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

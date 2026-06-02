@@ -252,6 +252,54 @@ pub fn write_sequences(out: &mut Vec<u8>, seqs: &[Seq]) -> Result<()> {
     Ok(())
 }
 
+/// Write a standalone FSE table description (a `write_ncount` stream) for one
+/// sequence channel into a **structured dictionary**'s entropy section. Builds a
+/// table from `codes` when they form a real (≥ 2 distinct) alphabet, else falls
+/// back to the channel's predefined distribution (always valid). Read back by
+/// [`crate::fse::read_dtable`]; accepted by libzstd's dictionary loader. Unlike
+/// [`plan_channel`], a dictionary table is always a full FSE description — never
+/// RLE — so it can serve as a multi-symbol "previous" table for Repeat mode.
+fn write_dict_fse_table(
+    out: &mut Vec<u8>,
+    codes: &[usize],
+    pred_dist: &[i16],
+    pred_max: usize,
+    pred_log: u32,
+    max_log: u32,
+) {
+    let max_sym = codes.iter().copied().max().unwrap_or(0);
+    let mut freq = vec![0u32; max_sym + 1];
+    for &c in codes {
+        freq[c] += 1;
+    }
+    let num_present = freq.iter().filter(|&&f| f > 0).count();
+    if num_present >= 2 {
+        let n = codes.len();
+        let table_log = optimal_table_log(max_log, n, max_sym)
+            .max(min_table_log(num_present))
+            .min(max_log);
+        let norm = normalize_counts(&freq, n as u32, max_sym, table_log);
+        out.extend_from_slice(&write_ncount(&norm, max_sym, table_log));
+    } else {
+        // Empty or single-symbol channel: the predefined distribution is a valid
+        // multi-symbol table and a sensible warm-start.
+        out.extend_from_slice(&write_ncount(pred_dist, pred_max, pred_log));
+    }
+}
+
+/// Write the three structured-dictionary FSE table descriptions, in dictionary
+/// order — **Offset, Match_Length, Literals_Length** (the order
+/// [`crate::dict::Dictionary::parse`] and libzstd read them) — from a
+/// representative set of parsed sequences.
+pub(crate) fn write_dict_seq_tables(out: &mut Vec<u8>, seqs: &[Seq]) {
+    let ll_codes: Vec<usize> = seqs.iter().map(|s| ll_code(s.lit_len)).collect();
+    let of_codes: Vec<usize> = seqs.iter().map(|s| of_code(s.offset_value)).collect();
+    let ml_codes: Vec<usize> = seqs.iter().map(|s| ml_code(s.match_len)).collect();
+    write_dict_fse_table(out, &of_codes, &OF_DEFAULT, OF_PRED_MAX, OF_PRED_LOG, OF_MAX_LOG);
+    write_dict_fse_table(out, &ml_codes, &ML_DEFAULT, ML_PRED_MAX, ML_PRED_LOG, ML_MAX_LOG);
+    write_dict_fse_table(out, &ll_codes, &LL_DEFAULT, LL_PRED_MAX, LL_PRED_LOG, LL_MAX_LOG);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

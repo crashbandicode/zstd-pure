@@ -54,7 +54,7 @@ libzstd, which implements RFC 8878. Notable conformance points:
 - [ ] Long-distance matching — T2.4
 - [x] Dictionary encode (`compress_with_dict`) — raw + structured/tagged: match window primed with dict content, seeded repeat offsets, dict-id frame header; verified through libzstd + our decoder, improves ratio on a many-small-files corpus — **T3.1**
 - [x] Dictionary training (`train_dictionary`) — pure-Rust greedy COVER producing a raw-content dictionary (highest-coverage shared substrings, most-valuable last); improves ratio on a many-small-files corpus, verified through libzstd + our decoder — **T3.1**
-- [ ] Structured/tagged-dictionary finalize from training (entropy tables + dict id) — T3.1
+- [x] Structured/tagged-dictionary finalize (`train_dictionary_structured`) — `magic | id | Huffman | FSE OF/ML/LL | repeat offsets | content`, entropy tables derived from a dict-primed compression pass over the samples; **libzstd loads it on the strict compress side** and a decoder warm-starts from it — **T3.1**
 
 ## Features / `no_std`
 
@@ -101,7 +101,7 @@ in [`BENCHMARKS.md`](BENCHMARKS.md).
 | `frame` | frame header + block loop + skippable + checksum + dict priming |
 | `dict` | raw-content + structured (tagged) dictionary parse |
 | `streaming` | block-by-block bounded-memory decode + `io::Read` (`StreamingDecoder`) |
-| `encode` | encoder: `huff` (Huff0 literal encoder), `fse` (FSE entropy encoder), `sequences` (per-block mode-selecting sequence encoder), `lz` (fast/dfast/chain/opt match finders + dictionary priming), `params` (level→cparams table), `bitstream` (shared `BIT_CStream` writer), `train` (pure-Rust COVER dictionary trainer), `block`/`frame` writers + `compress` / `compress_with_dict` |
+| `encode` | encoder: `huff` (Huff0 literal encoder), `fse` (FSE entropy encoder), `sequences` (per-block mode-selecting sequence encoder), `lz` (fast/dfast/chain/opt match finders + dictionary priming), `params` (level→cparams table), `bitstream` (shared `BIT_CStream` writer), `train` (pure-Rust COVER dictionary trainer + structured/tagged finalize), `block`/`frame` writers + `compress` / `compress_with_dict` |
 
 ## Handoff — remaining work (notes for the next agent)
 
@@ -281,8 +281,20 @@ ratio on a many-small-files corpus and to round-trip through libzstd + our
 decoder. The single-pool greedy omits COVER's epoch partitioning and `(d, k)`
 parameter search.
 
-Still open in Tier 3: **finalize** training into a structured/tagged dictionary
-(entropy tables + dict id, libzstd's `ZDICT_finalizeDictionary`), and have the
-encoder reference a structured dict's preset entropy tables (currently primed for
-matches + repeat offsets only); perf (sequence decode + reverse bit reader are
-the decode hot spots); criterion benches vs the `zstd` crate.
+Structured/tagged **finalize** — **DONE.** `encode::train::train_dictionary_structured`
+is a pure-Rust analogue of libzstd's `ZDICT_finalizeDictionary` on top of the
+COVER content: it gathers entropy statistics from a representative pass (each
+sample compressed with the dictionary content primed, as it will be used), builds
+the literals Huffman table (reusing `encode::huff`'s weight-header writer) and the
+three sequence FSE tables (reusing `encode::sequences`' `write_ncount` path, with
+a predefined per-channel fallback), and emits the zstd dictionary layout
+`magic | dict_id | Huffman | FSE OF/ML/LL | 3 repeat offsets | content` with a
+deterministic content-hash id. **libzstd loads it on the strict compress side**
+(`ZSTD_loadCEntropy` validates every table) and on the decompress side, and a
+decoder warm-starts the first block from these tables.
+
+Still open in Tier 3: have the **encoder** reference a structured dict's preset
+entropy tables when compressing (it currently primes matches + repeat offsets
+only — using the tables needs treeless literals + sequence-table Repeat mode);
+perf (sequence decode + reverse bit reader are the decode hot spots); criterion
+benches vs the `zstd` crate.

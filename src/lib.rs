@@ -60,7 +60,7 @@ pub mod xxhash;
 pub use dict::Dictionary;
 pub use encode::{
     compress, compress_huffman_literals, compress_store, compress_stored, compress_with_dict,
-    train_dictionary,
+    train_dictionary, train_dictionary_structured,
 };
 #[cfg(feature = "std")]
 pub use streaming::StreamingDecoder;

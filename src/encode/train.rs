@@ -20,6 +20,17 @@
 #[allow(unused_imports)]
 use crate::alloc_prelude::*;
 use alloc::collections::{BTreeMap, BTreeSet};
+use super::super::dict::DICT_MAGIC;
+use super::super::xxhash::xxh64;
+use super::huff::write_dict_huffman_table;
+use super::lz::Finder;
+use super::params::params_for_level_with_dict;
+use super::sequences::{write_dict_seq_tables, Seq};
+
+/// Compression level used to gather representative entropy statistics when
+/// finalizing a structured dictionary — a mid-level lazy2 chain parse: good
+/// matches without the optimal parser's per-position cost.
+const STATS_LEVEL: i32 = 9;
 
 /// dmer length (bytes). 8 lets a dmer be read directly as a little-endian `u64`,
 /// so it is its own exact map key — no hashing, no collisions.
@@ -167,6 +178,82 @@ pub fn train_dictionary(samples: &[&[u8]], max_size: usize) -> Vec<u8> {
         content.drain(..cut);
     }
     content
+}
+
+/// Train a **structured (tagged)** dictionary of at most `max_size` bytes — a
+/// pure-Rust analogue of libzstd's `ZDICT_finalizeDictionary` on top of the
+/// COVER content from [`train_dictionary`]. The result carries, in the zstd
+/// dictionary layout, `magic | dict_id | Huffman table | FSE Offset/Match_Length/
+/// Literals_Length tables | 3 repeat offsets | content`, where the entropy
+/// tables are derived from a representative compression pass over the samples
+/// (each compressed with the dictionary content primed, as it will be used).
+/// libzstd loads it (both compress and decompress sides) and a decoder warm-
+/// starts the first block from these tables.
+///
+/// Falls back to returning the raw COVER content (a valid raw-content
+/// dictionary) when the content is too small to finalize or the literals can't
+/// form a Huffman alphabet. The output is deterministic (the dict id is a hash
+/// of the content).
+pub fn train_dictionary_structured(samples: &[&[u8]], max_size: usize) -> Vec<u8> {
+    let content = train_dictionary(samples, max_size);
+    // Need room for valid repeat offsets (1/4/8 must reach no further than the
+    // content); below that, hand back the still-usable raw content.
+    if content.len() < 8 {
+        return content;
+    }
+
+    // Gather representative entropy statistics: compress each sample with the
+    // dictionary content primed (exactly how the dictionary is used), summing
+    // the residual literal bytes and the parsed sequences.
+    let mut lit_freq = [0u32; 256];
+    let mut seqs: Vec<Seq> = Vec::new();
+    for &s in samples {
+        if s.is_empty() {
+            continue;
+        }
+        let params = params_for_level_with_dict(STATS_LEVEL, s.len(), content.len());
+        let max_offset = 1usize << params.window_log;
+        let mut combined = Vec::with_capacity(content.len() + s.len());
+        combined.extend_from_slice(&content);
+        combined.extend_from_slice(s);
+        let mut finder = Finder::new(&params);
+        finder.prime(&combined, content.len());
+        let mut rep = [1u32, 4, 8];
+        let (sq, lits) =
+            finder.parse(&combined, content.len()..combined.len(), max_offset, &mut rep);
+        for &b in &lits {
+            lit_freq[b as usize] += 1;
+        }
+        seqs.extend(sq);
+    }
+
+    // Literal Huffman table — from the residual literals, falling back to the
+    // content's own byte histogram if the literals are too sparse to form an
+    // alphabet (and bailing to raw content if even that is degenerate).
+    let mut huff = Vec::new();
+    if write_dict_huffman_table(&mut huff, &lit_freq).is_err() {
+        let mut cfreq = [0u32; 256];
+        for &b in &content {
+            cfreq[b as usize] += 1;
+        }
+        huff.clear();
+        if write_dict_huffman_table(&mut huff, &cfreq).is_err() {
+            return content;
+        }
+    }
+
+    // Assemble: magic | id | huff | OF | ML | LL | rep[3] | content.
+    let id = (xxh64(&content, 0) as u32) | 1; // deterministic, non-zero
+    let mut out = Vec::with_capacity(8 + huff.len() + 32 + content.len());
+    out.extend_from_slice(&DICT_MAGIC.to_le_bytes());
+    out.extend_from_slice(&id.to_le_bytes());
+    out.extend_from_slice(&huff);
+    write_dict_seq_tables(&mut out, &seqs);
+    for r in [1u32, 4, 8] {
+        out.extend_from_slice(&r.to_le_bytes());
+    }
+    out.extend_from_slice(&content);
+    out
 }
 
 #[cfg(test)]

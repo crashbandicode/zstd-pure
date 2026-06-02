@@ -24,7 +24,7 @@ pub mod sequences;
 pub mod train;
 
 pub use frame::{compress, compress_huffman_literals, compress_store, compress_with_dict};
-pub use train::train_dictionary;
+pub use train::{train_dictionary, train_dictionary_structured};
 
 /// Compress `data` into a standard (magic-prefixed) store-mode frame. No
 /// content checksum. See [`compress_store`] for the full-control entry point.
@@ -441,5 +441,49 @@ mod dict_tests {
                  {with_dict} (dict) vs {no_dict} (none)"
             );
         }
+    }
+
+    #[test]
+    fn our_structured_dict_loads_in_libzstd_and_improves_ratio() {
+        let samples = small_records();
+        let refs: Vec<&[u8]> = samples.iter().map(|v| v.as_slice()).collect();
+        let dict_bytes = train_dictionary_structured(&refs, 8 * 1024);
+
+        // It must be a real structured dictionary: magic + non-zero id + entropy.
+        let dict = Dictionary::parse(&dict_bytes).expect("parse our structured dict");
+        assert!(dict.entropy().is_some(), "structured dict must carry entropy tables");
+        assert_ne!(dict.id(), 0, "structured dict must carry a non-zero id");
+
+        // (a) libzstd LOADS it on the compress side — the strict ZSTD_loadCEntropy
+        //     path validates every entropy table — and our decoder reads back what
+        //     libzstd produced with it.
+        for s in samples.iter().take(40) {
+            let mut c = zstd::bulk::Compressor::with_dictionary(19, &dict_bytes)
+                .expect("libzstd must load our structured dict (compress side)");
+            let comp = c.compress(s).expect("libzstd compress with our dict");
+            let got = decompress_with_dict(&comp, &dict, s.len() + 64).expect("our decode");
+            assert_eq!(&got, s, "libzstd-compressed-with-our-dict round-trip mismatch");
+        }
+
+        // (b) Our own compress_with_dict output decodes through libzstd + us.
+        for s in samples.iter().take(40) {
+            for level in [3, 19] {
+                assert_dict_roundtrips(s, &dict_bytes, level);
+            }
+        }
+
+        // (c) The structured dictionary improves ratio: libzstd-with-our-dict
+        //     beats libzstd-no-dict across the corpus (content + entropy tables).
+        let mut with_dict = 0usize;
+        let mut no_dict = 0usize;
+        for s in &samples {
+            let mut c = zstd::bulk::Compressor::with_dictionary(19, &dict_bytes).unwrap();
+            with_dict += c.compress(s).unwrap().len();
+            no_dict += zstd::bulk::compress(s, 19).unwrap().len();
+        }
+        assert!(
+            with_dict < no_dict,
+            "structured dict should help libzstd: {with_dict} (dict) vs {no_dict} (none)"
+        );
     }
 }
