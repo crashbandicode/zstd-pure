@@ -89,6 +89,11 @@ pub fn compress(data: &[u8], level: i32, checksum: bool, expect_magic: bool) -> 
     if data.is_empty() {
         super::block::write_raw_block(&mut out, true, &[]);
     } else {
+        // Repeat offsets persist across blocks within a frame (the decoder only
+        // updates them on compressed blocks). Thread the running state here,
+        // committing a block's evolution only when we actually emit it
+        // compressed — a store block leaves the decoder's `rep` untouched.
+        let mut rep = [1u32, 4, 8];
         let mut chunks = data.chunks(BLOCK_SIZE_MAX).peekable();
         while let Some(chunk) = chunks.next() {
             let last = chunks.peek().is_none();
@@ -96,9 +101,16 @@ pub fn compress(data: &[u8], level: i32, checksum: bool, expect_magic: bool) -> 
             write_store_block(&mut store, last, chunk);
 
             let mut comp = Vec::new();
-            let use_comp = write_compressed_block(&mut comp, last, chunk, max_offset).is_ok()
-                && comp.len() < store.len();
-            out.extend_from_slice(if use_comp { &comp } else { &store });
+            let mut rep_trial = rep;
+            let use_comp =
+                write_compressed_block(&mut comp, last, chunk, max_offset, &mut rep_trial).is_ok()
+                    && comp.len() < store.len();
+            if use_comp {
+                rep = rep_trial;
+                out.extend_from_slice(&comp);
+            } else {
+                out.extend_from_slice(&store);
+            }
         }
     }
 

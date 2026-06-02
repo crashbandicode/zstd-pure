@@ -96,8 +96,10 @@ fn rle_table(symbol: u8) -> FseDecodeTable {
 }
 
 /// Resolve / update the repeat offsets, returning the actual copy offset
-/// (mirrors libzstd's `ZSTD_updateRep`).
-fn resolve_offset(rep: &mut [u32; 3], offset_value: u32, ll0: bool) -> u32 {
+/// (mirrors libzstd's `ZSTD_updateRep`). Exposed to the encoder
+/// (`encode::lz`) so the match finder evolves `rep` in exact lockstep with the
+/// decoder when it emits repeat-offset codes.
+pub(crate) fn resolve_offset(rep: &mut [u32; 3], offset_value: u32, ll0: bool) -> u32 {
     if offset_value > 3 {
         rep[2] = rep[1];
         rep[1] = rep[0];

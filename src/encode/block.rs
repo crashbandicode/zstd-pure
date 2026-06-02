@@ -69,14 +69,18 @@ pub fn write_huffman_literals_block(out: &mut Vec<u8>, last: bool, literals: &[u
 
 /// Write one fully compressed block: LZ-parse `block`, emit a literals section
 /// (raw or Huffman, whichever is smaller) + a predefined-table sequences
-/// section. `max_offset` bounds back-references to the frame window.
+/// section. `max_offset` bounds back-references to the frame window. `rep`
+/// carries the running repeat offsets and is updated by the parse; the caller
+/// must only commit that update if this compressed block is actually used (see
+/// [`super::frame::compress`]).
 pub fn write_compressed_block(
     out: &mut Vec<u8>,
     last: bool,
     block: &[u8],
     max_offset: usize,
+    rep: &mut [u32; 3],
 ) -> Result<()> {
-    let (seqs, literals) = super::lz::fast_parse(block, max_offset);
+    let (seqs, literals) = super::lz::fast_parse(block, max_offset, rep);
     let mut body = Vec::with_capacity(block.len() / 2 + 16);
     super::huff::write_literals_auto(&mut body, &literals);
     super::sequences::write_sequences_predefined(&mut body, &seqs)?;

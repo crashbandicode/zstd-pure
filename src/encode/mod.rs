@@ -169,6 +169,16 @@ mod tests {
         let big: Vec<u8> = (0..300_000u32)
             .map(|i| (i.wrapping_mul(2654435761) >> 16) as u8)
             .collect();
+        // Fixed-stride recurring token + changing interstitial bytes: a
+        // repeat-offset stress case, sized past one block to exercise the
+        // cross-block `rep` threading. ~360 KiB.
+        let rep_structured: Vec<u8> = (0..30_000u32)
+            .flat_map(|i| {
+                let mut u = b"MARKER__".to_vec();
+                u.extend_from_slice(&i.to_le_bytes());
+                u
+            })
+            .collect();
         let cases: Vec<Vec<u8>> = vec![
             vec![],
             vec![0u8],
@@ -176,6 +186,7 @@ mod tests {
             b"abcabcabcabcabcabcabc".to_vec(),
             vec![0x55; 200_000], // long run -> offset-1 matches, multi-block
             text,
+            rep_structured, // repeat-offset codes across block boundaries
             skewed(50_000, 64, 7),
             big, // mostly incompressible -> store blocks
         ];

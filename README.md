@@ -33,7 +33,8 @@ TotK BFRES frames (themselves standard magicless zstd).
 - [x] Frame + block writer — store mode (raw/RLE) + Huffman-literals compressed block, magicless — **T2.2 / T2.1a** (real sequences land with T2.3)
 - [x] Sequence-section encoder (3-state interleaved FSE, predefined tables) — **T2.3**
 - [x] Match finder — `fast` strategy + full compressed-block assembly + `compress(data, level)` — **T2.3** (dfast/lazy/btopt + per-block FSE tables are ratio follow-ups)
-- [ ] Stronger strategies (dfast/lazy/btopt) + per-block FSE sequence tables + repeat offsets — T2.3 (ratio)
+- [x] Repeat-offset codes in the `fast` finder (offset_value 1–3, cross-block `rep` threading) — **T2.3 (ratio)**
+- [ ] Stronger strategies (dfast/lazy/btopt) + per-block FSE sequence tables — T2.3 (ratio)
 - [ ] Long-distance matching — T2.4
 - [ ] Dictionary encode + tagged-dictionary training — T3.1
 
@@ -99,9 +100,6 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
   to the zstd level→param table so `level` actually selects a strategy.
 - **Per-block FSE sequence tables** (`sequences` table mode 2) + RLE/repeat modes
   + a real `FSE_optimalTableLog`, instead of always-predefined tables.
-- **Repeat offsets** in the match finder (the sequence encoder already emits
-  `offset_value` 1–3; the decoder's `resolve_offset` handles them — the finder
-  just needs to detect and prefer them, mirroring `ZSTD_updateRep`/`ll0`).
 - **Benchmark** (`benches/`, criterion vs the `zstd` crate) + `BENCHMARKS.md`;
   the bar is beating ruzstd/structured-zstd ratio at L3+.
 - **T2.4 LDM**, and the **T1.3 no_std** gating (deferred to crate extraction —
@@ -151,8 +149,16 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
   `encode/frame.rs::compress` per-block picks the smallest of compressed/raw/RLE.
   Acceptance met: `libzstd.decompress(compress(x))==x` and `our.decompress==x`
   across the lib tests + corpus encoder sweep.
-- **Still TODO (ratio):** repeat-offset codes in the finder (the encoder/decoder
-  already support them); stronger parses `dfast` (L2–3) → `lazy/lazy2` (L4–12) →
+- **Repeat-offset codes — DONE.** `encode/lz.rs::fast_parse` detects a found
+  match whose offset equals a running repeat offset and emits the rep code
+  (`offset_value` 1–3) instead of `offset + 3`, reusing the decoder's own
+  `resolve_offset` for the candidate test and the `rep` evolution so encode and
+  decode can't drift. `encode/frame.rs::compress` threads `rep` across blocks,
+  committing a block's evolution only when its compressed form is chosen (a
+  store block leaves `rep` untouched, as the decoder does). Verified through
+  libzstd + our decoder, incl. cross-block threading on a >128 KiB structured
+  input.
+- **Still TODO (ratio):** stronger parses `dfast` (L2–3) → `lazy/lazy2` (L4–12) →
   `btopt/btultra` (L13–22) wired to the zstd level→param table so `level`
   selects a strategy; per-block FSE sequence tables (mode 2) + RLE/repeat modes +
   `FSE_optimalTableLog`; block splitting; a ratio bench in `benches/` (criterion
