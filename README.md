@@ -301,6 +301,63 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
   (`records` 1.14× → 0.96×, `3x90k` 1.27× → 0.49×) and on near-duplicate
   `revisions` (1.41× → 1.02×); ties elsewhere, never regresses.
 
+### T2.4 Long-distance matching (LDM) — handoff (the next ratio item)
+
+**What it is.** Matches at offsets *beyond* the regular window. Our window caps at
+`window_log` 23 (8 MiB) for portability, and every match finder (chain, dfast,
+the binary tree) only sees candidates within `max_offset = 1 << window_log`. LDM
+adds a **coarse, whole-input index** that finds *long* matches at much larger
+distances (up to libzstd's 128 MiB window) — for big inputs with repeats spaced
+farther apart than the window can reach. It is **complementary to the binary-tree
+hybrid**: the tree finds far matches *within* the window (it resolved the
+near-duplicate `revisions` win once copies fit the window); LDM extends reach
+*beyond* the window, for inputs larger than ~8 MiB.
+
+**How libzstd does it** (`lib/compress/zstd_ldm.c`). A *secondary* hash table
+keyed by a long min-match (`ldmMinMatch`, default 64 B), with **one entry every
+`1 << hashRateLog` positions** — sparse, so the index over the whole input stays
+cheap. `ZSTD_ldm_generateSequences` scans the input, probes the coarse hash,
+verifies + extends candidate long matches, and emits a list of LDM sequences
+(literal gaps + long matches). Those are then handed to the normal block parser,
+which fills the gaps with its regular (chain/tree) matches and emits the LDM long
+matches as sequences with large offsets.
+
+**Integration points here.**
+- `encode::params`: enable LDM at large inputs / high levels (libzstd auto-enables
+  it for `windowLog > 27` or via `ZSTD_c_enableLongDistanceMatching`); add the LDM
+  params (`hashLog`, `minMatch` = 64, `bucketSizeLog`, `hashRateLog`).
+- **Window / conformance** — the gating decision. LDM offsets exceed 8 MiB, so the
+  frame must advertise a larger `window_log`. `params::MAX_WINDOW_LOG` is currently
+  23 (the portable cap honoring RFC 8878 §3.1.1.1.2). LDM needs it raised toward 27
+  (libzstd's default `windowLogMax`); our `StreamingDecoder` already admits up to
+  128 MiB and a stock `ZSTD_decompress` supports log 27 by default, so it stays
+  interoperable — but it's a deliberate conformance bump, so document it alongside
+  the existing window note in the Conformance section and likely gate LDM behind an
+  opt-in (don't silently widen every frame's window).
+- `encode::lz` / `encode::frame`: thread the LDM long matches into the parse. The
+  simplest design mirrors libzstd — an `LdmState` (the coarse hash) updated across
+  the input; before parsing each block, generate the LDM long matches in its range
+  and have the parser emit them, filling the gaps with the regular finder. Offsets
+  can exceed the per-block `max_offset`, so the window/offset checks must use the
+  LDM window; `encode_offset` / `of_code` already handle arbitrarily large offsets
+  (`offset + 3`, `highbit32`). `rep` threading is unchanged.
+
+**Gotchas.** Keep the coarse index sparse (insert every `1 << hashRateLog`, *not*
+every position — min-match 64 indexed densely is wasteful). Verify each LDM match
+actually reaches `minMatch` and its offset is within the advertised window. The
+**decoder needs no changes** — LDM is purely an encoder concern; the decoder
+already copies any in-window offset, and the streaming decoder's `window_log_max`
+already admits the larger window.
+
+**Verification.** Extend `examples/bench_large`'s `revisions` so matching copies
+are spaced > 8 MiB apart (beyond the window), confirm LDM shrinks it while the
+window-bounded finders can't, and round-trip both ways (libzstd with
+`ZSTD_c_enableLongDistanceMatching`, and our decoder).
+
+**Scope.** Moderate: the coarse hash + sequence generation is ~150–250 lines, the
+params + conformance-window bump are small, and injecting the LDM sequences into
+the block parse is the fiddly part.
+
 ### T1.3 no_std + alloc — DONE
 Now a standalone crate, so `cargo build --no-default-features --features alloc`
 is part of the baseline and exercises the whole codec under `no_std` (a
