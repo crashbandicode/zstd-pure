@@ -230,7 +230,8 @@ mod tests {
             heterogeneous,
         ];
         for data in &cases {
-            for &level in &[1i32, 2, 4, 6, 9, 12, 19, 22] {
+            // Levels 13/15 exercise `btlazy2` (the chain/tree hybrid lazy parse).
+            for &level in &[1i32, 2, 4, 6, 9, 12, 13, 15, 19, 22] {
                 assert_compress_roundtrips_at(data, level, level % 4 == 0);
             }
         }

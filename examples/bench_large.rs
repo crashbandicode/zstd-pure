@@ -95,7 +95,7 @@ fn main() {
         ("logs", logs()),
         ("binstruct", binstruct()),
     ];
-    for level in [19i32] {
+    for level in [13i32, 19] {
         println!("\n=== level {level} ===");
         println!("{:<11} {:>10} {:>11} {:>8} {:>11} {:>9}", "profile", "raw", "zstd_pure", "ms", "libzstd", "ratio");
         for (name, data) in &profiles {

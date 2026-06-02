@@ -56,6 +56,7 @@ libzstd, which implements RFC 8878. Notable conformance points:
 - [x] Opt price-model refinement (`btultra2` second pass): re-parse with a price model rebuilt from the first parse's *actual* literal/LL/OF/ML statistics instead of the predefined-table prior — tightens the top-level ratio on near-random record data (L19 `records` 1.32× → 1.26×, `json` 0.87× → 0.84×) — **T2.3 (ratio)**
 - [x] Block splitting: partition a block into adjacent blocks each with entropy tables fit to its own statistics, when their distributions differ enough to pay for the extra headers — a recursive midpoint split at the optimal-parse levels (L16+), threading Repeat-mode / Treeless tables across the sub-blocks and **kept only when strictly smaller** (never regresses). Stacks on the `btultra2` pass: L19 `records` 1.26× → 1.12×, `json` 0.84× → 0.80×, `3x90k` 1.07× → 1.01×, and a heterogeneous text/JSON block now beats libzstd — **T2.3 (ratio)**
 - [x] Binary-tree match finder — chain/tree **hybrid** for the optimal parse (L16+): the hash chain supplies the small-offset Pareto set and a faithful binary tree (`encode::lz::BtState`, a port of zstd's `ZSTD_insertBt*`) contributes its longest match, merged only when it's `≥ sufficient_len` (a committable long match the chain's depth bound missed). Ties the chain-opt on the small corpus (never regresses) and wins where the depth bound binds — e.g. **−16 %** on a 150-revision near-duplicate corpus (`examples/bench_large`) — **T2.3 (ratio)**
+- [x] `btlazy2` (L13–15): a lazy2 parse over the same chain/tree hybrid — the chain's recent match, substituted by the tree's longest when it's a longer `≥ target_length` match the (shallow, depth ~16) chain missed. Big wins at L13 where that depth binds: small-corpus `records` 1.14× → **0.96×**, `3x90k` 1.27× → **0.49×**, near-duplicate `revisions` 1.41× → **1.02×**; ties everything else — **T2.3 (ratio)**
 - [ ] Long-distance matching — T2.4
 - [x] Dictionary encode (`compress_with_dict`) — raw + structured/tagged: match window primed with dict content, seeded repeat offsets, dict-id frame header; verified through libzstd + our decoder, improves ratio on a many-small-files corpus — **T3.1**
 - [x] Dictionary training (`train_dictionary`) — pure-Rust greedy COVER producing a raw-content dictionary (highest-coverage shared substrings, most-valuable last); improves ratio on a many-small-files corpus, verified through libzstd + our decoder — **T3.1**
@@ -292,8 +293,13 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
   many-candidate input to surface. The remaining `records` lever is the **cost
   model** (rep-offset candidates priced with the per-cell `rep`, which the
   collect-then-DP split the `btultra2` two-pass needs can't yet supply), not the
-  match finder. Also still open: `btlazy2` (a lazy parser that would reuse
-  `BtState`).
+  match finder.
+- **`btlazy2` (L13–15) — DONE.** A lazy2 parse over the same chain/tree hybrid
+  (`bt_lazy_parse_block`): the chain's recent match, substituted by the tree's
+  longest when it's a longer `≥ target_length` match the chain missed. At L13 the
+  chain's depth is shallow (~16), so the tree adds a lot even on the small corpus
+  (`records` 1.14× → 0.96×, `3x90k` 1.27× → 0.49×) and on near-duplicate
+  `revisions` (1.41× → 1.02×); ties elsewhere, never regresses.
 
 ### T1.3 no_std + alloc — DONE
 Now a standalone crate, so `cargo build --no-default-features --features alloc`

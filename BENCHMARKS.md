@@ -33,21 +33,26 @@ block, two regimes whose entropy statistics differ: the block-splitter case).
 |  3 | 0.65× | 1.02× | 1.02× | 0.76× | 0.12× | 0.85× |
 |  6 | 0.66× | **0.97×** | 1.05× | 0.93× | 1.69× | 0.97× |
 |  9 | 0.66× | **0.97×** | 1.05× | 1.09× | 2.49× | 1.15× |
+| 13 | 1.02× | **0.96×** | 1.02× | 1.32× | **0.49×** | 1.07× |
 | 19 | 1.02× | 1.12× | 1.02× | **0.80×** | 1.01× | **0.98×** |
 
 Reading it: `level` scales ratio — `dfast` (double-hash) kicks in at L2–3, the
-chain/lazy finder at L4+, the `btopt` optimal parse at L13+, and the block
-splitter at L16+. The `records` stream goes from 1.87× of libzstd at L1 to ~1.0×
-by L3 (dfast's 8-byte hash finds the long matches the single 4-byte table
-misses); the cross-block `3x90k-chunk` collapses from 11.7 KB → 1.4 KB (L1 →
-L19), now matching libzstd; dense `json` **beats** libzstd at L19 (0.80×); and
+chain/lazy finder at L4+, the `btlazy2` chain/tree hybrid at L13–15, and the
+optimal parse + block splitter at L16+. The `records` stream goes from 1.87× of
+libzstd at L1 to ~1.0× by L3 (dfast's 8-byte hash finds the long matches the
+single 4-byte table misses), and at L13 the `btlazy2` tree drops it to 0.96×
+(beating libzstd) — the same tree collapses the cross-block `3x90k-chunk` to
+0.49× there, since L13's chain depth (~16) alone misses the far matches the tree
+reaches. The `3x90k-chunk` collapses from 11.7 KB → 1.4 KB (L1 → L19), matching
+libzstd; dense `json` **beats** libzstd at L19 (0.80×); and
 `mixed` — two regimes in one block — **beats** libzstd at L19 (0.98×) once the
 splitter gives each half its own tables. The near-random `records` soft spot at
 the top levels fell from 1.32× to 1.12× over this work: the `btultra2` second
 pass (re-pricing the optimal parse from the first parse's actual statistics) took
-it to 1.26×, then block splitting to 1.12×. It still trails a little — `records`
-is small and its matches are within the chain's depth, so the binary-tree hybrid
-(below) doesn't move it; the remaining lever there is the cost model.
+it to 1.26×, then block splitting to 1.12×. It still trails a little **at L19** —
+there the chain's depth (128) already reaches `records`'s matches, so the tree
+can't help (unlike at L13, where the shallow depth lets it); the remaining lever
+at the top is the cost model.
 
 ## Throughput (indicative)
 
@@ -115,7 +120,11 @@ The `revisions` win (**−16 %**) is the depth bound binding: with ~150 candidat
 per hash (> the chain's depth) the best match sits further back than the chain
 walks, and the tree finds it. The cost is the tree's memory + up to ~2× match
 time at L16+ (correlated with the benefit — neutral-to-faster where it only ties),
-acceptable at the max-compression tier. Why this needed a big input: the chain
+acceptable at the max-compression tier. The same hybrid backs `btlazy2` (L13–15)
+in a lazy parse; there the chain's depth is much shallower (~16), so the tree
+helps even on the small corpus (L13 `records` 1.14× → 0.96×, `3x90k` 1.27× →
+0.49×) and on near-duplicate data (`revisions` 1.41× → 1.02×). Why the L16+ tree
+needed a big input to show a win: the chain
 indexes every position, so it finds a far-back match through any *distinctive*
 4-byte window — its depth bound only hides matches whose entry hashes are
 *saturated* by recent collisions, i.e. the high-candidate-count (near-duplicate)

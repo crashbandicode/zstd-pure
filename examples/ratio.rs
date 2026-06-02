@@ -53,7 +53,7 @@ fn profiles() -> Vec<(&'static str, Vec<u8>)> {
 
 fn main() {
     let profiles = profiles();
-    for &level in &[1i32, 3, 6, 9, 19] {
+    for &level in &[1i32, 3, 6, 9, 13, 19] {
         println!("\n=== level {level} ===");
         println!("{:<13} {:>10} {:>10} {:>10} {:>9}", "profile", "raw", "zstd_pure", "libzstd", "ratio");
         for (name, data) in &profiles {

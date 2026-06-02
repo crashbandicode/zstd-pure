@@ -563,6 +563,47 @@ impl BtState {
         (best_len, best_off)
     }
 
+    /// **Read-only** longest match for `ip` — `(match_len, match_pos)`, or
+    /// `(0, 0)` if none — descending the tree built by [`Self::insert_bt1`]
+    /// without re-linking it. The lazy parser ([`bt_lazy_parse_block`]) needs to
+    /// probe `ip` and `ip+1` (its look-ahead) without inserting either, then
+    /// inserts positions in order separately; this is the query half of the
+    /// descent (same `commonLength`-bounded walk as the inserting variants).
+    fn find_longest(&self, data: &[u8], ip: usize, end: usize, max_offset: usize, nb_compares: usize) -> (usize, usize) {
+        let window_low = ip.saturating_sub(max_offset);
+        let h = hash4(read_u32(data, ip), self.hash_log);
+        let mut match_index = self.hash[h];
+        let mut common_smaller = 0usize;
+        let mut common_larger = 0usize;
+        let mut best_len = 0usize;
+        let mut best_pos = 0usize;
+        let mut nb = nb_compares;
+        while nb > 0 && match_index >= 0 && (match_index as usize) > window_low {
+            nb -= 1;
+            let mi = match_index as usize;
+            let mut ml = common_smaller.min(common_larger);
+            while ip + ml < end && data[mi + ml] == data[ip + ml] {
+                ml += 1;
+            }
+            if ml > best_len {
+                best_len = ml;
+                best_pos = mi;
+            }
+            if ip + ml == end {
+                break;
+            }
+            let match_slot = 2 * (mi & self.bt_mask);
+            if data[mi + ml] < data[ip + ml] {
+                common_smaller = ml;
+                match_index = self.bt[match_slot + 1];
+            } else {
+                common_larger = ml;
+                match_index = self.bt[match_slot];
+            }
+        }
+        (best_len, best_pos)
+    }
+
     /// Insert `curr` into the tree without collecting matches — zstd's
     /// `ZSTD_insertBt1`, used to keep the index complete over positions the parser
     /// skips (inside a committed long match). Same descent as
@@ -695,6 +736,115 @@ pub fn lazy_parse_block(
         let match_end = ip + ml;
         while inserted < match_end && inserted <= ilimit {
             state.insert(data, inserted);
+            inserted += 1;
+        }
+        ip = match_end;
+        anchor = ip;
+    }
+
+    literals.extend_from_slice(&data[anchor..end]);
+    (seqs, literals)
+}
+
+/// The match [`bt_lazy_parse_block`] uses at `ip`: the hash chain's most-recent
+/// (small-offset) match, but substituting the binary tree's longest match when
+/// it's both a **long** match (`≥ target`) and **longer** than the chain's reach.
+/// The chain's depth bound can miss the longest match on far-apart repeats; the
+/// tree finds it regardless of recency. Restricting the substitution to long
+/// matches that the chain didn't already reach keeps it net-positive (the length
+/// gain covers the tree's possibly-larger offset), and on data whose matches sit
+/// within the chain's depth the tree finds nothing longer, so it's a no-op there.
+/// `(match_len, match_pos)`, `(0, 0)` if none.
+#[allow(clippy::too_many_arguments)]
+fn bt_lazy_best(
+    chain: &ChainState,
+    tree: &BtState,
+    data: &[u8],
+    ip: usize,
+    end: usize,
+    max_offset: usize,
+    depth: usize,
+    target: usize,
+) -> (usize, usize) {
+    let (cml, cpos) = chain.find(data, ip, end, max_offset, depth);
+    let (tml, tpos) = tree.find_longest(data, ip, end, max_offset, depth);
+    if tml >= target && tml > cml {
+        (tml, tpos) // a longer long match than the chain's depth bound reached
+    } else {
+        (cml, cpos)
+    }
+}
+
+/// `btlazy2` (L13–15): a lazy2 parse (greedy with two-step look-ahead) over a
+/// **hybrid** finder — the hash chain for the recent small-offset matches that
+/// dominate, plus the binary `tree` for the occasional long match the chain's
+/// depth bound missed (see [`bt_lazy_best`]). Both structures index every
+/// position. Otherwise identical in contract to [`lazy_parse_block`].
+#[allow(clippy::too_many_arguments)]
+pub fn bt_lazy_parse_block(
+    data: &[u8],
+    range: core::ops::Range<usize>,
+    chain: &mut ChainState,
+    tree: &mut BtState,
+    max_offset: usize,
+    rep: &mut [u32; 3],
+    depth: usize,
+    target: usize,
+) -> (Vec<Seq>, Vec<u8>) {
+    let (start, end) = (range.start, range.end);
+    let mut seqs = Vec::new();
+    let mut literals = Vec::new();
+    if end < start + MIN_MATCH + 1 {
+        literals.extend_from_slice(&data[start..end]);
+        return (seqs, literals);
+    }
+    let ilimit = end - MIN_MATCH;
+    let mut anchor = start;
+    let mut ip = start;
+    let mut inserted = start; // positions [start, inserted) are in both finders
+
+    while ip <= ilimit {
+        while inserted < ip {
+            chain.insert(data, inserted);
+            tree.insert_bt1(data, inserted, end, max_offset, depth);
+            inserted += 1;
+        }
+        let (mut ml, mut mpos) = bt_lazy_best(chain, tree, data, ip, end, max_offset, depth, target);
+        if ml < MIN_MATCH {
+            ip += 1;
+            continue;
+        }
+        // lazy2: defer to a strictly-longer match up to two bytes later.
+        let mut steps = 2u32;
+        while steps > 0 && ip < ilimit {
+            while inserted <= ip {
+                chain.insert(data, inserted);
+                tree.insert_bt1(data, inserted, end, max_offset, depth);
+                inserted += 1;
+            }
+            let (ml1, mpos1) = bt_lazy_best(chain, tree, data, ip + 1, end, max_offset, depth, target);
+            if ml1 > ml {
+                ml = ml1;
+                mpos = mpos1;
+                ip += 1;
+                steps -= 1;
+            } else {
+                break;
+            }
+        }
+
+        let lit_len = ip - anchor;
+        literals.extend_from_slice(&data[anchor..ip]);
+        let offset = ip - mpos;
+        let ll0 = lit_len == 0;
+        let offset_value = encode_offset(rep, offset as u32, ll0);
+        resolve_offset(rep, offset_value, ll0);
+        seqs.push(Seq { lit_len: lit_len as u32, match_len: ml as u32, offset_value });
+
+        let match_end = ip + ml;
+        while inserted < match_end && inserted <= ilimit {
+            chain.insert(data, inserted);
+            tree.insert_bt1(data, inserted, end, max_offset, depth);
             inserted += 1;
         }
         ip = match_end;
@@ -1107,6 +1257,15 @@ pub enum Finder {
         lazy_steps: u32,
         depth: usize,
     },
+    /// `btlazy2` (L13–15): a lazy2 parse over the chain + binary-tree hybrid.
+    BtLazy {
+        state: ChainState,
+        tree: BtState,
+        depth: usize,
+        /// Match length at/above which the chain's match is kept as-is; below it,
+        /// the tree's longest match may be substituted (see [`bt_lazy_best`]).
+        target: usize,
+    },
     Opt {
         /// Hash chain — the small-offset Pareto match set.
         state: ChainState,
@@ -1138,8 +1297,14 @@ impl Finder {
                 sufficient_len: (params.target_length as usize).clamp(32, 256),
                 two_pass: matches!(params.strategy, Btultra2),
             },
+            BtLazy2 => Finder::BtLazy {
+                state: ChainState::new(params.hash_log, params.chain_log),
+                tree: BtState::new(params.hash_log, params.window_log),
+                depth: 1usize << params.search_log.min(10),
+                target: (params.target_length as usize).max(MIN_MATCH),
+            },
             strat => {
-                // Greedy / Lazy / Lazy2 / BtLazy2 (the last as plain lazy2).
+                // Greedy / Lazy / Lazy2 (the chain-only lazy parser).
                 let lazy_steps = match strat {
                     Greedy => 0,
                     Lazy => 1,
@@ -1167,6 +1332,9 @@ impl Finder {
             Finder::DFast(state) => dfast_parse_block(data, range, state, max_offset, rep),
             Finder::Chain { state, lazy_steps, depth } => {
                 lazy_parse_block(data, range, state, max_offset, rep, *lazy_steps, *depth)
+            }
+            Finder::BtLazy { state, tree, depth, target } => {
+                bt_lazy_parse_block(data, range, state, tree, max_offset, rep, *depth, *target)
             }
             Finder::Opt { state, tree, depth, sufficient_len, two_pass } => {
                 opt_parse_block(data, range, state, tree, max_offset, rep, *depth, *sufficient_len, *two_pass)
@@ -1206,7 +1374,7 @@ impl Finder {
                     p += 1;
                 }
             }
-            Finder::Opt { state, tree, depth, .. } => {
+            Finder::BtLazy { state, tree, depth, .. } | Finder::Opt { state, tree, depth, .. } => {
                 let mut p = 0;
                 while p + MIN_MATCH <= dict_len {
                     state.insert(data, p);
