@@ -203,14 +203,27 @@ pub fn compress_with_dict(
         combined.extend_from_slice(content);
         combined.extend_from_slice(data);
 
-        // Seed the repeat offsets from a structured dictionary (the decoder seeds
-        // the identical values); the entropy tables start empty, so block 1
-        // describes its own and later blocks reuse them. Seeding block 1 from a
-        // structured dict's preset tables is a follow-up.
-        let mut state = EncState {
-            rep: dict.entropy().map_or([1, 4, 8], |e| e.rep),
-            seq: super::sequences::SeqCTables::default(),
-            lit: None,
+        // Seed block 1's state from a structured dictionary: the repeat offsets,
+        // the literals Huffman table (rebuilt as an encode table), and the three
+        // sequence FSE tables (rebuilt from the dictionary's normalized counts).
+        // The decoder seeds the identical decode tables, so block 1 can warm-start
+        // via Treeless literals / Repeat-mode sequence tables — the small-file
+        // win. A raw-content dictionary carries no entropy, so it starts cold.
+        let mut state = match dict.entropy() {
+            Some(e) => EncState {
+                rep: e.rep,
+                seq: super::sequences::SeqCTables {
+                    ll: Some(super::fse::build_ctable(&e.ll_nc.0, e.ll_nc.1, e.ll_nc.2)),
+                    of: Some(super::fse::build_ctable(&e.of_nc.0, e.of_nc.1, e.of_nc.2)),
+                    ml: Some(super::fse::build_ctable(&e.ml_nc.0, e.ml_nc.1, e.ml_nc.2)),
+                },
+                lit: super::huff::code_table_from_huff(&e.huff).ok(),
+            },
+            None => EncState {
+                rep: [1, 4, 8],
+                seq: super::sequences::SeqCTables::default(),
+                lit: None,
+            },
         };
         let mut finder = super::lz::Finder::new(&params);
         finder.prime(&combined, dict_len);

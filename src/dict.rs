@@ -29,6 +29,14 @@ pub(crate) struct DictEntropy {
     pub huff: HuffTable,
     pub tables: SeqTables,
     pub rep: [u32; 3],
+    /// Normalized counts `(counts, max_symbol, table_log)` for the LL / OF / ML
+    /// FSE tables, kept so the **encoder** can rebuild the matching FSE *encode*
+    /// tables to seed a dict-primed compression's first block. A decode table
+    /// alone can't distinguish a `-1` (less-than-one) entry from a `+1`, so the
+    /// raw counts are retained.
+    pub ll_nc: (Vec<i16>, usize, u32),
+    pub of_nc: (Vec<i16>, usize, u32),
+    pub ml_nc: (Vec<i16>, usize, u32),
 }
 
 /// A parsed Zstandard dictionary, ready to prime a decode.
@@ -68,12 +76,17 @@ impl Dictionary {
         // Offset (max accuracy log 8), Match_Length (9), Literals_Length (9).
         let (hufftable, used) = huff::read_table(&bytes[p..])?;
         p += used;
-        let (of, used) = fse::read_dtable(&bytes[p..], 8)?;
-        p += used;
-        let (ml, used) = fse::read_dtable(&bytes[p..], 9)?;
-        p += used;
-        let (ll, used) = fse::read_dtable(&bytes[p..], 9)?;
-        p += used;
+        // Read the normalized counts and build the decode table from each, so we
+        // can keep the counts (for the encoder) and the decode table (for us).
+        let of_nc = fse::read_ncount(&bytes[p..], 8)?;
+        let of = fse::build_dtable(&of_nc.counts, of_nc.max_symbol, of_nc.table_log)?;
+        p += of_nc.bytes_consumed;
+        let ml_nc = fse::read_ncount(&bytes[p..], 9)?;
+        let ml = fse::build_dtable(&ml_nc.counts, ml_nc.max_symbol, ml_nc.table_log)?;
+        p += ml_nc.bytes_consumed;
+        let ll_nc = fse::read_ncount(&bytes[p..], 9)?;
+        let ll = fse::build_dtable(&ll_nc.counts, ll_nc.max_symbol, ll_nc.table_log)?;
+        p += ll_nc.bytes_consumed;
 
         // Three little-endian u32 repeat offsets (Offset_1, _2, _3).
         if bytes.len() < p + 12 {
@@ -112,6 +125,9 @@ impl Dictionary {
                     ml: Some(ml),
                 },
                 rep,
+                ll_nc: (ll_nc.counts, ll_nc.max_symbol, ll_nc.table_log),
+                of_nc: (of_nc.counts, of_nc.max_symbol, of_nc.table_log),
+                ml_nc: (ml_nc.counts, ml_nc.max_symbol, ml_nc.table_log),
             }),
         })
     }

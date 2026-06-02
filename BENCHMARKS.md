@@ -72,9 +72,14 @@ table or Huffman tree its predecessor already sent. The win is concentrated on
 small blocks and dictionary-primed small files (a large block amortizes its
 header), so the large-stream profiles above barely move.
 
+A dict-primed compression now also seeds block 1 from a structured dictionary's
+entropy tables (Treeless literals + Repeat-mode sequence tables), so a small file
+warm-starts instead of re-describing tables — the block bodies shrink, though a
+structured dict's 4-byte frame `Dictionary_ID` is a fixed per-frame cost that can
+dominate on very small files.
+
 Next ratio levers (see `README.md` handoff): a binary-tree match finder to make
 the optimal parse both faster and deeper; refining the opt price model with
-per-block statistics (libzstd's `btultra2` second pass); seeding a dict-primed
-compression's first block from the dictionary's entropy tables; block splitting.
-A future decode-speed comparison against the pure-Rust `ruzstd` decoder would
-round out the peer set.
+per-block statistics (libzstd's `btultra2` second pass); block splitting. A
+future decode-speed comparison against the pure-Rust `ruzstd` decoder would round
+out the peer set.

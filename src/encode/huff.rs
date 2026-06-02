@@ -446,6 +446,19 @@ pub fn write_literals_auto(
     table
 }
 
+/// Rebuild the encode [`CodeTable`] from a decoded Huffman table — e.g. a
+/// structured dictionary's preset literals table — so the encoder can seed a
+/// dict-primed first block and emit Treeless blocks against it. Each symbol's
+/// code length is read out of the decode table and run back through
+/// [`build_code_table`], yielding the exact inverse of `ht`.
+pub(crate) fn code_table_from_huff(ht: &huff::HuffTable) -> Result<CodeTable> {
+    let mut lengths = [0u8; 256];
+    for (&sym, &nb) in ht.symbols.iter().zip(ht.num_bits.iter()) {
+        lengths[sym as usize] = nb;
+    }
+    build_code_table(&lengths)
+}
+
 /// Write a standalone Huffman table description (the weight header) for a
 /// **structured dictionary**'s entropy section, built from the literal-byte
 /// histogram `freq`. This is the same tree description that prefixes a Huffman

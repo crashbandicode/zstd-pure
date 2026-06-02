@@ -318,7 +318,7 @@ mod tests {
 #[cfg(test)]
 mod dict_tests {
     use super::*;
-    use crate::{decompress_with_dict, Dictionary};
+    use crate::{decompress_with_dict, frame_header, Dictionary};
 
     /// Round-trip `data`, compressed with our [`compress_with_dict`] + the
     /// `dict_bytes` buffer, through BOTH libzstd (loaded with the same
@@ -484,6 +484,51 @@ mod dict_tests {
         assert!(
             with_dict < no_dict,
             "structured dict should help libzstd: {with_dict} (dict) vs {no_dict} (none)"
+        );
+    }
+
+    #[test]
+    fn structured_dict_warm_start_beats_raw_content() {
+        // Same dictionary content, two ways: structured (seeds block 1's entropy
+        // tables, so a small file warm-starts via Treeless literals + Repeat-mode
+        // sequence tables) vs raw-content (no entropy — block 1 starts cold and
+        // must describe its own tables). We use *our* trained structured dict,
+        // whose repeat offsets are [1,4,8] — the same as a raw dict — so this
+        // isolates the entropy-table seeding (a libzstd-trained dict instead
+        // tunes its repeat offsets for libzstd's parser, which would confound the
+        // comparison for our simpler encoder). With repeat offsets equal, a
+        // structured dict only *adds* options to block 1 (Treeless / Repeat on
+        // top of raw / fresh), so it can never lose and the warm-start should
+        // shrink small files.
+        let samples = small_records();
+        let dict_bytes = train_dictionary_structured(
+            &samples.iter().map(|v| v.as_slice()).collect::<Vec<_>>(),
+            8 * 1024,
+        );
+        let structured = Dictionary::parse(&dict_bytes).expect("parse structured dict");
+        assert!(structured.entropy().is_some(), "expected a structured dict");
+        let raw = Dictionary::raw(structured.content());
+
+        // Compare the frame *bodies* (blocks), not whole frames: a structured
+        // dict carries a non-zero Dictionary_ID in the frame header (a fixed
+        // per-frame cost the raw dict avoids), which on ~60-byte files would
+        // swamp the block-level warm-start. Excluding the header isolates the
+        // entropy seeding's effect on the actual block contents.
+        let mut struct_body = 0usize;
+        let mut raw_body = 0usize;
+        for s in samples.iter().take(120) {
+            let cs = compress_with_dict(s, &structured, 19, false, true);
+            let cr = compress_with_dict(s, &raw, 19, false, true);
+            // Both must round-trip through our decoder with their dictionary.
+            assert_eq!(decompress_with_dict(&cs, &structured, s.len() + 64).unwrap(), *s);
+            assert_eq!(decompress_with_dict(&cr, &raw, s.len() + 64).unwrap(), *s);
+            struct_body += cs.len() - frame_header(&cs).unwrap().header_len;
+            raw_body += cr.len() - frame_header(&cr).unwrap().header_len;
+        }
+        assert!(
+            struct_body < raw_body,
+            "structured-dict warm-start should shrink the block bodies on small files: \
+             {struct_body} (structured) vs {raw_body} (raw)"
         );
     }
 }
