@@ -37,6 +37,7 @@ libzstd, which implements RFC 8878. Notable conformance points:
 - [x] Streaming / bounded-memory sliding-window decode + `io::Read` — **T1.2** (`std` and `no_std`, via the crate's `io::Read` shim)
 - [x] `no_std` + `alloc` (behind a default `std` feature) — **T1.3**
 - [x] Robustness harness (corpus matrix + randomized never-panic + oracle) — **T1.5**
+- [x] Seekable format (zstd `contrib/seekable_format`): `compress_seekable` (independent per-chunk frames + a seek-table skippable frame) and random access — `SeekTable::parse` + `decompress_seekable_frame`, with optional per-frame `XXH64`. The archive is a conformant multi-frame stream a standard decoder reads end-to-end
 
 ### Encoder
 - [x] Huff0 literal encoder (length-limited Huffman, 1-/4-stream, direct + FSE-coded weights) — **T2.1a / T2.1b**
@@ -107,6 +108,7 @@ in [`BENCHMARKS.md`](BENCHMARKS.md).
 | `frame` | frame header + block loop + skippable + checksum + dict priming |
 | `dict` | raw-content + structured (tagged) dictionary parse |
 | `streaming` | block-by-block bounded-memory decode + `io::Read` (`StreamingDecoder`) |
+| `seekable` | seekable format (`contrib/seekable_format`): `compress_seekable` + `SeekTable` random access |
 | `io` | `Read` trait + `Error`/`ErrorKind`/`Result`: a re-export of `std::io` under `std`, a small `no_std` shim otherwise |
 | `encode` | encoder: `huff` (Huff0 literal encoder), `fse` (FSE entropy encoder), `sequences` (per-block mode-selecting sequence encoder), `lz` (fast/dfast/chain match finders + chain/tree-hybrid optimal parse with block splitting + dictionary priming), `params` (level→cparams table), `bitstream` (shared `BIT_CStream` writer), `train` (pure-Rust COVER dictionary trainer + structured/tagged finalize), `block`/`frame` writers + `compress` / `compress_with_dict` |
 

@@ -113,6 +113,7 @@ pub mod io {
     }
 }
 
+pub mod seekable;
 pub mod streaming;
 pub mod xxhash;
 
@@ -121,6 +122,7 @@ pub use encode::{
     compress, compress_huffman_literals, compress_store, compress_stored, compress_with_dict,
     train_dictionary, train_dictionary_structured,
 };
+pub use seekable::{compress_seekable, decompress_seekable_frame, SeekFrame, SeekTable};
 pub use streaming::StreamingDecoder;
 pub use error::{Result, ZstdError};
 pub use frame::{
