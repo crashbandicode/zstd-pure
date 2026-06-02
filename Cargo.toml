@@ -32,6 +32,9 @@ zstd = { version = "0.13", features = ["experimental", "zdict_builder"] }
 # criterion drives the throughput benches (`benches/compression.rs`). Lean
 # feature set: timing + cargo-bench harness, no HTML/plotters.
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+# proptest adds shrinking property tests (`tests/proptest.rs`) — a cross-platform,
+# always-on complement to the deterministic LCG sweeps in `tests/corpus.rs`.
+proptest = "1"
 
 [[bench]]
 name = "compression"

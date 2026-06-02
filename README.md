@@ -90,8 +90,12 @@ path); a `thumbv7em-none-eabi` build is the recommended CI gate.
 frame (`tests/zstd_pure_bfres.rs`, fixture-gated). For the encoder, every output
 is checked both ways — `libzstd.decompress(our_compress(x)) == x` and
 `our.decompress(our_compress(x)) == x` — across levels 1–22, the randomized
-corpus sweep, and cross-block cases. Ratio + throughput vs libzstd are tracked
-in [`BENCHMARKS.md`](BENCHMARKS.md).
+corpus sweep, and cross-block cases. A `proptest` property suite
+(`tests/proptest.rs`) adds *shrinking* coverage of the same invariants — the
+decoder never panics on arbitrary or corrupted frames, the encoder round-trips
+both ways across the level range, and the libzstd oracle — so any future
+regression lands as a minimal reproducer. Ratio + throughput vs libzstd are
+tracked in [`BENCHMARKS.md`](BENCHMARKS.md).
 
 ## Module layout
 
