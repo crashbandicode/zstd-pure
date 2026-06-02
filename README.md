@@ -52,7 +52,8 @@ libzstd, which implements RFC 8878. Notable conformance points:
 - [x] `dfast` double-hash finder (L2–3): 8-byte long + 4-byte short tables, best-of-two greedy — **T2.3 (ratio)**
 - [x] Sequence-table Repeat mode (3): cross-block per-channel FSE table reuse — `write_sequences` threads the previous compressed block's tables (`encode::block::EncState`) and reuses them (no table description) when valid + cheaper — **T2.3 (ratio)**
 - [x] Treeless literals: cross-block Huffman table reuse — `write_literals_auto` reuses the previous compressed block's table (literals block type 3, no tree description) when it can encode every byte + is cheaper, threaded via `EncState` — **T2.3 (ratio)**
-- [ ] opt price-model refinement; binary-tree match finder — T2.3 (ratio)
+- [x] Opt price-model refinement (`btultra2` second pass): re-parse with a price model rebuilt from the first parse's *actual* literal/LL/OF/ML statistics instead of the predefined-table prior — tightens the top-level ratio on near-random record data (L19 `records` 1.32× → 1.26×, `json` 0.87× → 0.84×) — **T2.3 (ratio)**
+- [ ] binary-tree match finder — T2.3 (ratio)
 - [ ] Long-distance matching — T2.4
 - [x] Dictionary encode (`compress_with_dict`) — raw + structured/tagged: match window primed with dict content, seeded repeat offsets, dict-id frame header; verified through libzstd + our decoder, improves ratio on a many-small-files corpus — **T3.1**
 - [x] Dictionary training (`train_dictionary`) — pure-Rust greedy COVER producing a raw-content dictionary (highest-coverage shared substrings, most-valuable last); improves ratio on a many-small-files corpus, verified through libzstd + our decoder — **T3.1**
@@ -123,9 +124,11 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
   `greedy`/`lazy`/`lazy2` (hash-chain, L4–12), and the `btopt`/`btultra`
   rep-aware optimal parse (L13+). `level` scales ratio: a record stream
   1.87× → 1.02× of libzstd (L1 → L3 via dfast); dense JSON now **beats** libzstd
-  at L19 (0.87×). **Remaining tuning:** a binary-tree match finder would make the
-  optimal parse both faster and deeper; the opt price model is a fixed
-  predefined-table proxy (can be ~1 % off lazy2 on near-random data).
+  at L19 (0.84×). The opt price model gained libzstd's `btultra2` second pass —
+  a re-parse priced from the first parse's *actual* literal/code statistics
+  rather than the predefined-table prior — which tightened the top-level soft
+  spot (L19 `records` 1.32× → 1.26×). **Remaining tuning:** a binary-tree match
+  finder would make the optimal parse both faster and deeper.
 - **Sequence-table Repeat mode (3) — DONE.** `write_sequences` reuses the
   previous compressed block's LL/OF/ML table (mode 3, no table description) when
   it can encode this block's codes and beats re-describing; `encode::block::EncState`
@@ -221,17 +224,23 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
   1.87× → 0.97× of libzstd, L1 → L6; a 270 KiB cross-block repeat: 7869 → 1450
   bytes, L3 → L19 ≈ libzstd). Verified across levels 1–22 through libzstd + our
   decoder, incl. a >128 KiB input.
-- **Optimal parse (`btopt`/`btultra`) — DONE.** `encode/lz.rs::opt_parse_block`:
-  a rep-aware dynamic program over a fixed-point (`log2_fp`) cost model. The chain
-  finder enumerates the Pareto match set per position (`find_matches`); the DP
-  carries per-position price + repeat-offset state + a backpointer and picks the
-  globally cheapest literal/match sequence (short-now-for-longer-later, rep
-  matches priced cheap via their tiny offset code). `depth`/`sufficient_len`
-  capped for tractability. `Finder::Opt` handles `Btopt`/`Btultra`/`Btultra2`.
-  Beats libzstd ratio on dense JSON at L19 (0.88×); verified across L1–22 through
-  libzstd + our decoder. The price model is a fixed predefined-table proxy, so it
-  can be ~1 % off lazy2 on some inputs — refining it (per-block stats, like
-  `btultra2`'s second pass) is future tuning.
+- **Optimal parse (`btopt`/`btultra`/`btultra2`) — DONE.**
+  `encode/lz.rs::opt_parse_block`: a rep-aware dynamic program over a fixed-point
+  (`log2_fp`) cost model. The chain finder enumerates the Pareto match set per
+  position (`find_matches`); the DP (`run_dp`) carries per-position price +
+  repeat-offset state + a backpointer and picks the globally cheapest
+  literal/match sequence (short-now-for-longer-later, rep matches priced cheap via
+  their tiny offset code). `depth`/`sufficient_len` capped for tractability.
+  `Finder::Opt` handles `Btopt`/`Btultra`/`Btultra2`. **`btultra2` second pass:**
+  candidate matches are collected once by walking the chain, then the DP runs
+  twice — pass 1 with the predefined-table prior (`Prices::predef`, identical to
+  the single-pass output), pass 2 (only for `Btultra2`, L19+) re-priced from pass
+  1's *actual* literal/LL/OF/ML statistics (`Prices::from_stats`), so the parse
+  optimizes against the per-block FSE tables `write_sequences` really builds. The
+  match set is unchanged between passes, so the second pass costs only another DP,
+  not another search. Beats libzstd ratio on dense JSON at L19 (0.84×) and
+  tightened the near-random `records` soft spot (1.32× → 1.26×); verified across
+  L1–22 through libzstd + our decoder.
 - **`dfast` double-hash finder — DONE.** `encode/lz.rs::dfast_parse_block` +
   `DFastState`: a `long` table keyed by an 8-byte hash (preserves long-match
   candidates the 4-byte table would overwrite) plus a `short` 4-byte table;
@@ -253,9 +262,9 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
   (full extension + complete index simultaneously) — the cap I needed for
   tractability degrades tree placement, costing `json`. A from-scratch faithful
   port (no cap, zstd's window/`btLow` handling) is the real path; budget it as
-  genuine R&D, not a quick batch. Also still open: `btlazy2`; block splitting;
-  opt price-model refinement (per-block stats / `btultra2` second pass).
-  (Sequence-table Repeat mode (3) is now done — see the Encoder checklist.)
+  genuine R&D, not a quick batch. Also still open: `btlazy2`; block splitting.
+  (Sequence-table Repeat mode (3) and the opt price-model refinement — the
+  `btultra2` second pass — are now done; see the Encoder checklist.)
 
 ### T1.3 no_std + alloc
 Deferred: `zstd_pure` is currently a *module* of the std crate

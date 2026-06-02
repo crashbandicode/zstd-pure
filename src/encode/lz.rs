@@ -560,82 +560,147 @@ struct Opt {
     rep: [u32; 3], // repeat offsets at this position along the best path
 }
 
-/// Optimal parse (`btopt`): a rep-aware dynamic program over a fixed-point cost
-/// model. At each position the chain finder enumerates candidate matches; the DP
-/// picks the globally cheapest sequence of literals and matches — so a shorter
+/// Cap on the per-position sub-length search in [`run_dp`]; lengths past this
+/// are only placed at their full value (finer placement is composed via shorter
+/// matches). Bounds the DP's inner loop on highly repetitive data.
+const MAX_SUBLEN: usize = 64;
+
+/// The literal-byte and sequence-code price tables driving the optimal DP
+/// ([`run_dp`]), in fixed-point bits (1/256). Two flavours: the static
+/// [`Prices::predef`] prior (block literal histogram + predefined FSE tables),
+/// and [`Prices::from_stats`], rebuilt from a first parse's actual statistics —
+/// libzstd's `btultra2` second pass.
+struct Prices {
+    lit: [u64; 256],
+    ll: [u64; 36],
+    ml: [u64; 53],
+    off: [u64; 32],
+}
+
+impl Prices {
+    /// Static prior. Literal cost from the block-wide byte histogram (it
+    /// overcounts matched bytes, but serves only as a relative literal-vs-match
+    /// prior); LL/OF/ML code costs from the predefined-table distributions plus
+    /// each code's extra bits (accuracy logs LL 6 / OF 5 / ML 6, matching the
+    /// decoder's `resolve_table`). This is the model the single-pass
+    /// `btopt`/`btultra` use, and the first pass of `btultra2`.
+    fn predef(block: &[u8]) -> Self {
+        let mut freq = [0u32; 256];
+        for &b in block {
+            freq[b as usize] += 1;
+        }
+        let l_total = log2_fp(block.len() as u32);
+        let mut lit = [0u64; 256];
+        for (b, p) in lit.iter_mut().enumerate() {
+            let f = freq[b].max(1);
+            *p = (l_total.saturating_sub(log2_fp(f)) as u64).max(16); // >= 1/16 bit
+        }
+        // Predefined code price: log2(table_size / norm_count) + extra bits.
+        let code_price = |count: i16, log: u32| -> u64 {
+            let c = if count <= 0 { 1u32 } else { count as u32 };
+            ((log * 256).saturating_sub(log2_fp(c))) as u64
+        };
+        let mut ll = [0u64; 36];
+        for (c, p) in ll.iter_mut().enumerate() {
+            *p = code_price(LL_DEFAULT[c], 6) + (LL_BITS[c] as u64) * 256;
+        }
+        let mut ml = [0u64; 53];
+        for (c, p) in ml.iter_mut().enumerate() {
+            *p = code_price(ML_DEFAULT[c], 6) + (ML_BITS[c] as u64) * 256;
+        }
+        let mut off = [0u64; 32];
+        for (c, p) in off.iter_mut().enumerate() {
+            let count = if c < OF_DEFAULT.len() { OF_DEFAULT[c] } else { -1 };
+            *p = code_price(count, 5) + (c as u64) * 256;
+        }
+        Prices { lit, ll, ml, off }
+    }
+
+    /// `btultra2` dynamic model: prices from the *actual* statistics of a first
+    /// parse — literal-byte frequencies over the emitted literal runs, and
+    /// LL/OF/ML-code frequencies over `seqs` — so the DP optimizes against the
+    /// per-block FSE tables `write_sequences` will really build rather than the
+    /// predefined prior. Each frequency is `+1` smoothed, so an unobserved
+    /// symbol keeps a finite (high) price (the second parse may still need it).
+    fn from_stats(block: &[u8], seqs: &[Seq]) -> Self {
+        // Literal-byte histogram from the literal runs only (not matched bytes).
+        let mut lit_freq = [0u32; 256];
+        let mut p = 0usize;
+        for s in seqs {
+            for &b in &block[p..p + s.lit_len as usize] {
+                lit_freq[b as usize] += 1;
+            }
+            p += s.lit_len as usize + s.match_len as usize;
+        }
+        for &b in &block[p..] {
+            lit_freq[b as usize] += 1; // trailing literal run
+        }
+        let lit_sum: u32 = lit_freq.iter().map(|&f| f + 1).sum();
+        let log_lit = log2_fp(lit_sum);
+        let mut lit = [0u64; 256];
+        for (b, pr) in lit.iter_mut().enumerate() {
+            *pr = (log_lit.saturating_sub(log2_fp(lit_freq[b] + 1)) as u64).max(16);
+        }
+
+        // LL/OF/ML code histograms over the emitted sequences.
+        let mut ll_freq = [0u32; 36];
+        let mut ml_freq = [0u32; 53];
+        let mut of_freq = [0u32; 32];
+        for s in seqs {
+            ll_freq[ll_code(s.lit_len)] += 1;
+            ml_freq[ml_code(s.match_len)] += 1;
+            of_freq[of_code(s.offset_value).min(31)] += 1;
+        }
+        let mut ll = [0u64; 36];
+        entropy_prices(&ll_freq, &mut ll, |c| LL_BITS[c]);
+        let mut ml = [0u64; 53];
+        entropy_prices(&ml_freq, &mut ml, |c| ML_BITS[c]);
+        let mut off = [0u64; 32];
+        entropy_prices(&of_freq, &mut off, |c| c as u32);
+
+        Prices { lit, ll, ml, off }
+    }
+}
+
+/// Fill `out[c]` with the entropy price of code `c` (in fixed-point bits) given
+/// its `+1`-smoothed observed frequency plus `extra(c)` low bits:
+/// `log2(Σ(freq+1)) - log2(freq[c]+1) + extra(c)`.
+fn entropy_prices(freq: &[u32], out: &mut [u64], extra: impl Fn(usize) -> u32) {
+    let sum: u32 = freq.iter().map(|&f| f + 1).sum();
+    let log_sum = log2_fp(sum);
+    for (c, p) in out.iter_mut().enumerate() {
+        *p = (log_sum.saturating_sub(log2_fp(freq[c] + 1)) as u64) + (extra(c) as u64) * 256;
+    }
+}
+
+/// Run the rep-aware DP over a fixed set of per-position candidate matches under
+/// `prices`, returning the cheapest full-block sequence list (forward order) and
+/// the repeat-offset state at the block end. Touches no match state — the
+/// candidates were collected once by [`opt_parse_block`] — so it can be run
+/// twice with different price models (`btultra2`'s second pass) for the cost of
+/// only another DP, not another search.
+///
+/// `match_starts` indexes `matches_flat` (a CSR-style flattening of each
+/// position's Pareto match list); `pos_long[i]` holds a committed long match
+/// `(len, offset)` greedily taken at `i` (its interior was skipped during
+/// collection). At each position the DP weighs a literal extension and every
+/// recorded match length, keeping the globally cheapest path — so a shorter
 /// match now can win when it enables a cheaper continuation, and rep matches are
-/// preferred because their offset code is tiny. `depth` bounds the chain walk;
-/// `sufficient_len` caps the per-position length search (longer matches are
-/// taken whole). Same contract as [`parse_block`] (persistent `state`,
-/// cross-block offsets, `rep` updated in decoder lockstep).
-pub fn opt_parse_block(
+/// preferred because their offset code is tiny.
+#[allow(clippy::too_many_arguments)]
+fn run_dp(
     data: &[u8],
-    range: core::ops::Range<usize>,
-    state: &mut ChainState,
-    max_offset: usize,
-    rep: &mut [u32; 3],
-    depth: usize,
-    sufficient_len: usize,
-) -> (Vec<Seq>, Vec<u8>) {
-    let (start, end) = (range.start, range.end);
-    let n = end - start;
-    let mut literals = Vec::new();
-    if n < MIN_MATCH + 1 {
-        literals.extend_from_slice(&data[start..end]);
-        return (Vec::new(), literals);
-    }
-
-    // --- price model (fixed-point 1/256 bit) ---
-    // Literal byte cost from a block-wide histogram prior (it overcounts matched
-    // bytes, but serves only as a relative literal-vs-match prior).
-    let mut freq = [0u32; 256];
-    for &b in &data[start..end] {
-        freq[b as usize] += 1;
-    }
-    let l_total = log2_fp(n as u32);
-    let lit_price = |b: u8| -> u64 {
-        let f = freq[b as usize].max(1);
-        (l_total.saturating_sub(log2_fp(f)) as u64).max(16) // >= 1/16 bit
-    };
-    // Sequence-code prices from the predefined tables (a fixed prior; the actual
-    // encoding re-picks tables in `write_sequences`). Predefined accuracy logs:
-    // LL 6 / OF 5 / ML 6, matching the decoder's `resolve_table`.
-    let code_price = |count: i16, log: u32| -> u64 {
-        let c = if count <= 0 { 1u32 } else { count as u32 };
-        ((log * 256).saturating_sub(log2_fp(c))) as u64
-    };
-    let mut ll_price = [0u64; 36];
-    for (c, p) in ll_price.iter_mut().enumerate() {
-        *p = code_price(LL_DEFAULT[c], 6) + (LL_BITS[c] as u64) * 256;
-    }
-    let mut ml_price = [0u64; 53];
-    for (c, p) in ml_price.iter_mut().enumerate() {
-        *p = code_price(ML_DEFAULT[c], 6) + (ML_BITS[c] as u64) * 256;
-    }
-    let mut off_price = [0u64; 32];
-    for (c, p) in off_price.iter_mut().enumerate() {
-        let count = if c < OF_DEFAULT.len() { OF_DEFAULT[c] } else { -1 };
-        *p = code_price(count, 5) + (c as u64) * 256;
-    }
-
+    start: usize,
+    n: usize,
+    prices: &Prices,
+    match_starts: &[u32],
+    matches_flat: &[(u32, u32)],
+    pos_long: &[Option<(u32, u32)>],
+    init_rep: [u32; 3],
+) -> (Vec<Seq>, [u32; 3]) {
     let big = u64::MAX / 4;
     let mut opt = vec![Opt { price: big, mlen: 0, litlen: 0, offval: 0, rep: [0; 3] }; n + 1];
-    opt[0] = Opt { price: 0, mlen: 0, litlen: 0, offval: 0, rep: *rep };
-
-    let suff = sufficient_len.max(MIN_MATCH);
-    // Search cap for the chain walk: large enough that `find_matches` keeps
-    // looking past a merely-`suff`-long candidate for the genuinely longest
-    // match (the chosen one is then extended fully), but bounded so repetitive
-    // data — where the first candidate blows past it — stays cheap.
-    let find_cap = suff.max(512);
-    // Cap the per-position sub-length search; lengths past this are only placed
-    // at their full value (composed via shorter matches when finer is needed).
-    const MAX_SUBLEN: usize = 64;
-    let mut matches: Vec<(u32, u32)> = Vec::new();
-    let mut inserted = start;
-    // Positions before `skip_until` lie inside a committed long match — index
-    // them but don't search (this is what keeps repetitive data O(n)).
-    let mut skip_until = start;
+    opt[0] = Opt { price: 0, mlen: 0, litlen: 0, offval: 0, rep: init_rep };
 
     for i in 0..n {
         let base = opt[i].price;
@@ -645,67 +710,33 @@ pub fn opt_parse_block(
         // closing match adds no further ll cost; opening a run pays the ll code
         // for length 1, growing it pays the delta.
         let ll_add = if pend == 0 {
-            ll_price[ll_code(1)]
+            prices.ll[ll_code(1)]
         } else {
-            ll_price[ll_code(pend as u32 + 1)].saturating_sub(ll_price[ll_code(pend as u32)])
+            prices.ll[ll_code(pend as u32 + 1)].saturating_sub(prices.ll[ll_code(pend as u32)])
         };
-        let cand = base + lit_price(data[start + i]) + ll_add;
+        let cand = base + prices.lit[data[start + i] as usize] + ll_add;
         if cand < opt[i + 1].price {
             opt[i + 1] = Opt { price: cand, mlen: 0, litlen: pend as u32 + 1, offval: 0, rep: opt[i].rep };
         }
 
-        let ap = start + i;
-        if ap + MIN_MATCH > end {
-            continue;
-        }
-        // Index every position strictly before `ap` so the search sees only
-        // earlier positions — never `ap` itself, which would be an offset-0
-        // self-match. (`ap` is indexed *after* the search below.)
-        while inserted < ap {
-            state.insert(data, inserted);
-            inserted += 1;
-        }
-        if ap < skip_until {
-            // inside a committed long match — index `ap` and move on.
-            if inserted == ap {
-                state.insert(data, ap);
-                inserted = ap + 1;
-            }
-            continue;
-        }
-
-        state.find_matches(data, ap..end, max_offset, depth, find_cap, &mut matches);
-        if inserted == ap {
-            state.insert(data, ap);
-            inserted = ap + 1;
-        }
-        let best = match matches.last() {
-            Some(&b) => b,
-            None => continue,
-        };
         let ll0 = pend == 0;
         // ll code is pre-paid for pend>0; a zero-literal match still owes the ll
         // code for length 0.
-        let ll_owed = if pend == 0 { ll_price[ll_code(0)] } else { 0 };
+        let ll_owed = if pend == 0 { prices.ll[ll_code(0)] } else { 0 };
 
-        // If the longest match hit the search cap it may be far longer — extend
-        // it fully and, if it's "sufficient", commit it whole and skip ahead.
-        let (best_len, best_off) = best;
-        let mut long_len = best_len as usize;
-        if long_len >= suff {
-            long_len = state.extend_full(data, ap, ap - best_off as usize, end);
-        }
-        if long_len >= suff {
+        // A long match committed at this position during collection: place it
+        // whole (its interior was skipped, so there are no short candidates).
+        if let Some((long_len, best_off)) = pos_long[i] {
+            let long_len = long_len as usize;
             let offval = encode_offset(&opt[i].rep, best_off, ll0);
-            let ocost = off_price[of_code(offval).min(31)];
+            let ocost = prices.off[of_code(offval).min(31)];
             let mut new_rep = opt[i].rep;
             resolve_offset(&mut new_rep, offval, ll0);
             let j = i + long_len;
-            let price = base + ll_owed + ocost + ml_price[ml_code(long_len as u32)];
+            let price = base + ll_owed + ocost + prices.ml[ml_code(long_len as u32)];
             if price < opt[j].price {
                 opt[j] = Opt { price, mlen: long_len as u32, litlen: pend as u32, offval, rep: new_rep };
             }
-            skip_until = ap + long_len;
             continue;
         }
 
@@ -713,23 +744,23 @@ pub fn opt_parse_block(
         // parse earns its keep. Each length is provided most cheaply by the
         // first Pareto entry reaching it, so cover only (prev_len, len_k].
         let mut prev_len = MIN_MATCH - 1;
-        for &(len_k, off_k) in &matches {
+        for &(len_k, off_k) in &matches_flat[match_starts[i] as usize..match_starts[i + 1] as usize] {
             let len_k = len_k as usize;
             let offval = encode_offset(&opt[i].rep, off_k, ll0);
-            let ocost = off_price[of_code(offval).min(31)];
+            let ocost = prices.off[of_code(offval).min(31)];
             let mut new_rep = opt[i].rep;
             resolve_offset(&mut new_rep, offval, ll0);
             let hi = len_k.min(MAX_SUBLEN);
             for l in (prev_len + 1).max(MIN_MATCH)..=hi {
                 let j = i + l;
-                let price = base + ll_owed + ocost + ml_price[ml_code(l as u32)];
+                let price = base + ll_owed + ocost + prices.ml[ml_code(l as u32)];
                 if price < opt[j].price {
                     opt[j] = Opt { price, mlen: l as u32, litlen: pend as u32, offval, rep: new_rep };
                 }
             }
             if len_k > MAX_SUBLEN {
                 let j = i + len_k;
-                let price = base + ll_owed + ocost + ml_price[ml_code(len_k as u32)];
+                let price = base + ll_owed + ocost + prices.ml[ml_code(len_k as u32)];
                 if price < opt[j].price {
                     opt[j] = Opt { price, mlen: len_k as u32, litlen: pend as u32, offval, rep: new_rep };
                 }
@@ -753,6 +784,118 @@ pub fn opt_parse_block(
         pos -= m + ll;
     }
     seqs.reverse();
+    (seqs, opt[n].rep)
+}
+
+/// Optimal parse (`btopt`/`btultra`/`btultra2`): a rep-aware dynamic program over
+/// a fixed-point cost model. Candidate matches are collected once by walking the
+/// chain finder, then [`run_dp`] picks the globally cheapest literal/match
+/// sequence. `depth` bounds the chain walk; `sufficient_len` caps the
+/// per-position length search (longer matches are taken whole). When `two_pass`
+/// (the `btultra2` strategy), a second DP re-parses with a price model rebuilt
+/// from the first parse's actual statistics ([`Prices::from_stats`]) — the
+/// candidates are unchanged, so only the DP repeats. Same contract as
+/// [`parse_block`] (persistent `state`, cross-block offsets, `rep` updated in
+/// decoder lockstep).
+#[allow(clippy::too_many_arguments)]
+pub fn opt_parse_block(
+    data: &[u8],
+    range: core::ops::Range<usize>,
+    state: &mut ChainState,
+    max_offset: usize,
+    rep: &mut [u32; 3],
+    depth: usize,
+    sufficient_len: usize,
+    two_pass: bool,
+) -> (Vec<Seq>, Vec<u8>) {
+    let (start, end) = (range.start, range.end);
+    let n = end - start;
+    let mut literals = Vec::new();
+    if n < MIN_MATCH + 1 {
+        literals.extend_from_slice(&data[start..end]);
+        return (Vec::new(), literals);
+    }
+
+    let suff = sufficient_len.max(MIN_MATCH);
+    // Search cap for the chain walk: large enough that `find_matches` keeps
+    // looking past a merely-`suff`-long candidate for the genuinely longest
+    // match (the chosen one is then extended fully), but bounded so repetitive
+    // data — where the first candidate blows past it — stays cheap.
+    let find_cap = suff.max(512);
+
+    // --- match-collection pass: walk the chain once, recording each position's
+    // candidate matches (CSR-flattened), any committed long match, and the skip
+    // regions inside long matches. The DP(s) below read these without touching
+    // the chain, so the second `btultra2` pass costs only another DP. ---
+    let mut matches_flat: Vec<(u32, u32)> = Vec::new();
+    let mut match_starts: Vec<u32> = vec![0u32; n + 1];
+    let mut pos_long: Vec<Option<(u32, u32)>> = vec![None; n];
+    let mut scratch: Vec<(u32, u32)> = Vec::new();
+    let mut inserted = start;
+    // Positions before `skip_until` lie inside a committed long match — index
+    // them but don't search (this is what keeps repetitive data O(n)).
+    let mut skip_until = start;
+
+    for i in 0..n {
+        match_starts[i] = matches_flat.len() as u32;
+        let ap = start + i;
+        if ap + MIN_MATCH > end {
+            continue;
+        }
+        // Index every position strictly before `ap` so the search sees only
+        // earlier positions — never `ap` itself, which would be an offset-0
+        // self-match. (`ap` is indexed *after* the search below.)
+        while inserted < ap {
+            state.insert(data, inserted);
+            inserted += 1;
+        }
+        if ap < skip_until {
+            // inside a committed long match — index `ap` and move on.
+            if inserted == ap {
+                state.insert(data, ap);
+                inserted = ap + 1;
+            }
+            continue;
+        }
+
+        state.find_matches(data, ap..end, max_offset, depth, find_cap, &mut scratch);
+        if inserted == ap {
+            state.insert(data, ap);
+            inserted = ap + 1;
+        }
+        let best = match scratch.last() {
+            Some(&b) => b,
+            None => continue,
+        };
+
+        // If the longest match hit the search cap it may be far longer — extend
+        // it fully and, if it's "sufficient", commit it whole and skip ahead.
+        let (best_len, best_off) = best;
+        let mut long_len = best_len as usize;
+        if long_len >= suff {
+            long_len = state.extend_full(data, ap, ap - best_off as usize, end);
+        }
+        if long_len >= suff {
+            pos_long[i] = Some((long_len as u32, best_off));
+            skip_until = ap + long_len;
+            continue;
+        }
+
+        matches_flat.extend_from_slice(&scratch);
+    }
+    match_starts[n] = matches_flat.len() as u32;
+
+    // --- DP pass 1 (static prior). Identical to the single-pass output. ---
+    let prices1 = Prices::predef(&data[start..end]);
+    let (seqs1, rep1) = run_dp(data, start, n, &prices1, &match_starts, &matches_flat, &pos_long, *rep);
+
+    // --- DP pass 2 (`btultra2`): re-parse against the actual statistics. ---
+    let (seqs, final_rep) = if two_pass {
+        let prices2 = Prices::from_stats(&data[start..end], &seqs1);
+        run_dp(data, start, n, &prices2, &match_starts, &matches_flat, &pos_long, *rep)
+    } else {
+        (seqs1, rep1)
+    };
 
     // Materialize literals and commit the post-block repeat-offset state.
     let mut p = start;
@@ -761,7 +904,7 @@ pub fn opt_parse_block(
         p += s.lit_len as usize + s.match_len as usize;
     }
     literals.extend_from_slice(&data[p..end]);
-    *rep = opt[n].rep;
+    *rep = final_rep;
     (seqs, literals)
 }
 
@@ -781,6 +924,9 @@ pub enum Finder {
         state: ChainState,
         depth: usize,
         sufficient_len: usize,
+        /// `btultra2`: re-parse with a price model rebuilt from the first
+        /// parse's actual statistics (see [`opt_parse_block`]).
+        two_pass: bool,
     },
 }
 
@@ -799,6 +945,7 @@ impl Finder {
                 // their interior, so this depth only governs short-match regions.
                 depth: (1usize << params.search_log.min(7)).min(128),
                 sufficient_len: (params.target_length as usize).clamp(32, 256),
+                two_pass: matches!(params.strategy, Btultra2),
             },
             strat => {
                 // Greedy / Lazy / Lazy2 / BtLazy2 (the last as plain lazy2).
@@ -830,8 +977,8 @@ impl Finder {
             Finder::Chain { state, lazy_steps, depth } => {
                 lazy_parse_block(data, range, state, max_offset, rep, *lazy_steps, *depth)
             }
-            Finder::Opt { state, depth, sufficient_len } => {
-                opt_parse_block(data, range, state, max_offset, rep, *depth, *sufficient_len)
+            Finder::Opt { state, depth, sufficient_len, two_pass } => {
+                opt_parse_block(data, range, state, max_offset, rep, *depth, *sufficient_len, *two_pass)
             }
         }
     }
@@ -921,6 +1068,45 @@ mod tests {
             assert_eq!(out, data, "rep-coded parse must reconstruct the input");
             // The finder's running rep must match the decoder's after replay.
             assert_eq!(rep, drep, "encoder/decoder repeat-offset state diverged");
+        }
+    }
+
+    /// The optimal parse must round-trip through the decoder — with its
+    /// repeat-offset state intact — in *both* the single-pass (`btopt`/`btultra`)
+    /// and the two-pass (`btultra2`) modes. The second pass only re-prices the DP
+    /// from the first parse's actual statistics, so it must not break the
+    /// encode/decode contract regardless of the parse it lands on. The input
+    /// mixes a repeating token (exercising repeat-offset codes) with
+    /// pseudo-random bytes (a skewed code distribution — where the second pass
+    /// earns its keep).
+    #[test]
+    fn opt_parse_round_trips_in_both_pass_modes() {
+        let mut data = rep_heavy_input();
+        let mut s = 0x2468_ace0_1357_9bdfu64;
+        for _ in 0..4000 {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            data.push((s >> 33) as u8);
+        }
+        for two_pass in [false, true] {
+            let mut state = ChainState::new(18, 18);
+            let mut rep = [1u32, 4, 8];
+            let (seqs, literals) =
+                opt_parse_block(&data, 0..data.len(), &mut state, 1 << 20, &mut rep, 64, 64, two_pass);
+
+            let mut section = Vec::new();
+            super::super::sequences::write_sequences(
+                &mut section,
+                &seqs,
+                &super::super::sequences::SeqCTables::default(),
+            )
+            .unwrap();
+
+            let mut out = Vec::new();
+            let mut tables = SeqTables::default();
+            let mut drep = [1u32, 4, 8];
+            decode(&section, &literals, &mut out, &mut tables, &mut drep).unwrap();
+            assert_eq!(out, data, "two_pass={two_pass}: opt parse must reconstruct the input");
+            assert_eq!(rep, drep, "two_pass={two_pass}: encoder/decoder rep-offset state diverged");
         }
     }
 }

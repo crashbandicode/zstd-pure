@@ -30,7 +30,7 @@ incompressible chunk, so only cross-block matching can shrink copies 2–3).
 |  3 | 0.66× | 1.02× | 1.02× | 0.76× | 0.12× |
 |  6 | 0.66× | **0.97×** | 1.05× | 0.93× | 1.69× |
 |  9 | 0.66× | **0.97×** | 1.05× | 1.09× | 2.50× |
-| 19 | 1.02× | 1.32× | 1.02× | **0.87×** | 1.08× |
+| 19 | 1.02× | 1.26× | 1.02× | **0.84×** | 1.07× |
 
 Reading it: `level` scales ratio — `dfast` (double-hash) kicks in at L2–3, the
 chain/lazy finder at L4+, and the `btopt` optimal parse at L13+. The `records`
@@ -38,9 +38,10 @@ stream goes from 1.87× of libzstd at L1 to ~1.0× by L3 (dfast's 8-byte hash fi
 the long matches the single 4-byte table misses); the cross-block `3x90k-chunk`
 collapses from 11.7 KB → 1.5 KB (L1 → L19), within ~8 % of libzstd; and dense
 `json` — our worst high-level case before the optimal parse — now **beats**
-libzstd at L19 (0.87×). The remaining soft spot is `records` at the very top
-levels (~1.3×): the opt price model is a fixed predefined-table proxy, so it
-leaves a little on near-random data.
+libzstd at L19 (0.84×). The near-random `records` soft spot at the top levels
+tightened from 1.32× to 1.26× with the `btultra2` second pass (re-pricing the
+optimal parse from the first parse's actual statistics); it still trails a
+little, the last gap to libzstd's match finding.
 
 ## Throughput (indicative)
 
@@ -62,9 +63,10 @@ would widen libzstd's lead — a binary-tree match finder is the way to close it
 ## Standing & next levers
 
 - **Strong:** redundant / repeating / cross-block data (often ≤ libzstd); dense
-  structured data at L19 (`json` 0.87×) after the optimal parse.
+  structured data at L19 (`json` 0.84×) after the optimal parse.
 - **Competitive:** mid levels on mixed data after the lazy finder (L6–L9).
-- **Soft spots:** near-random record data at the top levels (~1.3×).
+- **Soft spots:** near-random record data at the top levels (~1.26× at L19,
+  down from 1.32× with the `btultra2` second pass).
 
 Cross-block entropy-table reuse is now implemented — sequence-table Repeat mode
 (3) and treeless literals (block type 3) — so a block no longer re-describes a
@@ -78,8 +80,11 @@ warm-starts instead of re-describing tables — the block bodies shrink, though 
 structured dict's 4-byte frame `Dictionary_ID` is a fixed per-frame cost that can
 dominate on very small files.
 
+The opt price model now does libzstd's `btultra2` second pass — a re-parse
+priced from the first parse's actual literal/code statistics — which is what
+narrowed the `records` gap above; the predefined-prior parse remains the single
+pass for `btopt`/`btultra` (L13–18).
+
 Next ratio levers (see `README.md` handoff): a binary-tree match finder to make
-the optimal parse both faster and deeper; refining the opt price model with
-per-block statistics (libzstd's `btultra2` second pass); block splitting. A
-future decode-speed comparison against the pure-Rust `ruzstd` decoder would round
-out the peer set.
+the optimal parse both faster and deeper; block splitting. A future decode-speed
+comparison against the pure-Rust `ruzstd` decoder would round out the peer set.
