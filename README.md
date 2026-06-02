@@ -110,6 +110,15 @@ content) that ours rejects, as libzstd's own one-shot API does. Run with
 `cargo +nightly fuzz run <target>`, seeding `fuzz/corpus/<target>/` with real
 frames for depth.
 
+A fixture-gated corpus test (`tests/real_corpus.rs`, `#[ignore]`) walks a
+directory of real files named by `$ZSTD_PURE_CORPUS` and round-trips each one
+*both ways* across a few levels — our encode → our + libzstd decode, and libzstd
+encode → our decode — tracking the aggregate ratio. It stays offline by default
+(plain `cargo test` skips it). Point it at the Silesia corpus or the TotK BFRES
+production data, e.g. `ZSTD_PURE_CORPUS=~/fixtures/silesia cargo test --release
+real_corpus -- --ignored --nocapture` (knobs: `ZSTD_PURE_CORPUS_LEVELS`,
+`ZSTD_PURE_CORPUS_MAX_MB`).
+
 Ratio + throughput vs libzstd are tracked in [`BENCHMARKS.md`](BENCHMARKS.md).
 
 ## Module layout
