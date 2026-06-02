@@ -28,6 +28,10 @@ const DEFAULT_HASH_LOG: u32 = 17;
 /// caps the allocation at `1 << 22` entries (16 MiB) for very high levels.
 const MIN_HASH_LOG: u32 = 6;
 const MAX_HASH_LOG: u32 = 22;
+/// Ceiling for the binary tree's log (its position index covers `1 << log`); the
+/// tree must span the window, whose log the param table caps at 23 (8 MiB), so
+/// the tree allocation (`2 << MAX_BT_LOG` i32s) tops out at 64 MiB.
+const MAX_BT_LOG: u32 = 23;
 
 #[inline]
 fn read_u32(data: &[u8], p: usize) -> u32 {
@@ -453,6 +457,170 @@ impl ChainState {
     }
 }
 
+/// Cap on `insert_bt1`'s match extension. The insert-only path runs for every
+/// position inside a committed long match; on periodic data a faithful
+/// (uncapped) extension would re-scan the whole run per position — O(n²). Capping
+/// it bounds that work. It only affects *tree placement* of positions whose
+/// match exceeds the cap (long-match / periodic regions); the **search** path
+/// ([`BtState::insert_and_get_matches`]) is uncapped, so the longest matches the
+/// hybrid actually relies on stay exact. Generous enough to place any realistic
+/// medium match precisely.
+const BT_INSERT_CAP: usize = 1024;
+
+/// Faithful binary-tree match finder (a port of zstd's `ZSTD_insertBt*`): a hash
+/// head table plus a binary tree over the window, keyed by suffix order. Unlike
+/// the hash chain's depth-bounded *recency* search, a descent finds the longest
+/// match regardless of how long ago it occurred — the [hybrid](opt_parse_block)
+/// uses it for exactly that long-range reach, layered on the chain's
+/// small-offset matches. Persistent across a frame's blocks, like [`ChainState`].
+///
+/// `bt` holds two child slots per windowed position — `bt[2*(p & bt_mask)]` is
+/// `p`'s *smaller*-suffix child, `+1` its *larger*. The tree is sized to span the
+/// window (`bt_mask + 1 >= window`), and traversal stops at `window_low`, so two
+/// simultaneously-live positions never alias the same slots.
+pub struct BtState {
+    hash: Vec<i32>, // most-recent position per hash (head), -1 = empty
+    bt: Vec<i32>,   // 2 slots per (pos & bt_mask): [smaller-child, larger-child]
+    hash_log: u32,
+    bt_mask: usize,
+}
+
+impl BtState {
+    /// Allocate empty hash + tree tables. The tree is sized to `window_log` (the
+    /// frame's already-`src_size`-adjusted window) so live positions don't alias.
+    pub fn new(hash_log: u32, window_log: u32) -> Self {
+        let hash_log = hash_log.clamp(MIN_HASH_LOG, MAX_HASH_LOG);
+        let bt_log = window_log.clamp(MIN_HASH_LOG, MAX_BT_LOG);
+        BtState {
+            hash: vec![-1i32; 1usize << hash_log],
+            bt: vec![-1i32; 2usize << bt_log],
+            hash_log,
+            bt_mask: (1usize << bt_log) - 1,
+        }
+    }
+
+    /// Insert `curr` into the tree **and** return its longest match `(len,
+    /// offset)` (`len < MIN_MATCH` ⇒ none) — zstd's `ZSTD_insertBtAndGetAllMatches`
+    /// reduced to the longest (the hybrid only needs the long-range reach; the
+    /// chain supplies the short/medium Pareto set). Descends from the hash head,
+    /// extending each candidate from the known common prefix (`min(common_smaller,
+    /// common_larger)`, which only grows down a branch — the trick that keeps the
+    /// amortized cost near O(n log n) without a cap), tracking the longest, and
+    /// re-linking the tree so `curr` is inserted in suffix order. Extension is
+    /// **uncapped**.
+    fn insert_and_get_longest(
+        &mut self,
+        data: &[u8],
+        curr: usize,
+        end: usize,
+        max_offset: usize,
+        nb_compares: usize,
+    ) -> (usize, usize) {
+        let window_low = curr.saturating_sub(max_offset);
+        let h = hash4(read_u32(data, curr), self.hash_log);
+        let mut match_index = self.hash[h];
+        self.hash[h] = curr as i32;
+
+        let curr_slot = 2 * (curr & self.bt_mask);
+        let mut smaller_ptr = curr_slot;
+        let mut larger_ptr = curr_slot + 1;
+        let mut common_smaller = 0usize;
+        let mut common_larger = 0usize;
+        let mut best_len = 0usize;
+        let mut best_off = 0usize;
+        let mut nb = nb_compares;
+
+        while nb > 0 && match_index >= 0 && (match_index as usize) > window_low {
+            nb -= 1;
+            let mi = match_index as usize;
+            let mut ml = common_smaller.min(common_larger);
+            while curr + ml < end && data[mi + ml] == data[curr + ml] {
+                ml += 1;
+            }
+            if ml > best_len {
+                best_len = ml;
+                best_off = curr - mi;
+            }
+            if curr + ml == end {
+                // Equal so far → can't pick a side; leave `curr`'s subtree empty.
+                break;
+            }
+            let match_slot = 2 * (mi & self.bt_mask);
+            if data[mi + ml] < data[curr + ml] {
+                self.bt[smaller_ptr] = match_index;
+                common_smaller = ml;
+                smaller_ptr = match_slot + 1;
+                match_index = self.bt[match_slot + 1];
+            } else {
+                self.bt[larger_ptr] = match_index;
+                common_larger = ml;
+                larger_ptr = match_slot;
+                match_index = self.bt[match_slot];
+            }
+        }
+        self.bt[smaller_ptr] = -1;
+        self.bt[larger_ptr] = -1;
+        (best_len, best_off)
+    }
+
+    /// Insert `curr` into the tree without collecting matches — zstd's
+    /// `ZSTD_insertBt1`, used to keep the index complete over positions the parser
+    /// skips (inside a committed long match). Same descent as
+    /// [`Self::insert_and_get_longest`] but **caps** the extension at
+    /// [`BT_INSERT_CAP`] to bound the per-position cost on periodic data.
+    fn insert_bt1(&mut self, data: &[u8], curr: usize, end: usize, max_offset: usize, nb_compares: usize) {
+        let window_low = curr.saturating_sub(max_offset);
+        let ext_end = (curr + BT_INSERT_CAP).min(end);
+        let h = hash4(read_u32(data, curr), self.hash_log);
+        let mut match_index = self.hash[h];
+        self.hash[h] = curr as i32;
+
+        let curr_slot = 2 * (curr & self.bt_mask);
+        let mut smaller_ptr = curr_slot;
+        let mut larger_ptr = curr_slot + 1;
+        let mut common_smaller = 0usize;
+        let mut common_larger = 0usize;
+        let mut nb = nb_compares;
+
+        while nb > 0 && match_index >= 0 && (match_index as usize) > window_low {
+            nb -= 1;
+            let mi = match_index as usize;
+            let mut ml = common_smaller.min(common_larger);
+            while curr + ml < ext_end && data[mi + ml] == data[curr + ml] {
+                ml += 1;
+            }
+            if curr + ml == end || curr + ml == ext_end {
+                break;
+            }
+            let match_slot = 2 * (mi & self.bt_mask);
+            if data[mi + ml] < data[curr + ml] {
+                self.bt[smaller_ptr] = match_index;
+                common_smaller = ml;
+                smaller_ptr = match_slot + 1;
+                match_index = self.bt[match_slot + 1];
+            } else {
+                self.bt[larger_ptr] = match_index;
+                common_larger = ml;
+                larger_ptr = match_slot;
+                match_index = self.bt[match_slot];
+            }
+        }
+        self.bt[smaller_ptr] = -1;
+        self.bt[larger_ptr] = -1;
+    }
+
+    /// Prime the tree with the `dict_len` dictionary positions at the front of
+    /// `data`, so input back-references can reach into the dictionary (insert-only,
+    /// like the chain finder's dictionary priming).
+    fn prime(&mut self, data: &[u8], dict_len: usize, max_offset: usize, nb_compares: usize) {
+        let mut p = 0;
+        while p + MIN_MATCH <= dict_len {
+            self.insert_bt1(data, p, dict_len, max_offset, nb_compares);
+            p += 1;
+        }
+    }
+}
+
 /// Parse `data[range]` with the hash-chain finder, `lazy_steps` of lazy
 /// look-ahead (0 = greedy, 1 = lazy, 2 = lazy2) and a per-position chain `depth`.
 /// Otherwise identical in contract to [`parse_block`] (persistent `state`,
@@ -788,20 +956,23 @@ fn run_dp(
 }
 
 /// Optimal parse (`btopt`/`btultra`/`btultra2`): a rep-aware dynamic program over
-/// a fixed-point cost model. Candidate matches are collected once by walking the
-/// chain finder, then [`run_dp`] picks the globally cheapest literal/match
-/// sequence. `depth` bounds the chain walk; `sufficient_len` caps the
-/// per-position length search (longer matches are taken whole). When `two_pass`
-/// (the `btultra2` strategy), a second DP re-parses with a price model rebuilt
-/// from the first parse's actual statistics ([`Prices::from_stats`]) — the
-/// candidates are unchanged, so only the DP repeats. Same contract as
-/// [`parse_block`] (persistent `state`, cross-block offsets, `rep` updated in
-/// decoder lockstep).
+/// a fixed-point cost model. Candidate matches are collected once by a **hybrid**
+/// finder — the hash `chain` supplies the small-offset Pareto set (cheapest under
+/// the offset/repeat-code cost), and the binary `tree` contributes the longest
+/// match regardless of recency, merged in when it beats the chain's reach (which
+/// its `depth` bound can miss on far-apart repeats). [`run_dp`] then picks the
+/// globally cheapest literal/match sequence. Merging the tree's match can only
+/// add an option, so the parse is never worse than the chain alone.
+/// `sufficient_len` is the length past which a match is committed whole. When
+/// `two_pass` (the `btultra2` strategy), a second DP re-parses against the first
+/// parse's actual statistics ([`Prices::from_stats`]). Same contract as
+/// [`parse_block`] (persistent state, cross-block offsets, `rep` in lockstep).
 #[allow(clippy::too_many_arguments)]
 pub fn opt_parse_block(
     data: &[u8],
     range: core::ops::Range<usize>,
     state: &mut ChainState,
+    tree: &mut BtState,
     max_offset: usize,
     rep: &mut [u32; 3],
     depth: usize,
@@ -823,10 +994,12 @@ pub fn opt_parse_block(
     // data — where the first candidate blows past it — stays cheap.
     let find_cap = suff.max(512);
 
-    // --- match-collection pass: walk the chain once, recording each position's
-    // candidate matches (CSR-flattened), any committed long match, and the skip
-    // regions inside long matches. The DP(s) below read these without touching
-    // the chain, so the second `btultra2` pass costs only another DP. ---
+    // --- match-collection pass: at each position the chain gives the small-offset
+    // Pareto matches and the tree the longest match regardless of recency, merged
+    // when it's longer. Both structures index every position (so the tree's index
+    // stays complete and the chain stays current); the DP(s) below read the
+    // recorded matches without touching either, so the `btultra2` pass is one more
+    // DP, not another search. ---
     let mut matches_flat: Vec<(u32, u32)> = Vec::new();
     let mut match_starts: Vec<u32> = vec![0u32; n + 1];
     let mut pos_long: Vec<Option<(u32, u32)>> = vec![None; n];
@@ -842,34 +1015,48 @@ pub fn opt_parse_block(
         if ap + MIN_MATCH > end {
             continue;
         }
-        // Index every position strictly before `ap` so the search sees only
-        // earlier positions — never `ap` itself, which would be an offset-0
+        // Index every position strictly before `ap` (in both finders) so the
+        // search sees only earlier positions — never `ap` itself, an offset-0
         // self-match. (`ap` is indexed *after* the search below.)
         while inserted < ap {
             state.insert(data, inserted);
+            tree.insert_bt1(data, inserted, end, max_offset, depth);
             inserted += 1;
         }
         if ap < skip_until {
             // inside a committed long match — index `ap` and move on.
             if inserted == ap {
                 state.insert(data, ap);
+                tree.insert_bt1(data, ap, end, max_offset, depth);
                 inserted = ap + 1;
             }
             continue;
         }
 
         state.find_matches(data, ap..end, max_offset, depth, find_cap, &mut scratch);
-        if inserted == ap {
-            state.insert(data, ap);
-            inserted = ap + 1;
+        state.insert(data, ap);
+        // The tree's longest match (it also inserts `ap`). Contribute it only when
+        // it's a long-range *long* match the chain missed — `≥ suff` (so it's
+        // committed whole and its offset amortizes over many bytes) and longer
+        // than the chain's reach. Merging *shorter* tree matches would tempt the
+        // DP's predefined-price proxy into large-offset choices it misprices (the
+        // proxy isn't the real FSE cost), which is what regressed `json` when the
+        // tree replaced the chain. Restricting to long matches keeps the chain's
+        // cheap small-offset Pareto set intact while recovering far-apart repeats.
+        let (tree_len, tree_off) = tree.insert_and_get_longest(data, ap, end, max_offset, depth);
+        inserted = ap + 1;
+        let chain_best = scratch.last().map_or(0, |&(l, _)| l as usize);
+        if tree_len >= suff && tree_len > chain_best {
+            scratch.push((tree_len as u32, tree_off as u32));
         }
         let best = match scratch.last() {
             Some(&b) => b,
             None => continue,
         };
 
-        // If the longest match hit the search cap it may be far longer — extend
-        // it fully and, if it's "sufficient", commit it whole and skip ahead.
+        // The longest candidate may be "sufficient" — extend it fully (a chain
+        // candidate was capped at `find_cap`; the tree's is already full, and
+        // re-extending is idempotent) and, if so, commit it whole and skip ahead.
         let (best_len, best_off) = best;
         let mut long_len = best_len as usize;
         if long_len >= suff {
@@ -910,8 +1097,8 @@ pub fn opt_parse_block(
 
 /// The active match finder for a frame, selected from the level's strategy.
 /// `Fast`/`Dfast` use the single-slot [`MatchState`]; `greedy`/`lazy`/`lazy2`
-/// (and `btlazy2`) use the hash-chain [`ChainState`]; `btopt`/`btultra`(2) use
-/// the optimal parse over that same chain finder.
+/// (and `btlazy2`) use the hash-chain [`ChainState`]; `btopt`/`btultra`(2) run
+/// the optimal parse over the **hybrid** chain + binary-tree finder.
 pub enum Finder {
     Fast(MatchState),
     DFast(DFastState),
@@ -921,7 +1108,10 @@ pub enum Finder {
         depth: usize,
     },
     Opt {
+        /// Hash chain — the small-offset Pareto match set.
         state: ChainState,
+        /// Binary tree — the recency-independent longest match (long-range reach).
+        tree: BtState,
         depth: usize,
         sufficient_len: usize,
         /// `btultra2`: re-parse with a price model rebuilt from the first
@@ -939,10 +1129,11 @@ impl Finder {
             Dfast => Finder::DFast(DFastState::new(params.hash_log, params.chain_log)),
             Btopt | Btultra | Btultra2 => Finder::Opt {
                 state: ChainState::new(params.hash_log, params.chain_log),
+                tree: BtState::new(params.hash_log, params.window_log),
                 // The optimal parse visits every position, so the per-position
-                // chain walk is the dominant cost — keep it moderate. Long
-                // matches are committed greedily (`sufficient_len`) and skip
-                // their interior, so this depth only governs short-match regions.
+                // search is the dominant cost — keep it moderate. Long matches are
+                // committed greedily (`sufficient_len`) and skip their interior, so
+                // this depth/nb_compares mainly governs short-match regions.
                 depth: (1usize << params.search_log.min(7)).min(128),
                 sufficient_len: (params.target_length as usize).clamp(32, 256),
                 two_pass: matches!(params.strategy, Btultra2),
@@ -977,8 +1168,8 @@ impl Finder {
             Finder::Chain { state, lazy_steps, depth } => {
                 lazy_parse_block(data, range, state, max_offset, rep, *lazy_steps, *depth)
             }
-            Finder::Opt { state, depth, sufficient_len, two_pass } => {
-                opt_parse_block(data, range, state, max_offset, rep, *depth, *sufficient_len, *two_pass)
+            Finder::Opt { state, tree, depth, sufficient_len, two_pass } => {
+                opt_parse_block(data, range, state, tree, max_offset, rep, *depth, *sufficient_len, *two_pass)
             }
         }
     }
@@ -991,7 +1182,8 @@ impl Finder {
     /// emitted and the repeat offsets are left untouched (the caller seeds those
     /// from the dictionary header). A position is inserted only where its hashed
     /// bytes (4, or 8 for the `dfast` long table) stay inside the dictionary.
-    pub fn prime(&mut self, data: &[u8], dict_len: usize) {
+    /// `max_offset` is the frame window (the binary tree's `window_low` bound).
+    pub fn prime(&mut self, data: &[u8], dict_len: usize, max_offset: usize) {
         match self {
             Finder::Fast(state) => {
                 let mut p = 0;
@@ -1007,12 +1199,20 @@ impl Finder {
                     p += 1;
                 }
             }
-            Finder::Chain { state, .. } | Finder::Opt { state, .. } => {
+            Finder::Chain { state, .. } => {
                 let mut p = 0;
                 while p + MIN_MATCH <= dict_len {
                     state.insert(data, p);
                     p += 1;
                 }
+            }
+            Finder::Opt { state, tree, depth, .. } => {
+                let mut p = 0;
+                while p + MIN_MATCH <= dict_len {
+                    state.insert(data, p);
+                    p += 1;
+                }
+                tree.prime(data, dict_len, max_offset, *depth);
             }
         }
     }
@@ -1089,9 +1289,10 @@ mod tests {
         }
         for two_pass in [false, true] {
             let mut state = ChainState::new(18, 18);
+            let mut tree = BtState::new(18, 20);
             let mut rep = [1u32, 4, 8];
             let (seqs, literals) =
-                opt_parse_block(&data, 0..data.len(), &mut state, 1 << 20, &mut rep, 64, 64, two_pass);
+                opt_parse_block(&data, 0..data.len(), &mut state, &mut tree, 1 << 20, &mut rep, 64, 64, two_pass);
 
             let mut section = Vec::new();
             super::super::sequences::write_sequences(

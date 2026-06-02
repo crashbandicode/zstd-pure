@@ -1,11 +1,12 @@
 # Benchmarks
 
-Two harnesses, both using libzstd (the `zstd` crate) as the reference point —
+Three harnesses, all using libzstd (the `zstd` crate) as the reference point —
 **never** at runtime, only as a dev-time comparison:
 
 | what | tool | run |
 |---|---|---|
-| **ratio** (compressed size) | `examples/ratio.rs` | `cargo run --release --example ratio` |
+| **ratio** (compressed size, small corpus) | `examples/ratio.rs` | `cargo run --release --example ratio` |
+| **large-input** (size + time, optimal levels) | `examples/bench_large.rs` | `cargo run --release --example bench_large` |
 | **throughput** (time) | `benches/compression.rs` (criterion) | `cargo bench --bench compression` |
 
 > `cargo bench` (no target) also works, but to pass criterion CLI flags scope to
@@ -44,8 +45,9 @@ L19), now matching libzstd; dense `json` **beats** libzstd at L19 (0.80×); and
 splitter gives each half its own tables. The near-random `records` soft spot at
 the top levels fell from 1.32× to 1.12× over this work: the `btultra2` second
 pass (re-pricing the optimal parse from the first parse's actual statistics) took
-it to 1.26×, then block splitting to 1.12×. It still trails a little — the last
-gap is to libzstd's binary-tree match finding.
+it to 1.26×, then block splitting to 1.12×. It still trails a little — `records`
+is small and its matches are within the chain's depth, so the binary-tree hybrid
+(below) doesn't move it; the remaining lever there is the cost model.
 
 ## Throughput (indicative)
 
@@ -61,8 +63,9 @@ shape matters, absolute numbers are machine-specific**:
 
 The encoder is slower than libzstd at low/mid levels (a simpler parse, no SIMD).
 At L19 both run an optimal parse and land in the same ballpark (~2–3 MiB/s); ours
-is a hash-chain DP rather than libzstd's binary tree, so a deeper/bigger corpus
-would widen libzstd's lead — a binary-tree match finder is the way to close it.
+is a hash-chain DP augmented with a binary tree (the hybrid below), which adds the
+long-range matches a pure chain misses on big many-candidate inputs at the cost of
+extra per-position work at L16+.
 
 ## Standing & next levers
 
@@ -95,15 +98,27 @@ parity, and let `mixed` beat libzstd. The predefined-prior single pass remains
 for `btopt`/`btultra` (L13–18), and the splitter is off below L16 to keep the
 fast/lazy levels' throughput untouched.
 
-The `records` gap was investigated as a binary-tree match finder: a faithful port
-(branch `experiment/bt-finder`) and a chain/tree hybrid (branch
-`experiment/bt-hybrid`) were both built, correct and tractable, but neither
-**beats** the hash-chain opt. The hybrid (chain's small-offset matches + the
-tree's long-range match, merged only for long matches) at least **ties** the
-corpus exactly without regressing, but adds no ratio. The generalized reason: the
-chain indexes every position and finds a far-back match through any *distinctive*
-4-byte window, so its depth bound only blocks hashes *saturated* by recent
-collisions — which realistic matches (distinctive, or repetitive→recent) avoid.
-So the remaining `records` lever is the **cost model**, not the match finder (see
-the `README.md` handoff). A future decode-speed comparison against the pure-Rust
-`ruzstd` decoder would round out the peer set.
+The optimal parse now runs a **chain/tree hybrid** at L16+ (the binary-tree match
+finder): the hash chain supplies the small-offset Pareto matches, and a faithful
+binary tree adds its longest match when it's `≥ sufficient_len` — a committable
+long match the chain's depth bound (128) missed. It **ties the small corpus
+exactly** (so the table above is unchanged) and pays off where that bound binds,
+which the small synthetic corpus doesn't exercise but `bench_large` does:
+
+| L19 profile (≈2 MB) | chain-opt | hybrid | vs libzstd |
+|---|---:|---:|---:|
+| `revisions` (150 near-duplicate docs) | 20,748 | **17,506** | 1.300× → **1.097×** |
+| `logs` (templated) | 461,780 | 461,780 | 1.164× (tie) |
+| `binstruct` (repeated records) | 749,462 | 749,462 | 1.097× (tie) |
+
+The `revisions` win (**−16 %**) is the depth bound binding: with ~150 candidates
+per hash (> the chain's depth) the best match sits further back than the chain
+walks, and the tree finds it. The cost is the tree's memory + up to ~2× match
+time at L16+ (correlated with the benefit — neutral-to-faster where it only ties),
+acceptable at the max-compression tier. Why this needed a big input: the chain
+indexes every position, so it finds a far-back match through any *distinctive*
+4-byte window — its depth bound only hides matches whose entry hashes are
+*saturated* by recent collisions, i.e. the high-candidate-count (near-duplicate)
+case the hybrid catches. The remaining `records` lever is the **cost model** (see
+the `README.md` handoff), not the match finder. A future decode-speed comparison
+against the pure-Rust `ruzstd` decoder would round out the peer set.

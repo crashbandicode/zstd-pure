@@ -217,7 +217,7 @@ pub fn train_dictionary_structured(samples: &[&[u8]], max_size: usize) -> Vec<u8
         combined.extend_from_slice(&content);
         combined.extend_from_slice(s);
         let mut finder = Finder::new(&params);
-        finder.prime(&combined, content.len());
+        finder.prime(&combined, content.len(), max_offset);
         let mut rep = [1u32, 4, 8];
         let (sq, lits) =
             finder.parse(&combined, content.len()..combined.len(), max_offset, &mut rep);

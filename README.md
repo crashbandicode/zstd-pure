@@ -54,7 +54,7 @@ libzstd, which implements RFC 8878. Notable conformance points:
 - [x] Treeless literals: cross-block Huffman table reuse — `write_literals_auto` reuses the previous compressed block's table (literals block type 3, no tree description) when it can encode every byte + is cheaper, threaded via `EncState` — **T2.3 (ratio)**
 - [x] Opt price-model refinement (`btultra2` second pass): re-parse with a price model rebuilt from the first parse's *actual* literal/LL/OF/ML statistics instead of the predefined-table prior — tightens the top-level ratio on near-random record data (L19 `records` 1.32× → 1.26×, `json` 0.87× → 0.84×) — **T2.3 (ratio)**
 - [x] Block splitting: partition a block into adjacent blocks each with entropy tables fit to its own statistics, when their distributions differ enough to pay for the extra headers — a recursive midpoint split at the optimal-parse levels (L16+), threading Repeat-mode / Treeless tables across the sub-blocks and **kept only when strictly smaller** (never regresses). Stacks on the `btultra2` pass: L19 `records` 1.26× → 1.12×, `json` 0.84× → 0.80×, `3x90k` 1.07× → 1.01×, and a heterogeneous text/JSON block now beats libzstd — **T2.3 (ratio)**
-- [ ] binary-tree match finder — T2.3 (ratio)
+- [x] Binary-tree match finder — chain/tree **hybrid** for the optimal parse (L16+): the hash chain supplies the small-offset Pareto set and a faithful binary tree (`encode::lz::BtState`, a port of zstd's `ZSTD_insertBt*`) contributes its longest match, merged only when it's `≥ sufficient_len` (a committable long match the chain's depth bound missed). Ties the chain-opt on the small corpus (never regresses) and wins where the depth bound binds — e.g. **−16 %** on a 150-revision near-duplicate corpus (`examples/bench_large`) — **T2.3 (ratio)**
 - [ ] Long-distance matching — T2.4
 - [x] Dictionary encode (`compress_with_dict`) — raw + structured/tagged: match window primed with dict content, seeded repeat offsets, dict-id frame header; verified through libzstd + our decoder, improves ratio on a many-small-files corpus — **T3.1**
 - [x] Dictionary training (`train_dictionary`) — pure-Rust greedy COVER producing a raw-content dictionary (highest-coverage shared substrings, most-valuable last); improves ratio on a many-small-files corpus, verified through libzstd + our decoder — **T3.1**
@@ -251,56 +251,45 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
   greedy best-of-two per position. `Finder::DFast` handles `Dfast` (L2–3). Big
   L3 wins: a record stream 2668 → 1681 bytes (≈ libzstd), a cross-block repeat
   7869 → 3841. Verified through libzstd + our decoder.
-- **Still TODO (ratio):** a binary-tree match finder that **beats** the tuned
-  hash-chain opt for the optimal parse. Five variants have now been implemented
-  and measured against the chain-opt, and **all lost** (tied at best), so none
-  shipped:
+- **Binary-tree match finder — DONE (chain/tree hybrid).** Five variants were
+  built before one earned merging, each measured against the tuned chain-opt:
   1. *bounded* (extension-capped + early-break): regressed `json` ~3 % and slower;
-  2. *faithful + skip-no-insert* (full extension, don't index greedy-match
-     interiors to stay O(n)): the sparse index regressed everything
-     (`records` 1375→1645, `3x90k` 1503→1966);
-  3. *complete index + capped insertion* (index every position, cap only the
-     insertion-time extension): matched the chain on `records`/`3x90k`/`redundant`
-     but still `json` ~3 % worse and ~2× slower.
-  4. *faithful port* (preserved, unmerged, on branch `experiment/bt-finder`): a
-     from-scratch port of zstd's `ZSTD_insertBt*` — complete index, **uncapped**
-     search extension via the `commonLength` bound, window/`btLow` handling — with
-     only the *insert-only* path (positions skipped inside a committed long match)
-     capped, to bound the periodic-data O(n²) blowup while leaving the **search**
-     path exact. **Correct and tractable** (round-trips through libzstd + our
-     decoder; the across-levels test runs in <1 s — the first variant to achieve
-     both). Still **ties** the chain on `records` (1163) / `3x90k` (1412) /
-     `redundant` (55) and **loses** `json` (11812→12163, +3 %), `text`, `mixed` —
-     the same shape as 1–3, because it *replaces* the chain's small-offset set.
-  5. *chain/tree hybrid* (preserved, unmerged, on branch `experiment/bt-hybrid`):
-     keep the chain's small-offset Pareto set and *add* the tree's longest match,
-     but **only when it is `≥ suff`** (a committable long match longer than the
-     chain's reach) — merging shorter tree matches re-introduces the `json`
-     regression (the DP minimises a predefined-price *proxy*, not the real FSE
-     cost, so a longer/larger-offset match looks cheap but isn't). With that
-     restriction it finally **does not regress** — ties the chain-opt gate exactly
-     on the whole corpus — but it still doesn't *beat* it: only `3x90k` 1412→1406
-     (−6 B). An attempt to demonstrate a far-back win (a `farback` profile: a long
-     marker recurring past >`depth` decoys that share its lead hash) **failed** —
-     with the tree disabled the chain gets the identical size.
-  **Why — the generalized finding (the real payoff of variants 4–5):** the chain
-  indexes *every* position, so it finds a far-back match through *any* distinctive
-  4-byte window inside it; its depth bound only blocks a hash that is *saturated*
-  by recent collisions. A useful match is therefore almost always reachable: it is
-  either **distinctive** (some window is unique → the chain finds it regardless of
-  recency) or **repetitive** (a recent occurrence exists → rep/short matches find
-  it). The binary tree only wins when a match is *neither* — pathological hash
-  saturation across its whole length — which realistic data doesn't exhibit. And
-  where the tree *does* surface an extra long match, our entropy cost model
-  prefers the chain's smaller offsets anyway (the `json` regression). Net: the
-  tree/hybrid buys no realistic ratio over the chain, at the cost of the tree's
-  memory + ~2× match time at L16+. The remaining lever for `records` is therefore
-  **not** the match finder but the **cost model** (e.g. rep-offset candidates
-  priced with the per-cell `rep`, which our collect-then-DP split — needed for the
-  `btultra2` two-pass — can't currently supply). Also still open: `btlazy2`.
-  (Sequence-table Repeat mode (3), the opt price-model refinement — the
-  `btultra2` second pass — and block splitting are now done; see the Encoder
-  checklist.)
+  2. *faithful + skip-no-insert* (full extension, sparse index): regressed
+     everything (`records` 1375→1645, `3x90k` 1503→1966);
+  3. *complete index + capped insertion*: matched the chain on
+     `records`/`3x90k`/`redundant` but `json` ~3 % worse, ~2× slower;
+  4. *faithful port* (branch `experiment/bt-finder`): a from-scratch port of
+     zstd's `ZSTD_insertBt*` — complete index, **uncapped** search extension via
+     the `commonLength` bound, window/`btLow` handling, only the insert-only path
+     (skipped positions) capped to bound the periodic-data O(n²) blowup. The first
+     to be both correct and tractable, but it *replaces* the chain's small-offset
+     set, so it still lost `json` (+3 %): the chain walks newest-first → smallest
+     offset per length, which our cost model prefers.
+  5. *chain/tree hybrid* — **shipped** (`encode::lz`: `Finder::Opt` carries both a
+     `ChainState` and a `BtState`). Keep the chain's small-offset Pareto set and
+     *add* the tree's longest match, but **only when `≥ sufficient_len`** (a
+     committable long match the chain's depth bound missed). Merging *shorter*
+     tree matches re-introduces the `json` regression — the DP minimises a
+     predefined-price *proxy*, not the real FSE cost, so a longer/larger-offset
+     match looks cheap but isn't — so the restriction to long matches keeps the
+     chain's cheap small-offset matches intact. It **ties the small corpus
+     exactly** (never regresses) and **wins where the chain's depth bound binds**:
+     on a 150-revision near-duplicate corpus (`examples/bench_large`) it is
+     **−16 %** (1.300× → 1.097× of libzstd at L19), the tree's recency-independent
+     reach resolving the bound. Gated to L16+ (the optimal-parse tier), where the
+     cost — the tree's memory + up to ~2× match time, correlated with the benefit —
+     is acceptable.
+  **What this taught us:** the chain indexes *every* position, so it finds a
+  far-back match through *any* distinctive 4-byte window — its depth bound only
+  hides matches whose entry hashes are *saturated* by recent collisions, i.e. the
+  high-candidate-count case (near-duplicate / revision data) the hybrid now
+  catches. On the ≤270 KB synthetic corpus that case doesn't arise, which is why
+  variants 1–4 (and the hybrid *there*) only tied — the win needed a bigger,
+  many-candidate input to surface. The remaining `records` lever is the **cost
+  model** (rep-offset candidates priced with the per-cell `rep`, which the
+  collect-then-DP split the `btultra2` two-pass needs can't yet supply), not the
+  match finder. Also still open: `btlazy2` (a lazy parser that would reuse
+  `BtState`).
 
 ### T1.3 no_std + alloc — DONE
 Now a standalone crate, so `cargo build --no-default-features --features alloc`

@@ -246,7 +246,7 @@ pub fn compress_with_dict(
             },
         };
         let mut finder = super::lz::Finder::new(&params);
-        finder.prime(&combined, dict_len);
+        finder.prime(&combined, dict_len, max_offset);
 
         let n = data.len();
         let mut start = 0usize;
