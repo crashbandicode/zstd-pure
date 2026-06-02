@@ -49,7 +49,8 @@ libzstd, which implements RFC 8878. Notable conformance points:
 - [x] Level→param table (`encode::params`) + cross-block (persistent-window) matching, so `level` selects the window/hash sizes and back-refs span the 128 KiB block boundary — **T2.3 (ratio)**
 - [x] Hash-chain greedy/lazy/lazy2 parser wired to `params.strategy` (levels 4+); `level` now scales ratio — **T2.3 (ratio)**
 - [x] `btopt`/`btultra` optimal parse (L13+): rep-aware DP over a fixed-point cost model (`encode::lz::opt_parse_block`); beats libzstd ratio on dense JSON at L19 — **T2.3 (ratio)**
-- [ ] Remaining parse strategies: `dfast` (L2–3, currently `fast`) + sequence Repeat table mode (3) — T2.3 (ratio)
+- [x] `dfast` double-hash finder (L2–3): 8-byte long + 4-byte short tables, best-of-two greedy — **T2.3 (ratio)**
+- [ ] Sequence Repeat table mode (3); opt price-model refinement; binary-tree match finder — T2.3 (ratio)
 - [ ] Long-distance matching — T2.4
 - [ ] Dictionary encode + tagged-dictionary training — T3.1
 
@@ -112,14 +113,15 @@ finder, and a `compress(data, level)` entry that emits compressed/raw/RLE blocks
 decoder** (lib unit tests + the corpus harness's encoder sweep).
 
 **Remaining is ratio engineering, not new correctness surface:**
-- **Stronger parses** — `fast` (L1–3), `greedy`/`lazy`/`lazy2` (hash-chain, L4–12),
-  and the `btopt`/`btultra` rep-aware optimal parse (L13+) are all in place
-  (`encode::params`, `lz::{MatchState, ChainState, Finder, opt_parse_block}`).
-  `level` scales ratio: a less-redundant record stream 1.87× → 0.97× of libzstd
-  (L1 → L6); dense JSON 0.91× → 0.88× and now **beats** libzstd at L19. **Remaining:**
-  `dfast` (double-hash, L2–3, currently the single-slot `fast` finder) — a modest
-  win — and tuning the opt price model (it's a fixed predefined-table proxy, so it
-  can be ~1 % off lazy2 on some inputs).
+- **Stronger parses** — all five strategy classes are in place
+  (`encode::params`, `lz::{MatchState, DFastState, ChainState, Finder,
+  opt_parse_block}`): `fast` (L1), `dfast` (double-hash, L2–3),
+  `greedy`/`lazy`/`lazy2` (hash-chain, L4–12), and the `btopt`/`btultra`
+  rep-aware optimal parse (L13+). `level` scales ratio: a record stream
+  1.87× → 1.02× of libzstd (L1 → L3 via dfast); dense JSON now **beats** libzstd
+  at L19 (0.87×). **Remaining tuning:** a binary-tree match finder would make the
+  optimal parse both faster and deeper; the opt price model is a fixed
+  predefined-table proxy (can be ~1 % off lazy2 on near-random data).
 - **Sequence-table Repeat mode (3)** — reuse the previous compressed block's
   LL/OF/ML table when it would beat re-describing it; needs cross-block table
   threading with the same commit-on-use discipline as the repeat offsets.
@@ -202,11 +204,12 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
 - **Greedy/lazy/lazy2 parser — DONE.** `encode/lz.rs::lazy_parse_block` +
   `ChainState` (head + chain tables) walk up to `1 << search_log` candidates per
   position keeping the longest match, with `lazy_steps` look-ahead (0 greedy / 1
-  lazy / 2 lazy2). `Finder::new(params)` dispatches: `Fast`/`Dfast` → the
-  single-slot finder, everything else → the chain finder (`bt*` → lazy2 for now).
-  `level` now scales ratio (a record stream: 1.87× → 0.97× of libzstd, L1 → L6;
-  a 270 KiB cross-block repeat: 7869 → 1450 bytes, L3 → L19 ≈ libzstd). Verified
-  across levels 1–22 through libzstd + our decoder, incl. a >128 KiB input.
+  lazy / 2 lazy2). `Finder::new(params)` dispatches by strategy: `Fast` →
+  single-slot, `Dfast` → double-hash, greedy/lazy/lazy2 → the chain finder,
+  `bt*` → the optimal parse. `level` now scales ratio (a record stream:
+  1.87× → 0.97× of libzstd, L1 → L6; a 270 KiB cross-block repeat: 7869 → 1450
+  bytes, L3 → L19 ≈ libzstd). Verified across levels 1–22 through libzstd + our
+  decoder, incl. a >128 KiB input.
 - **Optimal parse (`btopt`/`btultra`) — DONE.** `encode/lz.rs::opt_parse_block`:
   a rep-aware dynamic program over a fixed-point (`log2_fp`) cost model. The chain
   finder enumerates the Pareto match set per position (`find_matches`); the DP
@@ -218,8 +221,15 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
   libzstd + our decoder. The price model is a fixed predefined-table proxy, so it
   can be ~1 % off lazy2 on some inputs — refining it (per-block stats, like
   `btultra2`'s second pass) is future tuning.
-- **Still TODO (ratio):** `dfast` (double-hash, L2–3, currently `fast`); the
-  sequence-table Repeat mode (3); block splitting; opt price-model refinement.
+- **`dfast` double-hash finder — DONE.** `encode/lz.rs::dfast_parse_block` +
+  `DFastState`: a `long` table keyed by an 8-byte hash (preserves long-match
+  candidates the 4-byte table would overwrite) plus a `short` 4-byte table;
+  greedy best-of-two per position. `Finder::DFast` handles `Dfast` (L2–3). Big
+  L3 wins: a record stream 2668 → 1681 bytes (≈ libzstd), a cross-block repeat
+  7869 → 3841. Verified through libzstd + our decoder.
+- **Still TODO (ratio):** a binary-tree match finder (faster + deeper optimal
+  parse, and `btlazy2`); the sequence-table Repeat mode (3); block splitting; opt
+  price-model refinement (per-block stats / `btultra2` second pass).
 
 ### T1.3 no_std + alloc
 Deferred: `zstd_pure` is currently a *module* of the std crate

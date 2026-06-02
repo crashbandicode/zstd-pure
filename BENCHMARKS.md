@@ -27,18 +27,20 @@ incompressible chunk, so only cross-block matching can shrink copies 2–3).
 | level | redundant | records | text | json | 3x90k-chunk |
 |------:|----------:|--------:|-----:|-----:|------------:|
 |  1 | 0.66× | 1.87× | 1.03× | 0.91× | 3.25× |
-|  3 | 0.66× | 1.62× | 1.02× | 0.76× | 0.25× |
+|  3 | 0.66× | 1.02× | 1.02× | 0.76× | 0.12× |
 |  6 | 0.66× | **0.97×** | 1.05× | 0.93× | 1.69× |
 |  9 | 0.66× | **0.97×** | 1.05× | 1.09× | 2.50× |
 | 19 | 1.02× | 1.32× | 1.02× | **0.87×** | 1.08× |
 
-Reading it: `level` scales ratio — the chain/lazy finder kicks in at L4+, and the
-`btopt` optimal parse at L13+. The `records` stream goes from 1.87× of libzstd at
-L1 to 0.97× (beating it) at L6; the cross-block `3x90k-chunk` collapses from 11.7 KB
-→ 1.5 KB (L1 → L19), within ~8 % of libzstd; and dense `json` — our worst high-level
-case before the optimal parse — now **beats** libzstd at L19 (0.87×). The remaining
-soft spot is `records` at the top levels (~1.3×): the opt price model is a fixed
-predefined-table proxy, so it leaves a little on near-random data.
+Reading it: `level` scales ratio — `dfast` (double-hash) kicks in at L2–3, the
+chain/lazy finder at L4+, and the `btopt` optimal parse at L13+. The `records`
+stream goes from 1.87× of libzstd at L1 to ~1.0× by L3 (dfast's 8-byte hash finds
+the long matches the single 4-byte table misses); the cross-block `3x90k-chunk`
+collapses from 11.7 KB → 1.5 KB (L1 → L19), within ~8 % of libzstd; and dense
+`json` — our worst high-level case before the optimal parse — now **beats**
+libzstd at L19 (0.87×). The remaining soft spot is `records` at the very top
+levels (~1.3×): the opt price model is a fixed predefined-table proxy, so it
+leaves a little on near-random data.
 
 ## Throughput (indicative)
 

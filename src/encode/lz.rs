@@ -39,6 +39,22 @@ fn hash4(v: u32, hash_log: u32) -> usize {
     (v.wrapping_mul(2654435761) >> (32 - hash_log)) as usize
 }
 
+#[inline]
+fn read_u64(data: &[u8], p: usize) -> u64 {
+    u64::from_le_bytes([
+        data[p], data[p + 1], data[p + 2], data[p + 3],
+        data[p + 4], data[p + 5], data[p + 6], data[p + 7],
+    ])
+}
+
+/// Hash of an 8-byte span — the `dfast` long-match table key. A longer span than
+/// [`hash4`] collides far less, so it preserves long-match candidates that the
+/// 4-byte table would overwrite with frequent short n-grams.
+#[inline]
+fn hash8(v: u64, hash_log: u32) -> usize {
+    (v.wrapping_mul(0x9E37_79B1_85EB_CA87) >> (64 - hash_log)) as usize
+}
+
 /// Pick the cheapest `offset_value` that encodes back-distance `offset` at the
 /// current point. Prefers a repeat code (`1..=3`) when one reproduces `offset`
 /// exactly given the running repeat offsets `rep` and `ll0` (whether the
@@ -178,6 +194,125 @@ pub fn parse_block(
 pub fn fast_parse(data: &[u8], max_offset: usize, rep: &mut [u32; 3]) -> (Vec<Seq>, Vec<u8>) {
     let mut state = MatchState::new(DEFAULT_HASH_LOG);
     parse_block(data, 0..data.len(), &mut state, max_offset, rep)
+}
+
+/// `dfast` (double-fast) finder state: two persistent single-slot tables — a
+/// `long` one keyed by an 8-byte hash (preserves long-match candidates) and a
+/// `short` one keyed by a 4-byte hash (catches recent/short matches). Carried
+/// across a frame's blocks like [`MatchState`].
+pub struct DFastState {
+    long: Vec<i32>,
+    short: Vec<i32>,
+    long_log: u32,
+    short_log: u32,
+}
+
+impl DFastState {
+    pub fn new(long_log: u32, short_log: u32) -> Self {
+        let long_log = long_log.clamp(MIN_HASH_LOG, MAX_HASH_LOG);
+        let short_log = short_log.clamp(MIN_HASH_LOG, MAX_HASH_LOG);
+        DFastState {
+            long: vec![-1i32; 1usize << long_log],
+            short: vec![-1i32; 1usize << short_log],
+            long_log,
+            short_log,
+        }
+    }
+
+    /// Index `pos` (needs ≥ 4 readable bytes) in the short table, and the long
+    /// table too when ≥ 8 bytes are readable.
+    #[inline]
+    fn insert(&mut self, data: &[u8], pos: usize, end: usize) {
+        self.short[hash4(read_u32(data, pos), self.short_log)] = pos as i32;
+        if pos + 8 <= end {
+            self.long[hash8(read_u64(data, pos), self.long_log)] = pos as i32;
+        }
+    }
+}
+
+/// Greedy `dfast` parse: at each position take the longer of the matches the
+/// long (8-byte) and short (4-byte) hash tables point at. Otherwise identical in
+/// contract to [`parse_block`] (persistent `state`, cross-block offsets, `rep`
+/// updated in decoder lockstep).
+pub fn dfast_parse_block(
+    data: &[u8],
+    range: core::ops::Range<usize>,
+    state: &mut DFastState,
+    max_offset: usize,
+    rep: &mut [u32; 3],
+) -> (Vec<Seq>, Vec<u8>) {
+    let (start, end) = (range.start, range.end);
+    let mut seqs = Vec::new();
+    let mut literals = Vec::new();
+    if end < start + MIN_MATCH + 1 {
+        literals.extend_from_slice(&data[start..end]);
+        return (seqs, literals);
+    }
+    let mut anchor = start;
+    let mut p = start;
+    let limit = end - MIN_MATCH;
+
+    while p <= limit {
+        // Read both candidates, then index `p` in both tables.
+        let cand_long = if p + 8 <= end {
+            let h = hash8(read_u64(data, p), state.long_log);
+            let c = state.long[h];
+            state.long[h] = p as i32;
+            c
+        } else {
+            -1
+        };
+        let hs = hash4(read_u32(data, p), state.short_log);
+        let cand_short = state.short[hs];
+        state.short[hs] = p as i32;
+
+        // Best of the two candidates.
+        let mut best_ml = MIN_MATCH - 1;
+        let mut best_c = 0usize;
+        for &cand in &[cand_long, cand_short] {
+            if cand < 0 {
+                continue;
+            }
+            let c = cand as usize;
+            let offset = p - c;
+            if offset <= max_offset && data[c..c + MIN_MATCH] == data[p..p + MIN_MATCH] {
+                let mut ml = MIN_MATCH;
+                while p + ml < end && data[c + ml] == data[p + ml] {
+                    ml += 1;
+                }
+                if ml > best_ml {
+                    best_ml = ml;
+                    best_c = c;
+                }
+            }
+        }
+
+        if best_ml >= MIN_MATCH {
+            let lit_len = p - anchor;
+            literals.extend_from_slice(&data[anchor..p]);
+            let ll0 = lit_len == 0;
+            let offset_value = encode_offset(rep, (p - best_c) as u32, ll0);
+            resolve_offset(rep, offset_value, ll0);
+            seqs.push(Seq {
+                lit_len: lit_len as u32,
+                match_len: best_ml as u32,
+                offset_value,
+            });
+            let mut q = p + 1;
+            let stop = (p + best_ml).min(limit + 1);
+            while q < stop {
+                state.insert(data, q, end);
+                q += 1;
+            }
+            p += best_ml;
+            anchor = p;
+        } else {
+            p += 1;
+        }
+    }
+
+    literals.extend_from_slice(&data[anchor..end]);
+    (seqs, literals)
 }
 
 /// Hash-chain match-finder state for the greedy/lazy strategies. `head[h]` is
@@ -636,6 +771,7 @@ pub fn opt_parse_block(
 /// the optimal parse over that same chain finder.
 pub enum Finder {
     Fast(MatchState),
+    DFast(DFastState),
     Chain {
         state: ChainState,
         lazy_steps: u32,
@@ -653,7 +789,8 @@ impl Finder {
     pub fn new(params: &super::params::CParams) -> Self {
         use super::params::Strategy::*;
         match params.strategy {
-            Fast | Dfast => Finder::Fast(MatchState::new(params.hash_log)),
+            Fast => Finder::Fast(MatchState::new(params.hash_log)),
+            Dfast => Finder::DFast(DFastState::new(params.hash_log, params.chain_log)),
             Btopt | Btultra | Btultra2 => Finder::Opt {
                 state: ChainState::new(params.hash_log, params.chain_log),
                 // The optimal parse visits every position, so the per-position
@@ -689,6 +826,7 @@ impl Finder {
     ) -> (Vec<Seq>, Vec<u8>) {
         match self {
             Finder::Fast(state) => parse_block(data, range, state, max_offset, rep),
+            Finder::DFast(state) => dfast_parse_block(data, range, state, max_offset, rep),
             Finder::Chain { state, lazy_steps, depth } => {
                 lazy_parse_block(data, range, state, max_offset, rep, *lazy_steps, *depth)
             }
