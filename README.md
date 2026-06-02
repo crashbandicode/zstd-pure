@@ -1,6 +1,6 @@
 # zstd-pure — pure-Rust Zstandard codec
 
-A from-scratch Zstandard ([RFC 8478]) implementation, written from the spec
+A from-scratch Zstandard ([RFC 8878]) implementation, written from the spec
 (no GPL code). The crate depends only on `core`/`alloc`/`std` + `thiserror`;
 libzstd (the `zstd` crate) is a **dev-only test/bench oracle**, never used at
 runtime. Crate name `zstd-pure`, library `zstd_pure`.
@@ -9,7 +9,18 @@ Extracted with full history from the `nx-layout-toolbox` (Toolbox-Cli) monorepo,
 where it was built bottom-up and validated against libzstd and real Nintendo
 TotK BFRES frames (themselves standard magicless zstd).
 
-[RFC 8478]: https://www.rfc-editor.org/rfc/rfc8478
+[RFC 8878]: https://www.rfc-editor.org/rfc/rfc8878
+
+## Conformance
+
+Targets **RFC 8878** (the current Zstandard standard; it obsoletes RFC 8478, and
+the wire format is unchanged between them). Every encoder output is validated by
+libzstd, which implements RFC 8878. Notable conformance points:
+
+- **Content checksum** — low 4 bytes of `XXH64(data, seed = 0)`, little-endian (§3.1.1).
+- **Reserved bit** of the `Frame_Header_Descriptor` is required to be 0; a frame that sets it is rejected (§3.1.1.1.1).
+- **Window size** — the encoder caps `Window_Size` at 8 MiB, honoring §3.1.1.1.2's recommendation that a compressor not require more (for broad decoder interoperability); the streaming decoder accepts windows up to 128 MiB, ≥ the 8 MiB a decoder is recommended to support.
+- **Block_Maximum_Size** — `min(Window_Size, 128 KiB)` (§3.1.1.2).
 
 ## Feature checklist
 

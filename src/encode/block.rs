@@ -1,4 +1,4 @@
-//! Block-level encoding — RFC 8478 §3.1.1.2.
+//! Block-level encoding — RFC 8878 §3.1.1.2.
 //!
 //! This writes the two literal block types that need no entropy coding —
 //! **Raw** (store the bytes verbatim) and **RLE** (a single byte repeated) —

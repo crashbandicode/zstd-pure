@@ -1,4 +1,4 @@
-//! Sequence-section **encoding** — RFC 8478 §3.1.1.3.2, the inverse of
+//! Sequence-section **encoding** — RFC 8878 §3.1.1.3.2, the inverse of
 //! [`crate::sequences`].
 //!
 //! A sequence is `(literals_length, match_length, offset_value)`, where
@@ -71,7 +71,7 @@ pub(crate) fn of_code(offset_value: u32) -> usize {
     highbit32(offset_value) as usize
 }
 
-/// Write the `Number_of_Sequences` header (RFC 8478 §3.1.1.3.2.1).
+/// Write the `Number_of_Sequences` header (RFC 8878 §3.1.1.3.2.1).
 fn write_seq_count(out: &mut Vec<u8>, n: usize) {
     if n < 128 {
         out.push(n as u8);

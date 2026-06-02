@@ -1,4 +1,4 @@
-//! Frame decoding — RFC 8478 §3.1.1.1: frame header parse, the block loop,
+//! Frame decoding — RFC 8878 §3.1.1.1: frame header parse, the block loop,
 //! and the optional XXH64 content checksum.
 
 #[allow(unused_imports)]
@@ -25,7 +25,7 @@ pub struct DecodedFrame {
     pub consumed: usize,
 }
 
-/// Parsed Zstandard frame header (RFC 8478 §3.1.1.1.1).
+/// Parsed Zstandard frame header (RFC 8878 §3.1.1.1.1).
 ///
 /// Produced by [`frame_header`] / [`frame_header_magicless`] for buffer sizing
 /// and inspection without decoding the frame body — the analog of libzstd's

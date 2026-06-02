@@ -1,4 +1,4 @@
-//! Block-level decoding — RFC 8478 §3.1.1.2.
+//! Block-level decoding — RFC 8878 §3.1.1.2.
 //!
 //! A block header is 3 little-endian bytes: bit 0 `Last_Block`, bits 1-2
 //! `Block_Type`, bits 3-23 `Block_Size`. Raw and RLE blocks are trivial;

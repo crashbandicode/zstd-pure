@@ -1,5 +1,5 @@
 #![cfg_attr(not(feature = "std"), no_std)]
-//! A pure-Rust Zstandard ([RFC 8478]) codec, implemented from the specification
+//! A pure-Rust Zstandard ([RFC 8878]) codec, implemented from the specification
 //! (no GPL / Switch-Toolbox code). It exists so the crate can decode Nintendo's
 //! **MeshCodec** mesh stream — a custom container that reuses zstd's block and
 //! entropy primitives — without depending on libzstd's C internals, and is
@@ -16,7 +16,7 @@
 //! * `fse` / `huff` — the entropy decoders (in progress).
 //! * `frame` — frame/block orchestration (in progress).
 //!
-//! [RFC 8478]: https://www.rfc-editor.org/rfc/rfc8478
+//! [RFC 8878]: https://www.rfc-editor.org/rfc/rfc8878
 
 // `alloc` provides Vec/String/format!/vec! in `no_std`; under `std` the std
 // prelude already provides the macros, so only pull them in (macro_use) when

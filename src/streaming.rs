@@ -1,4 +1,4 @@
-//! Streaming, bounded-memory frame decoding (RFC 8478 §3.1.1).
+//! Streaming, bounded-memory frame decoding (RFC 8878 §3.1.1).
 //!
 //! [`StreamingDecoder`] decodes a single frame **block by block** into a
 //! sliding window buffer, evicting bytes that are both already delivered and

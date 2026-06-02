@@ -1,4 +1,4 @@
-//! Frame-level encoding — RFC 8478 §3.1.1.1.
+//! Frame-level encoding — RFC 8878 §3.1.1.1.
 //!
 //! Writes a frame header, the block sequence, and the optional XXH64 content
 //! checksum. The block bodies come from [`super::block`] (raw/RLE today;
@@ -17,7 +17,7 @@ use super::block::{
 /// `1 << 17`).
 const STORE_WINDOW_LOG: u32 = 17;
 
-/// Write the frame header (RFC 8478 §3.1.1.1.1).
+/// Write the frame header (RFC 8878 §3.1.1.1.1).
 ///
 /// Always emits a window descriptor (`Single_Segment_Flag = 0`) and pledges the
 /// content size (4-byte form for `<= u32::MAX`, else 8-byte). `dictionary_id`

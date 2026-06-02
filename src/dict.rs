@@ -1,4 +1,4 @@
-//! Dictionary support for decoding — RFC 8478 §5.
+//! Dictionary support for decoding — RFC 8878 §5.
 //!
 //! Two flavours:
 //!

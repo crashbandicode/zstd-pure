@@ -1,4 +1,4 @@
-//! Huff0 (Huffman) literal **encoding** — RFC 8478 §4.2.1, the inverse of the
+//! Huff0 (Huffman) literal **encoding** — RFC 8878 §4.2.1, the inverse of the
 //! decoder in [`crate::huff`].
 //!
 //! Strategy (see `README.md`):
@@ -24,7 +24,7 @@ use super::super::huff;
 use super::bitstream::BitWriter;
 use super::fse as efse;
 
-/// Maximum FSE accuracy log for Huffman weight tables (RFC 8478 §4.2.1.1).
+/// Maximum FSE accuracy log for Huffman weight tables (RFC 8878 §4.2.1.1).
 const HUF_WEIGHT_MAX_LOG: u32 = 6;
 
 /// Hard cap on emitted code length. zstd's literals Huffman table log is 11.
@@ -273,7 +273,7 @@ fn write_weight_header_fse(out: &mut Vec<u8>, table: &CodeTable) -> Result<()> {
     Ok(())
 }
 
-/// Write the compressed/treeless literals header (RFC 8478 §3.1.1.3.1.1),
+/// Write the compressed/treeless literals header (RFC 8878 §3.1.1.3.1.1),
 /// selecting the smallest `Size_Format` that fits `regen` + `comp`.
 fn write_compressed_lit_header(
     out: &mut Vec<u8>,

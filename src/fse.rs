@@ -1,6 +1,6 @@
 //! FSE (Finite State Entropy) table description, table build, and decode.
 //!
-//! Implements RFC 8478 §4.1: reading the normalized-count table description
+//! Implements RFC 8878 §4.1: reading the normalized-count table description
 //! (`FSE_readNCount`), building the decoding table, and the two-state
 //! `FSE_decompress` used for Huffman weights. Sequence decoding drives the
 //! per-symbol [`FseDecoder`] states directly (see `sequences`).
@@ -120,7 +120,7 @@ pub fn read_ncount(src: &[u8], max_log: u32) -> Result<NCount> {
     })
 }
 
-/// Build a decoding table from a normalized distribution (RFC 8478 §4.1.1).
+/// Build a decoding table from a normalized distribution (RFC 8878 §4.1.1).
 pub fn build_dtable(norm: &[i16], max_symbol: usize, table_log: u32) -> Result<FseDecodeTable> {
     let size = 1usize << table_log;
     let mask = size - 1;
@@ -268,7 +268,7 @@ mod tests {
 
     #[test]
     fn ncount_then_build_predefined_ll() {
-        // RFC 8478 §3.1.1.3.2.2.1 default Literals_Length distribution.
+        // RFC 8878 §3.1.1.3.2.2.1 default Literals_Length distribution.
         const LL_DEFAULT: [i16; 36] = [
             4, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 2, 1, 1,
             1, 1, 1, -1, -1, -1, -1,

@@ -1,4 +1,4 @@
-//! Huff0 (Huffman) literal decoding — RFC 8478 §4.2.1.
+//! Huff0 (Huffman) literal decoding — RFC 8878 §4.2.1.
 //!
 //! Reads the Huffman table description (weights are either FSE-compressed or
 //! packed 4-bits direct), reconstructs the decode table, and decodes the 1- or

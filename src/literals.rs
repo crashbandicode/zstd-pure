@@ -1,4 +1,4 @@
-//! Literals section decoding — RFC 8478 §3.1.1.3.1.
+//! Literals section decoding — RFC 8878 §3.1.1.3.1.
 //!
 //! Handles all four literal block types (Raw, RLE, Compressed, Treeless). The
 //! decoded Huffman table is threaded through `cache` so a Treeless block can

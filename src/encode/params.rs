@@ -35,11 +35,14 @@ pub struct CParams {
     pub strategy: Strategy,
 }
 
-/// Smallest / largest window log we emit. The max matches libzstd's default
-/// decoder limit (`ZSTD_WINDOWLOG_LIMIT_DEFAULT`), so our frames stay decodable
-/// by a stock `ZSTD_decompress` without raising `windowLogMax`.
+/// Smallest / largest window log the encoder emits. The max is 23 (8 MiB):
+/// RFC 8878 §3.1.1.1.2 recommends a compressor not require a `Window_Size`
+/// larger than 8 MB for interoperability (a conformant decompressor need only
+/// support up to that), and the `fast`/chain finders don't exploit a larger
+/// window anyway. This is well under libzstd's default `windowLogMax` (27), so
+/// a stock `ZSTD_decompress` still decodes our frames.
 const MIN_WINDOW_LOG: u32 = 10;
-const MAX_WINDOW_LOG: u32 = 27;
+const MAX_WINDOW_LOG: u32 = 23;
 
 use Strategy::*;
 

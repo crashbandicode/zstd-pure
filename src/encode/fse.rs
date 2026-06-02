@@ -1,4 +1,4 @@
-//! FSE (Finite State Entropy) **encoder** — RFC 8478 §4.1, the inverse of the
+//! FSE (Finite State Entropy) **encoder** — RFC 8878 §4.1, the inverse of the
 //! decoder in [`crate::fse`].
 //!
 //! This batch covers the table *description*:

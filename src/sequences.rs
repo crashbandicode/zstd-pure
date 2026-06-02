@@ -1,4 +1,4 @@
-//! Sequence section decoding + LZ execution — RFC 8478 §3.1.1.3.2.
+//! Sequence section decoding + LZ execution — RFC 8878 §3.1.1.3.2.
 //!
 //! Parses the sequence count and the LL/Offset/ML FSE table modes (Predefined /
 //! RLE / FSE / Repeat), then walks the reverse bitstream decoding each
@@ -19,7 +19,7 @@ pub struct SeqTables {
     pub ml: Option<FseDecodeTable>,
 }
 
-// Baseline + extra-bit tables (RFC 8478 §3.1.1.3.2.1.1). Exposed to the encoder
+// Baseline + extra-bit tables (RFC 8878 §3.1.1.3.2.1.1). Exposed to the encoder
 // (`encode::sequences`) so it computes codes/extra bits from the same tables.
 pub(crate) const LL_BASE: [u32; 36] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24, 28, 32, 40, 48, 64,

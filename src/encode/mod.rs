@@ -1,4 +1,4 @@
-//! Pure-Rust Zstandard **encoder** (RFC 8878 / RFC 8478).
+//! Pure-Rust Zstandard **encoder** (RFC 8878).
 //!
 //! Staged build-out (see `README.md`):
 //!
