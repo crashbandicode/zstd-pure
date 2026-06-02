@@ -120,7 +120,8 @@ pub fn compress(data: &[u8], level: i32, checksum: bool, expect_magic: bool) -> 
         // both persist across blocks (the decoder keeps them for repeat-offset
         // codes and "Repeat" table mode). Thread them as one `EncState`,
         // committing only when a block is actually emitted compressed.
-        let mut state = EncState { rep: [1, 4, 8], seq: super::sequences::SeqCTables::default() };
+        let mut state =
+            EncState { rep: [1, 4, 8], seq: super::sequences::SeqCTables::default(), lit: None };
         let mut finder = super::lz::Finder::new(&params);
         let n = data.len();
         let mut start = 0usize;
@@ -209,6 +210,7 @@ pub fn compress_with_dict(
         let mut state = EncState {
             rep: dict.entropy().map_or([1, 4, 8], |e| e.rep),
             seq: super::sequences::SeqCTables::default(),
+            lit: None,
         };
         let mut finder = super::lz::Finder::new(&params);
         finder.prime(&combined, dict_len);

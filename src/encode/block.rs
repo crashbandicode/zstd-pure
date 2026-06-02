@@ -83,6 +83,8 @@ pub fn write_huffman_literals_block(out: &mut Vec<u8>, last: bool, literals: &[u
 pub struct EncState {
     pub rep: [u32; 3],
     pub seq: super::sequences::SeqCTables,
+    /// Previous compressed block's literals Huffman table, for Treeless reuse.
+    pub lit: Option<super::huff::CodeTable>,
 }
 
 pub fn write_compressed_block(
@@ -98,9 +100,9 @@ pub fn write_compressed_block(
     let mut rep = state.rep;
     let (seqs, literals) = finder.parse(data, range, max_offset, &mut rep);
     let mut body = Vec::with_capacity(body_hint);
-    super::huff::write_literals_auto(&mut body, &literals);
+    let lit = super::huff::write_literals_auto(&mut body, &literals, state.lit.as_ref());
     let seq = super::sequences::write_sequences(&mut body, &seqs, &state.seq)?;
     write_block_header(out, last, BlockType::Compressed, body.len());
     out.extend_from_slice(&body);
-    Ok(EncState { rep, seq })
+    Ok(EncState { rep, seq, lit })
 }

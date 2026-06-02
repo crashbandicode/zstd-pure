@@ -31,6 +31,7 @@ const HUF_WEIGHT_MAX_LOG: u32 = 6;
 const MAX_CODE_LEN: u8 = 11;
 
 /// Per-symbol canonical code + bit count, plus the weight header inputs.
+#[derive(Clone)]
 pub struct CodeTable {
     /// `code[s]` holds the `nbits[s]`-bit canonical code (first-read bit = MSB).
     code: [u32; 256],
@@ -40,6 +41,15 @@ pub struct CodeTable {
     max_symbol: usize,
     /// Stored header weights for symbols `0..max_symbol`.
     weights: Vec<u8>,
+}
+
+impl CodeTable {
+    /// Whether this table can encode every byte in `lits` — the validity gate
+    /// for reusing it in a Treeless literals block. A byte with no code (zero
+    /// bit length) isn't in the table and can't be emitted.
+    pub fn can_encode(&self, lits: &[u8]) -> bool {
+        lits.iter().all(|&b| self.nbits[b as usize] > 0)
+    }
 }
 
 /// Build length-limited Huffman code lengths from a symbol histogram (`0` for an
@@ -275,13 +285,15 @@ fn write_weight_header_fse(out: &mut Vec<u8>, table: &CodeTable) -> Result<()> {
 
 /// Write the compressed/treeless literals header (RFC 8878 §3.1.1.3.1.1),
 /// selecting the smallest `Size_Format` that fits `regen` + `comp`.
+/// `block_type` is 2 (Compressed — a tree description precedes the streams) or
+/// 3 (Treeless — streams only, reusing the previous block's Huffman table).
 fn write_compressed_lit_header(
     out: &mut Vec<u8>,
+    block_type: u32,
     four: bool,
     regen: usize,
     comp: usize,
 ) -> Result<()> {
-    const COMPRESSED: u32 = 2;
     let too_big = || ZstdError::Invalid {
         what: "compressed literals header",
         detail: format!("regen {regen} / comp {comp} exceed 18-bit fields"),
@@ -291,19 +303,19 @@ fn write_compressed_lit_header(
         if regen > 0x3FF || comp > 0x3FF {
             return Err(too_big());
         }
-        let v = COMPRESSED | (regen as u32) << 4 | (comp as u32) << 14;
+        let v = block_type | (regen as u32) << 4 | (comp as u32) << 14;
         out.extend_from_slice(&v.to_le_bytes()[..3]);
     } else if regen <= 0x3FF && comp <= 0x3FF {
         // Size_Format 1: four streams, 10-bit, 3-byte header.
-        let v = COMPRESSED | 1 << 2 | (regen as u32) << 4 | (comp as u32) << 14;
+        let v = block_type | 1 << 2 | (regen as u32) << 4 | (comp as u32) << 14;
         out.extend_from_slice(&v.to_le_bytes()[..3]);
     } else if regen <= 0x3FFF && comp <= 0x3FFF {
         // Size_Format 2: four streams, 14-bit, 4-byte header.
-        let v = COMPRESSED | 2 << 2 | (regen as u32) << 4 | (comp as u32) << 18;
+        let v = block_type | 2 << 2 | (regen as u32) << 4 | (comp as u32) << 18;
         out.extend_from_slice(&v.to_le_bytes());
     } else if regen <= 0x3FFFF && comp <= 0x3FFFF {
         // Size_Format 3: four streams, 18-bit, 5-byte header.
-        let v = COMPRESSED as u64 | 3 << 2 | (regen as u64) << 4 | (comp as u64) << 22;
+        let v = block_type as u64 | 3 << 2 | (regen as u64) << 4 | (comp as u64) << 22;
         out.extend_from_slice(&v.to_le_bytes()[..5]);
     } else {
         return Err(too_big());
@@ -311,11 +323,27 @@ fn write_compressed_lit_header(
     Ok(())
 }
 
-/// Encode `literals` as a compressed Huffman literals section, appended to
-/// `out`. Errors (e.g. fewer than 2 distinct symbols, or a symbol > 128 while
-/// only direct weights are supported) leave it to the caller to fall back to a
-/// raw/RLE literals block.
-pub fn write_literals_section(out: &mut Vec<u8>, literals: &[u8]) -> Result<()> {
+/// Encode `literals` four-stream when worthwhile, else single-stream, with
+/// `table`. Returns `(four, stream_payload)` — the streams only, no header.
+fn encode_lit_streams(table: &CodeTable, literals: &[u8]) -> Result<(bool, Vec<u8>)> {
+    let n = literals.len();
+    // Four-stream form amortizes the 6-byte jump table only once it's both valid
+    // (`3·ceil(n/4) ≤ n`) and large enough to pay for itself.
+    let four = n >= 256 && n.div_ceil(4) * 3 <= n;
+    let streams = if four {
+        encode_4stream(table, literals)?
+    } else {
+        encode_stream(table, literals)
+    };
+    Ok((four, streams))
+}
+
+/// Build a **Compressed** (block_type 2) Huffman literals section — a fresh tree
+/// description plus the streams — returning the section bytes and the table it
+/// built (to thread forward for a later Treeless block). Errors (fewer than 2
+/// distinct symbols, or a symbol > 128 while only direct weights are supported)
+/// leave it to the caller to fall back to a raw/RLE literals block.
+fn build_compressed_section(literals: &[u8]) -> Result<(Vec<u8>, CodeTable)> {
     let mut freq = [0u32; 256];
     for &b in literals {
         freq[b as usize] += 1;
@@ -332,19 +360,33 @@ pub fn write_literals_section(out: &mut Vec<u8>, literals: &[u8]) -> Result<()> 
 
     let mut payload = Vec::new();
     write_weight_header(&mut payload, &table)?;
+    let (four, streams) = encode_lit_streams(&table, literals)?;
+    payload.extend_from_slice(&streams);
 
-    let n = literals.len();
-    // Four-stream form amortizes the 6-byte jump table only once it's both valid
-    // (`3·ceil(n/4) ≤ n`) and large enough to pay for itself.
-    let four = n >= 256 && n.div_ceil(4) * 3 <= n;
-    if four {
-        payload.extend_from_slice(&encode_4stream(&table, literals)?);
-    } else {
-        payload.extend_from_slice(&encode_stream(&table, literals));
-    }
-
-    write_compressed_lit_header(out, four, n, payload.len())?;
+    let mut out = Vec::new();
+    write_compressed_lit_header(&mut out, 2, four, literals.len(), payload.len())?;
     out.extend_from_slice(&payload);
+    Ok((out, table))
+}
+
+/// Build a **Treeless** (block_type 3) literals section — the streams only,
+/// encoded with the previously-sent `table` (no tree description). The caller
+/// must ensure `table.can_encode(literals)`.
+fn build_treeless_section(literals: &[u8], table: &CodeTable) -> Result<Vec<u8>> {
+    let (four, streams) = encode_lit_streams(table, literals)?;
+    let mut out = Vec::new();
+    write_compressed_lit_header(&mut out, 3, four, literals.len(), streams.len())?;
+    out.extend_from_slice(&streams);
+    Ok(out)
+}
+
+/// Encode `literals` as a compressed Huffman literals section, appended to
+/// `out`. Errors (e.g. fewer than 2 distinct symbols, or a symbol > 128 while
+/// only direct weights are supported) leave it to the caller to fall back to a
+/// raw/RLE literals block.
+pub fn write_literals_section(out: &mut Vec<u8>, literals: &[u8]) -> Result<()> {
+    let (section, _table) = build_compressed_section(literals)?;
+    out.extend_from_slice(&section);
     Ok(())
 }
 
@@ -369,14 +411,39 @@ pub fn write_raw_literals(out: &mut Vec<u8>, lits: &[u8]) {
     out.extend_from_slice(lits);
 }
 
-/// Write the smaller of a raw or Huffman-compressed literals section.
-pub fn write_literals_auto(out: &mut Vec<u8>, lits: &[u8]) {
+/// Write the smallest literals section among Raw, a fresh Compressed (Huffman)
+/// block, and — when `prev` (the previous block's Huffman table) can encode
+/// every byte — a Treeless block reusing it (no tree description). Returns the
+/// Huffman table now current for the next block: the fresh one if a Compressed
+/// block was chosen, otherwise `prev` unchanged (Raw and Treeless leave the
+/// decoder's cached table as it was), mirroring [`crate::literals::decode`].
+pub fn write_literals_auto(
+    out: &mut Vec<u8>,
+    lits: &[u8],
+    prev: Option<&CodeTable>,
+) -> Option<CodeTable> {
+    // Each candidate carries the table that becomes current if it's chosen.
     let mut raw = Vec::with_capacity(lits.len() + 3);
     write_raw_literals(&mut raw, lits);
+    let mut candidates: Vec<(Vec<u8>, Option<CodeTable>)> = vec![(raw, prev.cloned())];
 
-    let mut huf = Vec::new();
-    let use_huf = write_literals_section(&mut huf, lits).is_ok() && huf.len() < raw.len();
-    out.extend_from_slice(if use_huf { &huf } else { &raw });
+    if let Ok((bytes, table)) = build_compressed_section(lits) {
+        candidates.push((bytes, Some(table)));
+    }
+    if let Some(t) = prev {
+        if t.can_encode(lits) {
+            if let Ok(bytes) = build_treeless_section(lits, t) {
+                candidates.push((bytes, prev.cloned()));
+            }
+        }
+    }
+
+    let (bytes, table) = candidates
+        .into_iter()
+        .min_by_key(|(b, _)| b.len())
+        .expect("the raw candidate is always present");
+    out.extend_from_slice(&bytes);
+    table
 }
 
 /// Write a standalone Huffman table description (the weight header) for a
@@ -529,5 +596,42 @@ mod tests {
         }
         assert!(maxlen <= MAX_CODE_LEN);
         assert!((kraft - 1.0).abs() < 1e-9, "Kraft sum {kraft} != 1");
+    }
+
+    /// A second block over the same alphabet reuses the first block's Huffman
+    /// table via a **Treeless** section (no tree description), so it is smaller
+    /// than re-describing the tree, and the pair round-trips through the literals
+    /// decoder with one table cache threaded across them exactly as the encoder
+    /// threaded it.
+    #[test]
+    fn treeless_reuses_previous_table_and_round_trips() {
+        let lits1 = skewed_bytes(3000, 60, 11);
+        // Same multiset of symbols (reversed) so the first block's table can
+        // encode the second — the validity condition for Treeless reuse.
+        let lits2: Vec<u8> = lits1.iter().rev().copied().collect();
+
+        let mut sec1 = Vec::new();
+        let t1 = write_literals_auto(&mut sec1, &lits1, None);
+        assert!(t1.is_some(), "block 1 should pick a compressed (tree) section");
+
+        let mut sec2 = Vec::new();
+        let _t2 = write_literals_auto(&mut sec2, &lits2, t1.as_ref());
+
+        // Treeless must beat a fresh compressed block 2 (it drops the tree header).
+        let mut fresh2 = Vec::new();
+        write_literals_section(&mut fresh2, &lits2).unwrap();
+        assert!(
+            sec2.len() < fresh2.len(),
+            "treeless block ({}) should beat a fresh tree block ({})",
+            sec2.len(),
+            fresh2.len()
+        );
+
+        // Decode both, threading one cache across them as the encoder did.
+        let mut cache = None;
+        let (d1, _) = literals::decode(&sec1, &mut cache).unwrap();
+        assert_eq!(d1, lits1, "block 1 round-trip mismatch");
+        let (d2, _) = literals::decode(&sec2, &mut cache).unwrap();
+        assert_eq!(d2, lits2, "treeless block round-trip mismatch");
     }
 }

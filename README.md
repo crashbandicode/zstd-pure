@@ -51,6 +51,7 @@ libzstd, which implements RFC 8878. Notable conformance points:
 - [x] `btopt`/`btultra` optimal parse (L13+): rep-aware DP over a fixed-point cost model (`encode::lz::opt_parse_block`); beats libzstd ratio on dense JSON at L19 — **T2.3 (ratio)**
 - [x] `dfast` double-hash finder (L2–3): 8-byte long + 4-byte short tables, best-of-two greedy — **T2.3 (ratio)**
 - [x] Sequence-table Repeat mode (3): cross-block per-channel FSE table reuse — `write_sequences` threads the previous compressed block's tables (`encode::block::EncState`) and reuses them (no table description) when valid + cheaper — **T2.3 (ratio)**
+- [x] Treeless literals: cross-block Huffman table reuse — `write_literals_auto` reuses the previous compressed block's table (literals block type 3, no tree description) when it can encode every byte + is cheaper, threaded via `EncState` — **T2.3 (ratio)**
 - [ ] opt price-model refinement; binary-tree match finder — T2.3 (ratio)
 - [ ] Long-distance matching — T2.4
 - [x] Dictionary encode (`compress_with_dict`) — raw + structured/tagged: match window primed with dict content, seeded repeat offsets, dict-id frame header; verified through libzstd + our decoder, improves ratio on a many-small-files corpus — **T3.1**
@@ -130,8 +131,9 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
   it can encode this block's codes and beats re-describing; `encode::block::EncState`
   threads the tables across blocks with the same commit-on-emitted-compressed-block
   discipline as the repeat offsets. The win is on small blocks (a large block
-  amortizes its table header anyway); treeless literals + dict-table seeding for
-  block 1 are the remaining cross-block-reuse pieces.
+  amortizes its table header anyway). Treeless literals (the literals analogue,
+  block type 3) are likewise done; seeding block 1 from a dictionary's tables is
+  the remaining cross-block-reuse piece.
 - **Benchmark — DONE.** `benches/compression.rs` (criterion throughput) +
   `examples/ratio.rs` (size) vs the `zstd` crate, documented in `BENCHMARKS.md`.
 - **T2.4 LDM**, and the **T1.3 no_std** gating (deferred to crate extraction —
@@ -271,12 +273,12 @@ dictionary. Handles both flavours: raw-content (default repeat offsets, no
 dict-id) and structured/tagged (the dict's three repeat offsets seed the running
 `rep`, and the dict id is written to the frame header). The dictionary's preset
 entropy tables are not yet referenced for a dict-primed compression: block 1
-isn't seeded from them (sequence-table Repeat mode now exists generally, but
-block 1 has no previous table to repeat, and treeless literals aren't
-implemented yet), so the output is correct without entropy coupling; seeding
-block 1 from the dict is a ratio refinement. Verified through libzstd (loaded
-with the same dict) and our own decoder across levels 1–22, plus a
-ratio-improves-on-many-small-files check.
+isn't seeded from them. The cross-block reuse mechanisms now exist generally
+(sequence-table Repeat mode + treeless literals), but block 1 has no previous
+tables to reuse until it is seeded from the dict, so the output is currently
+correct without entropy coupling; seeding block 1 from the dict is a ratio
+refinement. Verified through libzstd (loaded with the same dict) and our own
+decoder across levels 1–22, plus a ratio-improves-on-many-small-files check.
 
 Dictionary **training** — **DONE (raw-content).** `encode::train::train_dictionary`
 is a pure-Rust greedy **COVER** (the core of libzstd's
@@ -302,7 +304,10 @@ decoder warm-starts the first block from these tables.
 
 Still open in Tier 3: have the **encoder** seed a dict-primed compression's first
 block from the structured dict's preset entropy tables (it currently primes
-matches + repeat offsets only; cross-block sequence-table Repeat mode now exists,
-so this needs treeless literals plus seeding block 1's table state from the dict);
-perf (sequence decode + reverse bit reader are the decode hot spots); criterion
-benches vs the `zstd` crate.
+matches + repeat offsets only). The cross-block reuse mechanisms now exist —
+sequence-table Repeat mode and treeless literals — so this is now just seeding
+block 1's `EncState` from the dict: the literals Huffman table (rebuilt from the
+dict's decode table) and the sequence FSE tables (which need the dict's
+normalized counts, since a `-1` low-probability entry can't be recovered from a
+decode table alone). Also: perf (sequence decode + reverse bit reader are the
+decode hot spots); criterion benches vs the `zstd` crate.
