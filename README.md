@@ -108,7 +108,7 @@ in [`BENCHMARKS.md`](BENCHMARKS.md).
 | `dict` | raw-content + structured (tagged) dictionary parse |
 | `streaming` | block-by-block bounded-memory decode + `io::Read` (`StreamingDecoder`) |
 | `io` | `Read` trait + `Error`/`ErrorKind`/`Result`: a re-export of `std::io` under `std`, a small `no_std` shim otherwise |
-| `encode` | encoder: `huff` (Huff0 literal encoder), `fse` (FSE entropy encoder), `sequences` (per-block mode-selecting sequence encoder), `lz` (fast/dfast/chain/opt match finders + dictionary priming), `params` (level→cparams table), `bitstream` (shared `BIT_CStream` writer), `train` (pure-Rust COVER dictionary trainer + structured/tagged finalize), `block`/`frame` writers + `compress` / `compress_with_dict` |
+| `encode` | encoder: `huff` (Huff0 literal encoder), `fse` (FSE entropy encoder), `sequences` (per-block mode-selecting sequence encoder), `lz` (fast/dfast/chain match finders + chain/tree-hybrid optimal parse with block splitting + dictionary priming), `params` (level→cparams table), `bitstream` (shared `BIT_CStream` writer), `train` (pure-Rust COVER dictionary trainer + structured/tagged finalize), `block`/`frame` writers + `compress` / `compress_with_dict` |
 
 ## Handoff — remaining work (notes for the next agent)
 
@@ -128,11 +128,12 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
   `greedy`/`lazy`/`lazy2` (hash-chain, L4–12), and the `btopt`/`btultra`
   rep-aware optimal parse (L13+). `level` scales ratio: a record stream
   1.87× → 1.02× of libzstd (L1 → L3 via dfast); dense JSON now **beats** libzstd
-  at L19 (0.84×). The opt price model gained libzstd's `btultra2` second pass —
-  a re-parse priced from the first parse's *actual* literal/code statistics
-  rather than the predefined-table prior — which tightened the top-level soft
-  spot (L19 `records` 1.32× → 1.26×). **Remaining tuning:** a binary-tree match
-  finder would make the optimal parse both faster and deeper.
+  at L19 (0.80×). The opt parse then gained libzstd's `btultra2` second pass
+  (re-pricing from the first parse's *actual* statistics), block splitting (L16+),
+  and a chain/tree **hybrid** match finder (L16+) — together taking the top-level
+  soft spot from L19 `records` 1.32× → 1.12× and pushing `json` to 0.80×.
+  **Remaining tuning:** the last `records` gap is the *cost model* (rep-offset
+  candidates priced with the per-cell `rep`), not the match finder — see §2.3.
 - **Sequence-table Repeat mode (3) — DONE.** `write_sequences` reuses the
   previous compressed block's LL/OF/ML table (mode 3, no table description) when
   it can encode this block's codes and beats re-describing; `encode::block::EncState`
@@ -145,8 +146,9 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
   re-describing tables. Cross-block reuse is complete.
 - **Benchmark — DONE.** `benches/compression.rs` (criterion throughput) +
   `examples/ratio.rs` (size) vs the `zstd` crate, documented in `BENCHMARKS.md`.
-- **T2.4 LDM**, and the **T1.3 no_std** gating (deferred to crate extraction —
-  see below).
+- **T2.4 LDM** (long-distance matching) remains open — see the dedicated handoff
+  note in the T2.4 section below. (**T1.3 no_std** — including the streaming
+  decoder over the crate's `io::Read` shim — is now done.)
 
 ### T2.1 entropy encoders
 - **Huff0 encoder — DONE (T2.1a).** `encode/huff.rs`: length-limited Huffman
@@ -351,6 +353,7 @@ decode table alone). So block 1 warm-starts via Treeless literals + Repeat-mode
 sequence tables, shrinking the block bodies on small files; verified through
 libzstd + our decoder.
 
-Still open in Tier 3: perf (sequence decode + reverse bit reader are the decode
-hot spots); criterion benches vs the `zstd` crate. With this, the encoder + decoder
-both fully consume structured dictionaries.
+Still open in Tier 3: perf (sequence decode + the reverse bit reader are the
+decode hot spots; the chain walk / opt DP + the L16+ tree are the encoder's) and
+a decode-speed comparison vs the pure-Rust `ruzstd`. The encoder + decoder both
+fully consume structured dictionaries.
