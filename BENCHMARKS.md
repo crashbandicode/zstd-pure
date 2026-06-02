@@ -54,6 +54,31 @@ there the chain's depth (128) already reaches `records`'s matches, so the tree
 can't help (unlike at L13, where the shallow depth lets it); the remaining lever
 at the top is the cost model.
 
+## Real-world corpus (Silesia, ours ÷ libzstd)
+
+The fixture-gated `real_corpus` test (`tests/real_corpus.rs`) round-trips a
+directory of real files *both ways* (our encode → our + libzstd decode; libzstd
+encode → our decode) and reports the aggregate compressed size. On the standard
+[Silesia corpus][silesia] (12 files, 202 MiB) every file round-tripped through
+both decoders at each level:
+
+| level | ours | libzstd | ratio |
+|------:|-----:|--------:|------:|
+|  3 | 67,553,205 B | 66,137,723 B | 1.021× |
+|  9 | 62,515,463 B | 59,081,628 B | 1.058× |
+| 19 | 55,797,558 B | 52,891,946 B | 1.055× |
+
+Within ~2–6 % of libzstd across the range. The high-level gap partly reflects
+our 8 MiB window cap (`MAX_WINDOW_LOG` 23, for decoder interoperability) versus
+libzstd's larger window on the multi-MB files (e.g. `mozilla` 51 MB, `webster`
+41 MB), where matches farther than 8 MiB back are out of our reach — the
+long-distance-matching item (T2.4) targets exactly this.
+
+Reproduce: `ZSTD_PURE_CORPUS=~/fixtures/silesia/raw cargo test --release
+real_corpus -- --ignored --nocapture`.
+
+[silesia]: https://github.com/MiloszKrajewski/SilesiaCorpus
+
 ## Throughput (indicative)
 
 Criterion, 256 KiB mixed corpus, optimized build on one dev machine — **relative
