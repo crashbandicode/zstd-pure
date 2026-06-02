@@ -34,7 +34,7 @@ libzstd, which implements RFC 8878. Notable conformance points:
 - [x] Output ceiling (`decompress_capped`) against decompression bombs
 - [x] Frame inspection without decoding the body (`frame_header`) — **T1.4**
 - [x] Dictionary decode (raw-content + structured/tagged) — **T1.1**
-- [x] Streaming / bounded-memory sliding-window decode + `io::Read` — **T1.2** (std-only)
+- [x] Streaming / bounded-memory sliding-window decode + `io::Read` — **T1.2** (`std` and `no_std`, via the crate's `io::Read` shim)
 - [x] `no_std` + `alloc` (behind a default `std` feature) — **T1.3**
 - [x] Robustness harness (corpus matrix + randomized never-panic + oracle) — **T1.5**
 
@@ -63,8 +63,8 @@ libzstd, which implements RFC 8878. Notable conformance points:
 
 | feature | default | effect |
 |---|---|---|
-| `std` | on | `std::io::Read` `StreamingDecoder` + `std` error impls |
-| `alloc` | (implied by `std`) | the decode/encode core + dictionaries |
+| `std` | on | `io::Read` becomes a re-export of `std::io::Read` (real `std::io` interop for `StreamingDecoder`) + `std` error impls |
+| `alloc` | (implied by `std`) | the decode/encode core + dictionaries + `StreamingDecoder` over a `no_std` `io::Read` shim |
 
 The codec runs on `no_std + alloc`:
 
@@ -73,9 +73,11 @@ cargo build --no-default-features --features alloc     # no_std
 cargo build                                            # std (default)
 ```
 
-Under `no_std` everything is available except `StreamingDecoder` (it builds on
-`std::io::Read`; add a `no_std` `Read` shim to expose it). Verified with the
-host `no_std` build (a `#![no_std]` crate fails to compile on any stray `std::`
+The full API is available under `no_std`, including `StreamingDecoder`: it
+implements the crate's own `io::Read` trait, which is a re-export of
+`std::io::Read` under `std` and a minimal owned-error shim otherwise (consumers
+without `std` loop on `read` until it returns 0). Verified with the host
+`no_std` build (a `#![no_std]` crate fails to compile on any stray `std::`
 path); a `thumbv7em-none-eabi` build is the recommended CI gate.
 
 ## Validation
@@ -104,6 +106,7 @@ in [`BENCHMARKS.md`](BENCHMARKS.md).
 | `frame` | frame header + block loop + skippable + checksum + dict priming |
 | `dict` | raw-content + structured (tagged) dictionary parse |
 | `streaming` | block-by-block bounded-memory decode + `io::Read` (`StreamingDecoder`) |
+| `io` | `Read` trait + `Error`/`ErrorKind`/`Result`: a re-export of `std::io` under `std`, a small `no_std` shim otherwise |
 | `encode` | encoder: `huff` (Huff0 literal encoder), `fse` (FSE entropy encoder), `sequences` (per-block mode-selecting sequence encoder), `lz` (fast/dfast/chain/opt match finders + dictionary priming), `params` (level→cparams table), `bitstream` (shared `BIT_CStream` writer), `train` (pure-Rust COVER dictionary trainer + structured/tagged finalize), `block`/`frame` writers + `compress` / `compress_with_dict` |
 
 ## Handoff — remaining work (notes for the next agent)
@@ -266,14 +269,15 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
   (Sequence-table Repeat mode (3) and the opt price-model refinement — the
   `btultra2` second pass — are now done; see the Encoder checklist.)
 
-### T1.3 no_std + alloc
-Deferred: `zstd_pure` is currently a *module* of the std crate
-`nx-layout-toolbox`, so `--no-default-features --features alloc` / a `thumb`
-target can't be exercised here. Real verification arrives with the planned
-extraction into a standalone `zstd-pure` crate (also needs a `thiserror` 2.0
-bump for `core::error::Error`). Source is already `core`-friendly except
-`streaming.rs` (`std::io::Read`) — gate that behind a `std` feature on
-extraction and add a no_std `Read` shim.
+### T1.3 no_std + alloc — DONE
+Now a standalone crate, so `cargo build --no-default-features --features alloc`
+is part of the baseline and exercises the whole codec under `no_std` (a
+`#![no_std]` crate fails to compile on any stray `std::` path). `thiserror` 2.0
+supplies `core::error::Error`. The last `std`-only holdout, `streaming.rs`, is
+un-gated: `StreamingDecoder` implements the crate's own `io::Read` (a re-export
+of `std::io::Read` under `std`, a minimal owned-error shim — `io::{Read, Error,
+ErrorKind, Result}` — otherwise). A `thumbv7em-none-eabi` build remains the
+recommended CI gate for a true bare-metal target.
 
 ### Tier 3
 Dictionary **encode** — **DONE.** `encode::frame::compress_with_dict` primes the

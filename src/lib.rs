@@ -51,9 +51,68 @@ pub mod fse;
 pub mod huff;
 pub mod literals;
 pub mod sequences;
-/// Streaming, bounded-memory decode is std-only (it builds on `std::io::Read`);
-/// add a `no_std` `Read` shim to make it available without `std`.
-#[cfg(feature = "std")]
+/// `std::io::Read` and the `Error`/`ErrorKind`/`Result` it needs under `std`; a
+/// minimal `no_std` stand-in otherwise — so [`streaming::StreamingDecoder`] can
+/// implement one `Read` trait whether or not `std` is present. Under `std` this
+/// is a straight re-export, so [`StreamingDecoder`] is a genuine `std::io::Read`.
+pub mod io {
+    #[cfg(feature = "std")]
+    pub use std::io::{Error, ErrorKind, Read, Result};
+
+    #[cfg(not(feature = "std"))]
+    pub use shim::{Error, ErrorKind, Read, Result};
+
+    /// The `no_std` `Read` shim: just the `read` primitive plus a small owned
+    /// error type. Consumers without `std` loop on `read` until it returns 0.
+    #[cfg(not(feature = "std"))]
+    mod shim {
+        use crate::alloc_prelude::*;
+
+        /// `no_std` analogue of `std::io::Read` — the single blocking `read`.
+        pub trait Read {
+            /// Read into `buf`, returning the number of bytes written (`0` at EOF).
+            fn read(&mut self, buf: &mut [u8]) -> Result<usize>;
+        }
+
+        /// Error categories the decoder distinguishes (the subset of
+        /// `std::io::ErrorKind` it constructs).
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum ErrorKind {
+            /// The compressed stream was malformed.
+            InvalidData,
+        }
+
+        /// A read error: a kind plus an owned, human-readable message.
+        #[derive(Debug)]
+        pub struct Error {
+            kind: ErrorKind,
+            message: String,
+        }
+
+        impl Error {
+            /// Build an error from a kind and a message — mirroring
+            /// `std::io::Error::new`'s signature for the decoder's call sites.
+            pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
+                Error { kind, message: message.into() }
+            }
+
+            /// The error category.
+            pub fn kind(&self) -> ErrorKind {
+                self.kind
+            }
+        }
+
+        impl core::fmt::Display for Error {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.write_str(&self.message)
+            }
+        }
+
+        /// `no_std` analogue of `std::io::Result`.
+        pub type Result<T> = core::result::Result<T, Error>;
+    }
+}
+
 pub mod streaming;
 pub mod xxhash;
 
@@ -62,7 +121,6 @@ pub use encode::{
     compress, compress_huffman_literals, compress_store, compress_stored, compress_with_dict,
     train_dictionary, train_dictionary_structured,
 };
-#[cfg(feature = "std")]
 pub use streaming::StreamingDecoder;
 pub use error::{Result, ZstdError};
 pub use frame::{

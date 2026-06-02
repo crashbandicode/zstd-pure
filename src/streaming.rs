@@ -4,15 +4,18 @@
 //! sliding window buffer, evicting bytes that are both already delivered and
 //! older than `Window_Size`. Memory stays bounded by roughly
 //! `window_size + one block`, independent of the (possibly multi-gigabyte)
-//! logical output. It implements [`std::io::Read`], and a configurable
-//! `window_log_max` ceiling rejects frames whose declared window would force an
-//! unbounded allocation from untrusted input.
+//! logical output. It implements [`crate::io::Read`] — a re-export of
+//! `std::io::Read` under `std`, or a `no_std` shim otherwise — and a
+//! configurable `window_log_max` ceiling rejects frames whose declared window
+//! would force an unbounded allocation from untrusted input.
 //!
 //! The one-shot [`super::decompress`] path is left untouched (it intentionally
 //! retains the whole output, which the byte-for-byte MeshCodec decode relies
 //! on); streaming is an additive alternative for large or untrusted inputs.
 
-use std::io::{self, Read};
+#[allow(unused_imports)]
+use crate::alloc_prelude::*;
+use crate::io::{self, Read};
 
 use super::block::{self, BlockState};
 use super::dict::Dictionary;
