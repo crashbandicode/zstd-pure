@@ -1,0 +1,49 @@
+[package]
+name = "zstd-pure-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# libzstd as the differential / round-trip ORACLE only — this is a fuzz-only
+# crate, never the published library, so the "no libzstd at runtime" rule holds.
+# `legacy` is OFF (the default has it on): our decoder targets RFC 8878 modern
+# frames only, so the oracle must too — otherwise it decodes obsolete v0.1-v0.7
+# frames (magic 0xFD2FB51E..=0xFD2FB527) ours correctly rejects.
+zstd = { version = "0.13", default-features = false, features = ["arrays", "zdict_builder", "experimental"] }
+
+[dependencies.zstd-pure]
+path = ".."
+
+# An empty workspace table makes this fuzz crate its own workspace root, so the
+# parent crate's `cargo build`/`test`/`clippy` never descend into it (and vice
+# versa). `zstd-pure` is pulled in as a path dependency, not a workspace member.
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_diff"
+path = "fuzz_targets/decode_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "encode_roundtrip"
+path = "fuzz_targets/encode_roundtrip.rs"
+test = false
+doc = false
+bench = false

@@ -94,8 +94,23 @@ corpus sweep, and cross-block cases. A `proptest` property suite
 (`tests/proptest.rs`) adds *shrinking* coverage of the same invariants — the
 decoder never panics on arbitrary or corrupted frames, the encoder round-trips
 both ways across the level range, and the libzstd oracle — so any future
-regression lands as a minimal reproducer. Ratio + throughput vs libzstd are
-tracked in [`BENCHMARKS.md`](BENCHMARKS.md).
+regression lands as a minimal reproducer.
+
+A `cargo fuzz` crate (`fuzz/`, nightly) adds adversarial coverage with three
+libFuzzer targets: `decode` (every one-shot/streaming, magic/magicless decode
+path must never panic or OOM under a 64 MiB output cap), `encode_roundtrip`
+(compress arbitrary input at any level, then require both decoders to recover
+it), and `decode_diff` (a differential that requires our decoder and libzstd to
+agree on the output of any frame *both* accept). The differential is scoped to
+our RFC 8878 surface — libzstd is built without the `legacy` feature and capped
+at `window_log` 27 — and asserts only output equality on jointly-accepted
+frames, because libzstd's streaming decoder is deliberately lenient about some
+malformed frames (e.g. a `Frame_Content_Size` that disagrees with the actual
+content) that ours rejects, as libzstd's own one-shot API does. Run with
+`cargo +nightly fuzz run <target>`, seeding `fuzz/corpus/<target>/` with real
+frames for depth.
+
+Ratio + throughput vs libzstd are tracked in [`BENCHMARKS.md`](BENCHMARKS.md).
 
 ## Module layout
 
