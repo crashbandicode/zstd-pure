@@ -22,7 +22,7 @@ pub mod lz;
 pub mod params;
 pub mod sequences;
 
-pub use frame::{compress, compress_huffman_literals, compress_store};
+pub use frame::{compress, compress_huffman_literals, compress_store, compress_with_dict};
 
 /// Compress `data` into a standard (magic-prefixed) store-mode frame. No
 /// content checksum. See [`compress_store`] for the full-control entry point.
@@ -310,5 +310,100 @@ mod tests {
         let mut out = vec![0u8; data.len()];
         let n = dctx.decompress(&mut out, &frame).unwrap();
         assert_eq!(&out[..n], &data[..]);
+    }
+}
+
+#[cfg(test)]
+mod dict_tests {
+    use super::*;
+    use crate::{decompress_with_dict, Dictionary};
+
+    /// Round-trip `data`, compressed with our [`compress_with_dict`] + the
+    /// `dict_bytes` buffer, through BOTH libzstd (loaded with the same
+    /// dictionary — proves the output is spec-correct) and our own dictionary
+    /// decoder (self-consistency).
+    fn assert_dict_roundtrips(data: &[u8], dict_bytes: &[u8], level: i32) {
+        let dict = Dictionary::parse(dict_bytes).expect("parse dict");
+        let frame = compress_with_dict(data, &dict, level, false, true);
+
+        let mut dec = zstd::bulk::Decompressor::with_dictionary(dict_bytes)
+            .expect("libzstd decompressor with dict");
+        let by_libzstd = dec
+            .decompress(&frame, data.len() + 64)
+            .unwrap_or_else(|e| panic!("libzstd dict decode (L{level}, {} bytes): {e}", data.len()));
+        assert_eq!(by_libzstd, data, "libzstd dict mismatch L{level} ({} bytes)", data.len());
+
+        let by_us = decompress_with_dict(&frame, &dict, data.len() + 64)
+            .unwrap_or_else(|e| panic!("self dict decode (L{level}): {e}"));
+        assert_eq!(by_us, data, "self dict mismatch L{level} ({} bytes)", data.len());
+    }
+
+    #[test]
+    fn raw_content_dict_encode_round_trips() {
+        // A no-magic buffer is a raw-content dictionary (both libzstd and our
+        // parser treat it that way). Sharing substrings with the input makes it
+        // pull its weight.
+        let dict = b"the quick brown fox jumps over the lazy dog. ".repeat(20);
+        let data = b"the quick brown fox is feeling very lazy today. ".repeat(60);
+        for level in [1, 3, 6, 9, 19, 22] {
+            assert_dict_roundtrips(&data, &dict, level);
+        }
+        // Edge cases: empty and sub-min-match inputs (no sequences emitted).
+        assert_dict_roundtrips(&[], &dict, 3);
+        assert_dict_roundtrips(b"x", &dict, 3);
+        assert_dict_roundtrips(b"the", &dict, 19);
+    }
+
+    /// Many small related records — the realistic dictionary use case.
+    fn small_records() -> Vec<Vec<u8>> {
+        (0..600u32)
+            .map(|i| {
+                format!(
+                    "{{\"id\":{i},\"name\":\"item_{}\",\"kind\":\"weapon\",\"atk\":{},\"price\":{}}}\n",
+                    i % 41,
+                    (i * 7) % 200,
+                    (i * 13) % 5000
+                )
+                .into_bytes()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn structured_dict_encode_round_trips() {
+        let samples = small_records();
+        let dict_bytes = zstd::dict::from_samples(&samples, 8 * 1024).expect("train dict");
+        // A trained dict is structured: magic + entropy + non-zero id, so this
+        // exercises the seeded repeat offsets and the dict-id frame header field.
+        let dict = Dictionary::parse(&dict_bytes).expect("parse trained dict");
+        assert!(dict.entropy().is_some(), "trained dict must be structured");
+        assert_ne!(dict.id(), 0);
+        for s in samples.iter().take(60) {
+            for level in [1, 3, 9, 19] {
+                assert_dict_roundtrips(s, &dict_bytes, level);
+            }
+        }
+    }
+
+    #[test]
+    fn dictionary_improves_ratio_on_many_small_files() {
+        let samples = small_records();
+        let dict_bytes = zstd::dict::from_samples(&samples, 8 * 1024).expect("train dict");
+        let dict = Dictionary::parse(&dict_bytes).expect("parse dict");
+        // Each record is tiny, so without a dictionary there's almost nothing to
+        // match; with one, every record references shared structure in the dict.
+        // The dict-primed total must be clearly smaller across the corpus.
+        for &level in &[3, 19] {
+            let no_dict: usize = samples.iter().map(|s| compress(s, level, false, true).len()).sum();
+            let with_dict: usize = samples
+                .iter()
+                .map(|s| compress_with_dict(s, &dict, level, false, true).len())
+                .sum();
+            assert!(
+                with_dict < no_dict,
+                "dictionary should shrink a many-small-files corpus at L{level}: \
+                 {with_dict} (dict) vs {no_dict} (none)"
+            );
+        }
     }
 }

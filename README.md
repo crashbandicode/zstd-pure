@@ -52,7 +52,8 @@ libzstd, which implements RFC 8878. Notable conformance points:
 - [x] `dfast` double-hash finder (L2–3): 8-byte long + 4-byte short tables, best-of-two greedy — **T2.3 (ratio)**
 - [ ] Sequence Repeat table mode (3); opt price-model refinement; binary-tree match finder — T2.3 (ratio)
 - [ ] Long-distance matching — T2.4
-- [ ] Dictionary encode + tagged-dictionary training — T3.1
+- [x] Dictionary encode (`compress_with_dict`) — raw + structured/tagged: match window primed with dict content, seeded repeat offsets, dict-id frame header; verified through libzstd + our decoder, improves ratio on a many-small-files corpus — **T3.1**
+- [ ] Tagged-dictionary training (COVER/fastCover, pure-Rust) — T3.1
 
 ## Features / `no_std`
 
@@ -256,6 +257,20 @@ bump for `core::error::Error`). Source is already `core`-friendly except
 extraction and add a no_std `Read` shim.
 
 ### Tier 3
-Dictionary **encode** + tagged-dict **training** (COVER/fastCover — a genuine
-pure-Rust first); perf (sequence decode + reverse bit reader are the hot
-spots); criterion benches vs the `zstd` crate.
+Dictionary **encode** — **DONE.** `encode::frame::compress_with_dict` primes the
+match finder with the dictionary content (a `Finder::prime` mirroring libzstd's
+`ZSTD_loadDictionaryContent`: every dict position indexed, no sequences emitted),
+parsing the combined `[dict || input]` buffer so back-references reach into the
+dictionary. Handles both flavours: raw-content (default repeat offsets, no
+dict-id) and structured/tagged (the dict's three repeat offsets seed the running
+`rep`, and the dict id is written to the frame header). The dictionary's preset
+entropy tables are not yet referenced (every block describes its own — this
+encoder emits neither sequence-table Repeat mode nor treeless literals), so the
+output is correct without entropy coupling; exploiting them is a ratio
+refinement. Verified through libzstd (loaded with the same dict) and our own
+decoder across levels 1–22, plus a ratio-improves-on-many-small-files check.
+
+Still open in Tier 3: tagged-dict **training** (COVER/fastCover — a genuine
+pure-Rust first; the decode + encode sides now both consume dictionaries, so a
+trainer closes the loop); perf (sequence decode + reverse bit reader are the
+decode hot spots); criterion benches vs the `zstd` crate.

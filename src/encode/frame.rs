@@ -20,19 +20,33 @@ const STORE_WINDOW_LOG: u32 = 17;
 /// Write the frame header (RFC 8878 §3.1.1.1.1).
 ///
 /// Always emits a window descriptor (`Single_Segment_Flag = 0`) and pledges the
-/// content size (4-byte form for `<= u32::MAX`, else 8-byte). `dictionary_id`
-/// of 0 means none.
-fn write_frame_header(out: &mut Vec<u8>, content_size: u64, checksum: bool, window_log: u32) {
+/// content size (4-byte form for `<= u32::MAX`, else 8-byte). `dict_id` of 0
+/// means none (no `Dictionary_ID` field); a non-zero id is written little-endian
+/// in the smallest field that holds it (1, 2, or 4 bytes), after the window
+/// descriptor and before the content size — the byte order the decoder's
+/// `parse_frame_header` reads.
+fn write_frame_header(out: &mut Vec<u8>, content_size: u64, checksum: bool, window_log: u32, dict_id: u32) {
     // FCS field size: 2 = 4 bytes, 3 = 8 bytes.
     let fcs_flag: u8 = if content_size <= u32::MAX as u64 { 2 } else { 3 };
+    // Dictionary_ID flag (FHD bits 0-1): smallest field that holds the id; the
+    // decoder maps the flag to a size via `[0, 1, 2, 4]`.
+    let (dict_id_flag, dict_id_size): (u8, usize) = match dict_id {
+        0 => (0, 0),
+        i if i <= 0xFF => (1, 1),
+        i if i <= 0xFFFF => (2, 2),
+        _ => (3, 4),
+    };
     // Frame_Header_Descriptor: bits 6-7 fcs_flag, bit 5 single_segment (0),
-    // bit 2 content_checksum, bits 0-1 dict_id_flag (0).
-    let fhd = (fcs_flag << 6) | ((checksum as u8) << 2);
+    // bit 2 content_checksum, bits 0-1 dict_id_flag.
+    let fhd = (fcs_flag << 6) | ((checksum as u8) << 2) | dict_id_flag;
     out.push(fhd);
 
     // Window descriptor: exponent in bits 3-7, mantissa (0) in bits 0-2.
     let exponent = window_log - 10;
     out.push((exponent as u8) << 3);
+
+    // Dictionary_ID (little-endian), if any.
+    out.extend_from_slice(&dict_id.to_le_bytes()[..dict_id_size]);
 
     match fcs_flag {
         2 => out.extend_from_slice(&(content_size as u32).to_le_bytes()),
@@ -49,7 +63,7 @@ pub fn compress_store(data: &[u8], checksum: bool, expect_magic: bool) -> Vec<u8
     if expect_magic {
         out.extend_from_slice(&ZSTD_MAGIC.to_le_bytes());
     }
-    write_frame_header(&mut out, data.len() as u64, checksum, STORE_WINDOW_LOG);
+    write_frame_header(&mut out, data.len() as u64, checksum, STORE_WINDOW_LOG, 0);
 
     if data.is_empty() {
         // A frame must contain at least one block; emit an empty last raw block.
@@ -89,7 +103,7 @@ pub fn compress(data: &[u8], level: i32, checksum: bool, expect_magic: bool) -> 
     if expect_magic {
         out.extend_from_slice(&ZSTD_MAGIC.to_le_bytes());
     }
-    write_frame_header(&mut out, data.len() as u64, checksum, window_log);
+    write_frame_header(&mut out, data.len() as u64, checksum, window_log, 0);
 
     if data.is_empty() {
         super::block::write_raw_block(&mut out, true, &[]);
@@ -115,6 +129,101 @@ pub fn compress(data: &[u8], level: i32, checksum: bool, expect_magic: bool) -> 
             let mut rep_trial = rep;
             let use_comp = write_compressed_block(
                 &mut comp, last, data, start..end, &mut finder, max_offset, &mut rep_trial,
+            )
+            .is_ok()
+                && comp.len() < store.len();
+            if use_comp {
+                rep = rep_trial;
+                out.extend_from_slice(&comp);
+            } else {
+                out.extend_from_slice(&store);
+            }
+            start = end;
+        }
+    }
+
+    if checksum {
+        let digest = (xxh64(data, 0) & 0xFFFF_FFFF) as u32;
+        out.extend_from_slice(&digest.to_le_bytes());
+    }
+    out
+}
+
+/// Compress `data` into a frame primed with `dict`, so back-references can reach
+/// into the dictionary's content. The output is a spec-conformant frame that
+/// libzstd (loaded with the same dictionary) and this crate's
+/// [`decompress_with_dict`](crate::decompress_with_dict) both decode.
+///
+/// Handles both dictionary flavours uniformly:
+///
+/// * **Raw-content** — the content primes the match window; the repeat offsets
+///   start from the default `[1, 4, 8]`; no `Dictionary_ID` is written.
+/// * **Structured / tagged** — additionally, the dictionary's three repeat
+///   offsets seed the running `rep` (the decoder seeds the identical values) and
+///   the dictionary id is recorded in the frame header so a decoder can check
+///   it. The dictionary's preset entropy tables are *not* referenced — every
+///   block describes its own tables (this encoder emits neither sequence-table
+///   Repeat mode nor treeless literals), so no entropy coupling is needed for
+///   correctness; exploiting them is a future ratio refinement.
+///
+/// `level` selects the parse strategy and table sizes; the window is sized for
+/// the dictionary and input together and widened to span the whole dictionary
+/// (see [`super::params::params_for_level_with_dict`]). Never larger than a
+/// dictionary-primed store would be: each block falls back to raw/RLE if the
+/// compressed form isn't smaller.
+pub fn compress_with_dict(
+    data: &[u8],
+    dict: &crate::dict::Dictionary,
+    level: i32,
+    checksum: bool,
+    expect_magic: bool,
+) -> Vec<u8> {
+    let content = dict.content();
+    let dict_len = content.len();
+    let params = super::params::params_for_level_with_dict(level, data.len(), dict_len);
+    let window_log = params.window_log;
+    let max_offset = 1usize << window_log;
+
+    let mut out = Vec::with_capacity(data.len() / 2 + 64);
+    if expect_magic {
+        out.extend_from_slice(&ZSTD_MAGIC.to_le_bytes());
+    }
+    write_frame_header(&mut out, data.len() as u64, checksum, window_log, dict.id());
+
+    if data.is_empty() {
+        super::block::write_raw_block(&mut out, true, &[]);
+    } else {
+        // The search space is the combined `[dict content || input]` buffer: the
+        // dictionary prefix is pre-existing history (primed into the match tables
+        // below, never emitted as literals), exactly as the decoder preloads it.
+        // Offsets are absolute positions into this buffer, so back-references
+        // reach into the dictionary; only the input range is parsed into blocks.
+        let mut combined = Vec::with_capacity(dict_len + data.len());
+        combined.extend_from_slice(content);
+        combined.extend_from_slice(data);
+
+        let mut rep = dict.entropy().map_or([1u32, 4, 8], |e| e.rep);
+        let mut finder = super::lz::Finder::new(&params);
+        finder.prime(&combined, dict_len);
+
+        let n = data.len();
+        let mut start = 0usize;
+        while start < n {
+            let end = (start + BLOCK_SIZE_MAX).min(n);
+            let last = end == n;
+            let mut store = Vec::new();
+            write_store_block(&mut store, last, &data[start..end]);
+
+            let mut comp = Vec::new();
+            let mut rep_trial = rep;
+            let use_comp = write_compressed_block(
+                &mut comp,
+                last,
+                &combined,
+                (dict_len + start)..(dict_len + end),
+                &mut finder,
+                max_offset,
+                &mut rep_trial,
             )
             .is_ok()
                 && comp.len() < store.len();
@@ -166,7 +275,7 @@ pub fn compress_huffman_literals(data: &[u8], checksum: bool, expect_magic: bool
     if expect_magic {
         out.extend_from_slice(&ZSTD_MAGIC.to_le_bytes());
     }
-    write_frame_header(&mut out, data.len() as u64, checksum, STORE_WINDOW_LOG);
+    write_frame_header(&mut out, data.len() as u64, checksum, STORE_WINDOW_LOG, 0);
 
     if data.is_empty() {
         super::block::write_raw_block(&mut out, true, &[]);

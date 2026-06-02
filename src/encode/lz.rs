@@ -835,6 +835,40 @@ impl Finder {
             }
         }
     }
+
+    /// Prime the finder's match tables with the `dict_len` bytes of dictionary
+    /// content sitting at the front of `data` (the combined `[dict || input]`
+    /// buffer), so back-references from the input can reach into the dictionary.
+    /// Mirrors libzstd's `ZSTD_loadDictionaryContent`: every dictionary position
+    /// is indexed exactly as the parser would index it, but no sequences are
+    /// emitted and the repeat offsets are left untouched (the caller seeds those
+    /// from the dictionary header). A position is inserted only where its hashed
+    /// bytes (4, or 8 for the `dfast` long table) stay inside the dictionary.
+    pub fn prime(&mut self, data: &[u8], dict_len: usize) {
+        match self {
+            Finder::Fast(state) => {
+                let mut p = 0;
+                while p + MIN_MATCH <= dict_len {
+                    state.table[hash4(read_u32(data, p), state.hash_log)] = p as i32;
+                    p += 1;
+                }
+            }
+            Finder::DFast(state) => {
+                let mut p = 0;
+                while p + MIN_MATCH <= dict_len {
+                    state.insert(data, p, dict_len);
+                    p += 1;
+                }
+            }
+            Finder::Chain { state, .. } | Finder::Opt { state, .. } => {
+                let mut p = 0;
+                while p + MIN_MATCH <= dict_len {
+                    state.insert(data, p);
+                    p += 1;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

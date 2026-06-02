@@ -105,6 +105,23 @@ pub fn params_for_level(level: i32, src_size: usize) -> CParams {
     p
 }
 
+/// Like [`params_for_level`] but for a **dictionary-primed** compression. The
+/// level parameters are sized for the dictionary and the input *together*, so a
+/// small per-file input doesn't collapse the window below the dictionary or
+/// shrink the match tables; the window is then bumped, if needed, so it spans
+/// the whole dictionary. Every dictionary byte — and the dictionary's seeded
+/// repeat offsets, which reach back up to its full length — must stay inside the
+/// advertised window. Capped at the portable 8 MiB max (log 23), mirroring
+/// libzstd folding `dictSize` into the window choice.
+pub(crate) fn params_for_level_with_dict(level: i32, src_size: usize, dict_size: usize) -> CParams {
+    let mut p = params_for_level(level, src_size.saturating_add(dict_size));
+    let dict_reach = ceil_log2(dict_size).clamp(MIN_WINDOW_LOG, MAX_WINDOW_LOG);
+    if p.window_log < dict_reach {
+        p.window_log = dict_reach;
+    }
+    p
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
