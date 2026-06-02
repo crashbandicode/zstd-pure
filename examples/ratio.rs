@@ -29,12 +29,25 @@ fn profiles() -> Vec<(&'static str, Vec<u8>)> {
     // Three copies of a 90 KiB incompressible chunk: only cross-block matching
     // (offset ~90 KiB) can compress copies 2 and 3.
     let chunk: Vec<u8> = (0..90_000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+    // Two distinct regimes inside one 128 KiB block: ~64 KiB of repetitive text
+    // then ~64 KiB of structured JSON records. Their literal alphabets and
+    // sequence (LL/ML/OF) distributions differ, so one block's compromise
+    // entropy tables cost more than two blocks each fit to a half — the
+    // block-splitter case.
+    let mut mixed = "the quick brown fox jumps over the lazy dog. ".repeat(1500).into_bytes();
+    mixed.truncate(64 * 1024);
+    let mut jsonish: Vec<u8> = (0..3_000u32)
+        .flat_map(|i| format!("{{\"id\":{i},\"type\":\"npc_{}\",\"hp\":{}}}\n", i % 53, (i * 17) % 999).into_bytes())
+        .collect();
+    jsonish.truncate(64 * 1024);
+    mixed.extend_from_slice(&jsonish);
     vec![
         ("redundant", redundant),
         ("records", records),
         ("text", text),
         ("json", json),
         ("3x90k-chunk", chunk.repeat(3)),
+        ("mixed", mixed),
     ]
 }
 

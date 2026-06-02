@@ -53,6 +53,7 @@ libzstd, which implements RFC 8878. Notable conformance points:
 - [x] Sequence-table Repeat mode (3): cross-block per-channel FSE table reuse — `write_sequences` threads the previous compressed block's tables (`encode::block::EncState`) and reuses them (no table description) when valid + cheaper — **T2.3 (ratio)**
 - [x] Treeless literals: cross-block Huffman table reuse — `write_literals_auto` reuses the previous compressed block's table (literals block type 3, no tree description) when it can encode every byte + is cheaper, threaded via `EncState` — **T2.3 (ratio)**
 - [x] Opt price-model refinement (`btultra2` second pass): re-parse with a price model rebuilt from the first parse's *actual* literal/LL/OF/ML statistics instead of the predefined-table prior — tightens the top-level ratio on near-random record data (L19 `records` 1.32× → 1.26×, `json` 0.87× → 0.84×) — **T2.3 (ratio)**
+- [x] Block splitting: partition a block into adjacent blocks each with entropy tables fit to its own statistics, when their distributions differ enough to pay for the extra headers — a recursive midpoint split at the optimal-parse levels (L16+), threading Repeat-mode / Treeless tables across the sub-blocks and **kept only when strictly smaller** (never regresses). Stacks on the `btultra2` pass: L19 `records` 1.26× → 1.12×, `json` 0.84× → 0.80×, `3x90k` 1.07× → 1.01×, and a heterogeneous text/JSON block now beats libzstd — **T2.3 (ratio)**
 - [ ] binary-tree match finder — T2.3 (ratio)
 - [ ] Long-distance matching — T2.4
 - [x] Dictionary encode (`compress_with_dict`) — raw + structured/tagged: match window primed with dict content, seeded repeat offsets, dict-id frame header; verified through libzstd + our decoder, improves ratio on a many-small-files corpus — **T3.1**
@@ -265,9 +266,11 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
   (full extension + complete index simultaneously) — the cap I needed for
   tractability degrades tree placement, costing `json`. A from-scratch faithful
   port (no cap, zstd's window/`btLow` handling) is the real path; budget it as
-  genuine R&D, not a quick batch. Also still open: `btlazy2`; block splitting.
-  (Sequence-table Repeat mode (3) and the opt price-model refinement — the
-  `btultra2` second pass — are now done; see the Encoder checklist.)
+  genuine R&D, not a quick batch — and it remains the last lever on the
+  near-random `records` soft spot (now 1.12× at L19). Also still open: `btlazy2`.
+  (Sequence-table Repeat mode (3), the opt price-model refinement — the
+  `btultra2` second pass — and block splitting are now done; see the Encoder
+  checklist.)
 
 ### T1.3 no_std + alloc — DONE
 Now a standalone crate, so `cargo build --no-default-features --features alloc`

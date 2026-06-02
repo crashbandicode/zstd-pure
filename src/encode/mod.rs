@@ -208,6 +208,17 @@ mod tests {
         // Highly periodic, multi-block: the case that first exposed an
         // offset-0 self-match bug in the optimal parser (L13+).
         let periodic: Vec<u8> = (0..40_000u32).flat_map(|i| (i % 13).to_le_bytes()).collect();
+        // Heterogeneous: distinct regimes (repetitive text, then structured
+        // binary records, then a zero run) concatenated within and across 128 KiB
+        // blocks — exercises the block splitter (L16+) through both decoders.
+        let mut heterogeneous = b"the quick brown fox jumps over the lazy dog. ".repeat(1500);
+        heterogeneous.truncate(70_000);
+        heterogeneous.extend((0..15_000u32).flat_map(|i| {
+            let mut r = b"REC#".to_vec();
+            r.extend_from_slice(&i.to_le_bytes());
+            r
+        }));
+        heterogeneous.extend(core::iter::repeat(0u8).take(40_000));
         let cases: Vec<Vec<u8>> = vec![
             b"abcabcabc".to_vec(),
             text,
@@ -216,6 +227,7 @@ mod tests {
             vec![7u8; 5000],
             big_rep,
             periodic,
+            heterogeneous,
         ];
         for data in &cases {
             for &level in &[1i32, 2, 4, 6, 9, 12, 19, 22] {

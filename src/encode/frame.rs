@@ -18,6 +18,24 @@ use super::block::{
 /// `1 << 17`).
 const STORE_WINDOW_LOG: u32 = 17;
 
+/// Block-splitter recursion depth at the optimal-parse levels: a 128 KiB block
+/// can split into up to `2^DEPTH` adjacent blocks when their statistics differ
+/// enough to pay for the extra table headers (see [`super::block`]). Gated to
+/// `Btopt`+ (L16+), where ratio is the priority and the optimal parse already
+/// dominates the splitter's trial-encode cost. 0 elsewhere (no splitting).
+const BLOCK_SPLIT_DEPTH: usize = 4;
+
+/// The split depth for a level's strategy: the splitter runs only for the
+/// optimal-parse strategies, leaving the fast/lazy levels byte-identical and
+/// their throughput untouched.
+fn split_depth_for(strategy: super::params::Strategy) -> usize {
+    if strategy >= super::params::Strategy::Btopt {
+        BLOCK_SPLIT_DEPTH
+    } else {
+        0
+    }
+}
+
 /// Write the frame header (RFC 8878 §3.1.1.1.1).
 ///
 /// Always emits a window descriptor (`Single_Segment_Flag = 0`) and pledges the
@@ -99,6 +117,7 @@ pub fn compress(data: &[u8], level: i32, checksum: bool, expect_magic: bool) -> 
     let params = super::params::params_for_level(level, data.len());
     let window_log = params.window_log;
     let max_offset = 1usize << window_log;
+    let split_depth = split_depth_for(params.strategy);
 
     let mut out = Vec::with_capacity(data.len() / 2 + 64);
     if expect_magic {
@@ -132,7 +151,7 @@ pub fn compress(data: &[u8], level: i32, checksum: bool, expect_magic: bool) -> 
             write_store_block(&mut store, last, &data[start..end]);
 
             let mut comp = Vec::new();
-            match write_compressed_block(&mut comp, last, data, start..end, &mut finder, max_offset, &state) {
+            match write_compressed_block(&mut comp, last, data, start..end, &mut finder, max_offset, &state, split_depth) {
                 Ok(next) if comp.len() < store.len() => {
                     state = next;
                     out.extend_from_slice(&comp);
@@ -184,6 +203,7 @@ pub fn compress_with_dict(
     let params = super::params::params_for_level_with_dict(level, data.len(), dict_len);
     let window_log = params.window_log;
     let max_offset = 1usize << window_log;
+    let split_depth = split_depth_for(params.strategy);
 
     let mut out = Vec::with_capacity(data.len() / 2 + 64);
     if expect_magic {
@@ -238,7 +258,7 @@ pub fn compress_with_dict(
 
             let mut comp = Vec::new();
             let range = (dict_len + start)..(dict_len + end);
-            match write_compressed_block(&mut comp, last, &combined, range, &mut finder, max_offset, &state) {
+            match write_compressed_block(&mut comp, last, &combined, range, &mut finder, max_offset, &state, split_depth) {
                 Ok(next) if comp.len() < store.len() => {
                     state = next;
                     out.extend_from_slice(&comp);
