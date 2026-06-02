@@ -21,8 +21,10 @@ pub mod huff;
 pub mod lz;
 pub mod params;
 pub mod sequences;
+pub mod train;
 
 pub use frame::{compress, compress_huffman_literals, compress_store, compress_with_dict};
+pub use train::train_dictionary;
 
 /// Compress `data` into a standard (magic-prefixed) store-mode frame. No
 /// content checksum. See [`compress_store`] for the full-control entry point.
@@ -402,6 +404,40 @@ mod dict_tests {
             assert!(
                 with_dict < no_dict,
                 "dictionary should shrink a many-small-files corpus at L{level}: \
+                 {with_dict} (dict) vs {no_dict} (none)"
+            );
+        }
+    }
+
+    #[test]
+    fn our_trained_dict_improves_ratio_and_round_trips() {
+        // Train a raw-content dictionary with our own pure-Rust trainer, then use
+        // it through the full encode path: it must round-trip through libzstd and
+        // our decoder, and shrink the corpus versus no dictionary.
+        let samples = small_records();
+        let refs: Vec<&[u8]> = samples.iter().map(|v| v.as_slice()).collect();
+        let dict_bytes = train_dictionary(&refs, 8 * 1024);
+        assert!(!dict_bytes.is_empty(), "trainer produced an empty dictionary");
+        assert!(dict_bytes.len() <= 8 * 1024, "trainer exceeded the size budget");
+        let dict = Dictionary::parse(&dict_bytes).expect("parse trained dict");
+        assert_eq!(dict.id(), 0, "a raw-content dictionary carries no id");
+
+        for s in samples.iter().take(40) {
+            for level in [3, 19] {
+                assert_dict_roundtrips(s, &dict_bytes, level);
+            }
+        }
+
+        for &level in &[3, 19] {
+            let no_dict: usize =
+                samples.iter().map(|s| compress(s, level, false, true).len()).sum();
+            let with_dict: usize = samples
+                .iter()
+                .map(|s| compress_with_dict(s, &dict, level, false, true).len())
+                .sum();
+            assert!(
+                with_dict < no_dict,
+                "our trained dictionary should shrink the corpus at L{level}: \
                  {with_dict} (dict) vs {no_dict} (none)"
             );
         }

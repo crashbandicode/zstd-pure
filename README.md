@@ -53,7 +53,8 @@ libzstd, which implements RFC 8878. Notable conformance points:
 - [ ] Sequence Repeat table mode (3); opt price-model refinement; binary-tree match finder — T2.3 (ratio)
 - [ ] Long-distance matching — T2.4
 - [x] Dictionary encode (`compress_with_dict`) — raw + structured/tagged: match window primed with dict content, seeded repeat offsets, dict-id frame header; verified through libzstd + our decoder, improves ratio on a many-small-files corpus — **T3.1**
-- [ ] Tagged-dictionary training (COVER/fastCover, pure-Rust) — T3.1
+- [x] Dictionary training (`train_dictionary`) — pure-Rust greedy COVER producing a raw-content dictionary (highest-coverage shared substrings, most-valuable last); improves ratio on a many-small-files corpus, verified through libzstd + our decoder — **T3.1**
+- [ ] Structured/tagged-dictionary finalize from training (entropy tables + dict id) — T3.1
 
 ## Features / `no_std`
 
@@ -100,7 +101,7 @@ in [`BENCHMARKS.md`](BENCHMARKS.md).
 | `frame` | frame header + block loop + skippable + checksum + dict priming |
 | `dict` | raw-content + structured (tagged) dictionary parse |
 | `streaming` | block-by-block bounded-memory decode + `io::Read` (`StreamingDecoder`) |
-| `encode` | encoder: `huff` (Huff0 literal encoder), `fse` (FSE entropy encoder), `sequences` (per-block mode-selecting sequence encoder), `lz` (fast + hash-chain lazy match finders), `params` (level→cparams table), `bitstream` (shared `BIT_CStream` writer), `block`/`frame` writers + `compress` |
+| `encode` | encoder: `huff` (Huff0 literal encoder), `fse` (FSE entropy encoder), `sequences` (per-block mode-selecting sequence encoder), `lz` (fast/dfast/chain/opt match finders + dictionary priming), `params` (level→cparams table), `bitstream` (shared `BIT_CStream` writer), `train` (pure-Rust COVER dictionary trainer), `block`/`frame` writers + `compress` / `compress_with_dict` |
 
 ## Handoff — remaining work (notes for the next agent)
 
@@ -270,7 +271,18 @@ output is correct without entropy coupling; exploiting them is a ratio
 refinement. Verified through libzstd (loaded with the same dict) and our own
 decoder across levels 1–22, plus a ratio-improves-on-many-small-files check.
 
-Still open in Tier 3: tagged-dict **training** (COVER/fastCover — a genuine
-pure-Rust first; the decode + encode sides now both consume dictionaries, so a
-trainer closes the loop); perf (sequence decode + reverse bit reader are the
-decode hot spots); criterion benches vs the `zstd` crate.
+Dictionary **training** — **DONE (raw-content).** `encode::train::train_dictionary`
+is a pure-Rust greedy **COVER** (the core of libzstd's
+`ZDICT_trainFromBuffer_cover`): an 8-byte-dmer frequency map counted once per
+sample, then repeated selection of the highest-coverage segment with the covered
+dmers zeroed after each pick, concatenated most-valuable-last. It produces a
+raw-content dictionary (wrap with `Dictionary::raw`/`parse`); verified to improve
+ratio on a many-small-files corpus and to round-trip through libzstd + our
+decoder. The single-pool greedy omits COVER's epoch partitioning and `(d, k)`
+parameter search.
+
+Still open in Tier 3: **finalize** training into a structured/tagged dictionary
+(entropy tables + dict id, libzstd's `ZDICT_finalizeDictionary`), and have the
+encoder reference a structured dict's preset entropy tables (currently primed for
+matches + repeat offsets only); perf (sequence decode + reverse bit reader are
+the decode hot spots); criterion benches vs the `zstd` crate.
