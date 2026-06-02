@@ -64,9 +64,11 @@ path); a `thumbv7em-none-eabi` build is the recommended CI gate.
 
 `our.decompress(x) == libzstd.decompress(x)` across input profiles × levels
 {1,3,9,19}, empty/tiny, content-checksum frames, and every real TotK BFRES
-frame (`tests/zstd_pure_bfres.rs`, fixture-gated). For the encoder (when it
-lands): `libzstd.decompress(our_compress(x)) == x` and
-`our.decompress(our_compress(x)) == x`.
+frame (`tests/zstd_pure_bfres.rs`, fixture-gated). For the encoder, every output
+is checked both ways — `libzstd.decompress(our_compress(x)) == x` and
+`our.decompress(our_compress(x)) == x` — across levels 1–22, the randomized
+corpus sweep, and cross-block cases. Ratio + throughput vs libzstd are tracked
+in [`BENCHMARKS.md`](BENCHMARKS.md).
 
 ## Module layout
 
@@ -84,7 +86,7 @@ lands): `libzstd.decompress(our_compress(x)) == x` and
 | `frame` | frame header + block loop + skippable + checksum + dict priming |
 | `dict` | raw-content + structured (tagged) dictionary parse |
 | `streaming` | block-by-block bounded-memory decode + `io::Read` (`StreamingDecoder`) |
-| `encode` | encoder: `huff` (Huff0 literal encoder), `fse` (FSE entropy encoder), `sequences` (sequence-section encoder), `lz` (fast match finder), `bitstream` (shared `BIT_CStream` writer), `block`/`frame` writers + `compress` |
+| `encode` | encoder: `huff` (Huff0 literal encoder), `fse` (FSE entropy encoder), `sequences` (per-block mode-selecting sequence encoder), `lz` (fast + hash-chain lazy match finders), `params` (level→cparams table), `bitstream` (shared `BIT_CStream` writer), `block`/`frame` writers + `compress` |
 
 ## Handoff — remaining work (notes for the next agent)
 
@@ -109,8 +111,8 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
 - **Sequence-table Repeat mode (3)** — reuse the previous compressed block's
   LL/OF/ML table when it would beat re-describing it; needs cross-block table
   threading with the same commit-on-use discipline as the repeat offsets.
-- **Benchmark** (`benches/`, criterion vs the `zstd` crate) + `BENCHMARKS.md`;
-  the bar is beating ruzstd/structured-zstd ratio at L3+.
+- **Benchmark — DONE.** `benches/compression.rs` (criterion throughput) +
+  `examples/ratio.rs` (size) vs the `zstd` crate, documented in `BENCHMARKS.md`.
 - **T2.4 LDM**, and the **T1.3 no_std** gating (deferred to crate extraction —
   see below).
 

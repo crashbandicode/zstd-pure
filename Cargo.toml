@@ -29,3 +29,10 @@ thiserror = { version = "2", default-features = false }
 # libzstd is the test ORACLE only (never used at runtime). `zdict_builder`
 # enables the dictionary trainer used by the dictionary round-trip tests.
 zstd = { version = "0.13", features = ["experimental", "zdict_builder"] }
+# criterion drives the throughput benches (`benches/compression.rs`). Lean
+# feature set: timing + cargo-bench harness, no HTML/plotters.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "compression"
+harness = false
