@@ -74,6 +74,17 @@ pub fn write_huffman_literals_block(out: &mut Vec<u8>, last: bool, literals: &[u
 /// to the frame window, and `rep` carries the running repeat offsets and is
 /// updated by the parse; the caller must only commit that update if this
 /// compressed block is actually used (see [`super::frame::compress`]).
+/// Cross-block encoder state threaded through a frame: the running repeat
+/// offsets and the previous compressed block's per-channel entropy tables. The
+/// caller commits the returned state only when the block is actually emitted
+/// compressed — a raw/RLE block leaves both untouched, exactly as the decoder
+/// does — so a trial that loses to the store encoding is simply discarded.
+#[derive(Clone)]
+pub struct EncState {
+    pub rep: [u32; 3],
+    pub seq: super::sequences::SeqCTables,
+}
+
 pub fn write_compressed_block(
     out: &mut Vec<u8>,
     last: bool,
@@ -81,14 +92,15 @@ pub fn write_compressed_block(
     range: core::ops::Range<usize>,
     finder: &mut super::lz::Finder,
     max_offset: usize,
-    rep: &mut [u32; 3],
-) -> Result<()> {
+    state: &EncState,
+) -> Result<EncState> {
     let body_hint = range.len() / 2 + 16;
-    let (seqs, literals) = finder.parse(data, range, max_offset, rep);
+    let mut rep = state.rep;
+    let (seqs, literals) = finder.parse(data, range, max_offset, &mut rep);
     let mut body = Vec::with_capacity(body_hint);
     super::huff::write_literals_auto(&mut body, &literals);
-    super::sequences::write_sequences(&mut body, &seqs)?;
+    let seq = super::sequences::write_sequences(&mut body, &seqs, &state.seq)?;
     write_block_header(out, last, BlockType::Compressed, body.len());
     out.extend_from_slice(&body);
-    Ok(())
+    Ok(EncState { rep, seq })
 }

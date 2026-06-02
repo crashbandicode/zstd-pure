@@ -66,8 +66,13 @@ would widen libzstd's lead — a binary-tree match finder is the way to close it
 - **Competitive:** mid levels on mixed data after the lazy finder (L6–L9).
 - **Soft spots:** near-random record data at the top levels (~1.3×).
 
-Next ratio levers (see `README.md` handoff): `dfast` (L2–3); a binary-tree match
-finder to make the optimal parse both faster and deeper; refining the opt price
-model with per-block statistics (libzstd's `btultra2` second pass); the
-sequence-table Repeat mode (3); block splitting. A future decode-speed comparison
-against the pure-Rust `ruzstd` decoder would round out the peer set.
+Sequence-table Repeat mode (3) is now implemented (cross-block FSE table reuse),
+so a block no longer re-describes a table its predecessor already sent; the win
+is concentrated on small blocks and dictionary-primed small files (a large block
+amortizes its table header), so the large-stream profiles above barely move.
+
+Next ratio levers (see `README.md` handoff): a binary-tree match finder to make
+the optimal parse both faster and deeper; refining the opt price model with
+per-block statistics (libzstd's `btultra2` second pass); treeless literals (the
+literals analogue of Repeat mode); block splitting. A future decode-speed
+comparison against the pure-Rust `ruzstd` decoder would round out the peer set.

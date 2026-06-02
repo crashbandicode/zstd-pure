@@ -225,6 +225,7 @@ pub fn write_ncount(norm: &[i16], max_symbol: usize, table_log: u32) -> Vec<u8> 
 
 /// A built FSE **encode** table — the inverse of [`fse::build_dtable`], ported
 /// from libzstd's `FSE_buildCTable`.
+#[derive(Clone)]
 pub struct FseCTable {
     table_log: u32,
     /// Next-state table indexed by find-state position (`1 << table_log` entries).
@@ -232,6 +233,10 @@ pub struct FseCTable {
     /// Per-symbol `deltaNbBits` / `deltaFindState` (`symbolTT`).
     delta_nb_bits: Vec<i32>,
     delta_find_state: Vec<i32>,
+    /// Whether each symbol `0..=max_symbol` is encodable by this table (a real
+    /// state, i.e. normalized count `!= 0`). A symbol with count `0` is a filler
+    /// and must never be encoded; this gates "Repeat" mode reuse.
+    present: Vec<bool>,
 }
 
 /// Build an FSE encode table from a normalized distribution. The symbol spread
@@ -306,11 +311,14 @@ pub fn build_ctable(norm: &[i16], max_symbol: usize, table_log: u32) -> FseCTabl
         }
     }
 
+    let present: Vec<bool> = norm[..=max_symbol].iter().map(|&c| c != 0).collect();
+
     FseCTable {
         table_log,
         state_table,
         delta_nb_bits,
         delta_find_state,
+        present,
     }
 }
 
@@ -329,6 +337,13 @@ pub struct CState {
 }
 
 impl FseCTable {
+    /// Whether every code in `codes` is encodable by this table — the validity
+    /// gate for reusing it in "Repeat" mode. A code beyond the table's alphabet,
+    /// or one whose symbol is a `0`-count filler, cannot be encoded.
+    pub fn can_encode(&self, codes: &[usize]) -> bool {
+        codes.iter().all(|&c| c < self.present.len() && self.present[c])
+    }
+
     /// Initialize a state for the first symbol it will encode (`FSE_initCState2`).
     pub fn init_state2(&self, symbol: usize) -> CState {
         let dnb = self.delta_nb_bits[symbol];

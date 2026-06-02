@@ -50,7 +50,8 @@ libzstd, which implements RFC 8878. Notable conformance points:
 - [x] Hash-chain greedy/lazy/lazy2 parser wired to `params.strategy` (levels 4+); `level` now scales ratio — **T2.3 (ratio)**
 - [x] `btopt`/`btultra` optimal parse (L13+): rep-aware DP over a fixed-point cost model (`encode::lz::opt_parse_block`); beats libzstd ratio on dense JSON at L19 — **T2.3 (ratio)**
 - [x] `dfast` double-hash finder (L2–3): 8-byte long + 4-byte short tables, best-of-two greedy — **T2.3 (ratio)**
-- [ ] Sequence Repeat table mode (3); opt price-model refinement; binary-tree match finder — T2.3 (ratio)
+- [x] Sequence-table Repeat mode (3): cross-block per-channel FSE table reuse — `write_sequences` threads the previous compressed block's tables (`encode::block::EncState`) and reuses them (no table description) when valid + cheaper — **T2.3 (ratio)**
+- [ ] opt price-model refinement; binary-tree match finder — T2.3 (ratio)
 - [ ] Long-distance matching — T2.4
 - [x] Dictionary encode (`compress_with_dict`) — raw + structured/tagged: match window primed with dict content, seeded repeat offsets, dict-id frame header; verified through libzstd + our decoder, improves ratio on a many-small-files corpus — **T3.1**
 - [x] Dictionary training (`train_dictionary`) — pure-Rust greedy COVER producing a raw-content dictionary (highest-coverage shared substrings, most-valuable last); improves ratio on a many-small-files corpus, verified through libzstd + our decoder — **T3.1**
@@ -124,9 +125,13 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
   at L19 (0.87×). **Remaining tuning:** a binary-tree match finder would make the
   optimal parse both faster and deeper; the opt price model is a fixed
   predefined-table proxy (can be ~1 % off lazy2 on near-random data).
-- **Sequence-table Repeat mode (3)** — reuse the previous compressed block's
-  LL/OF/ML table when it would beat re-describing it; needs cross-block table
-  threading with the same commit-on-use discipline as the repeat offsets.
+- **Sequence-table Repeat mode (3) — DONE.** `write_sequences` reuses the
+  previous compressed block's LL/OF/ML table (mode 3, no table description) when
+  it can encode this block's codes and beats re-describing; `encode::block::EncState`
+  threads the tables across blocks with the same commit-on-emitted-compressed-block
+  discipline as the repeat offsets. The win is on small blocks (a large block
+  amortizes its table header anyway); treeless literals + dict-table seeding for
+  block 1 are the remaining cross-block-reuse pieces.
 - **Benchmark — DONE.** `benches/compression.rs` (criterion throughput) +
   `examples/ratio.rs` (size) vs the `zstd` crate, documented in `BENCHMARKS.md`.
 - **T2.4 LDM**, and the **T1.3 no_std** gating (deferred to crate extraction —
@@ -244,9 +249,9 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
   (full extension + complete index simultaneously) — the cap I needed for
   tractability degrades tree placement, costing `json`. A from-scratch faithful
   port (no cap, zstd's window/`btLow` handling) is the real path; budget it as
-  genuine R&D, not a quick batch. Also still open: `btlazy2`; the sequence-table
-  Repeat mode (3); block splitting; opt price-model refinement (per-block stats /
-  `btultra2` second pass).
+  genuine R&D, not a quick batch. Also still open: `btlazy2`; block splitting;
+  opt price-model refinement (per-block stats / `btultra2` second pass).
+  (Sequence-table Repeat mode (3) is now done — see the Encoder checklist.)
 
 ### T1.3 no_std + alloc
 Deferred: `zstd_pure` is currently a *module* of the std crate
@@ -265,11 +270,13 @@ parsing the combined `[dict || input]` buffer so back-references reach into the
 dictionary. Handles both flavours: raw-content (default repeat offsets, no
 dict-id) and structured/tagged (the dict's three repeat offsets seed the running
 `rep`, and the dict id is written to the frame header). The dictionary's preset
-entropy tables are not yet referenced (every block describes its own — this
-encoder emits neither sequence-table Repeat mode nor treeless literals), so the
-output is correct without entropy coupling; exploiting them is a ratio
-refinement. Verified through libzstd (loaded with the same dict) and our own
-decoder across levels 1–22, plus a ratio-improves-on-many-small-files check.
+entropy tables are not yet referenced for a dict-primed compression: block 1
+isn't seeded from them (sequence-table Repeat mode now exists generally, but
+block 1 has no previous table to repeat, and treeless literals aren't
+implemented yet), so the output is correct without entropy coupling; seeding
+block 1 from the dict is a ratio refinement. Verified through libzstd (loaded
+with the same dict) and our own decoder across levels 1–22, plus a
+ratio-improves-on-many-small-files check.
 
 Dictionary **training** — **DONE (raw-content).** `encode::train::train_dictionary`
 is a pure-Rust greedy **COVER** (the core of libzstd's
@@ -293,8 +300,9 @@ deterministic content-hash id. **libzstd loads it on the strict compress side**
 (`ZSTD_loadCEntropy` validates every table) and on the decompress side, and a
 decoder warm-starts the first block from these tables.
 
-Still open in Tier 3: have the **encoder** reference a structured dict's preset
-entropy tables when compressing (it currently primes matches + repeat offsets
-only — using the tables needs treeless literals + sequence-table Repeat mode);
+Still open in Tier 3: have the **encoder** seed a dict-primed compression's first
+block from the structured dict's preset entropy tables (it currently primes
+matches + repeat offsets only; cross-block sequence-table Repeat mode now exists,
+so this needs treeless literals plus seeding block 1's table state from the dict);
 perf (sequence decode + reverse bit reader are the decode hot spots); criterion
 benches vs the `zstd` crate.

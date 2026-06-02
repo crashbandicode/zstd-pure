@@ -9,7 +9,8 @@ use crate::alloc_prelude::*;
 use super::super::frame::ZSTD_MAGIC;
 use super::super::xxhash::xxh64;
 use super::block::{
-    write_compressed_block, write_huffman_literals_block, write_store_block, BLOCK_SIZE_MAX,
+    write_compressed_block, write_huffman_literals_block, write_store_block, EncState,
+    BLOCK_SIZE_MAX,
 };
 
 /// Window log used by the store-mode encoder. Raw/RLE blocks carry no
@@ -115,7 +116,11 @@ pub fn compress(data: &[u8], level: i32, checksum: bool, expect_magic: bool) -> 
         // it compressed — a store block leaves the decoder's `rep` untouched.
         // (The match table needs no rollback: a stored block's bytes are still
         // in the decoder's output, so indexing them stays valid.)
-        let mut rep = [1u32, 4, 8];
+        // The repeat offsets and the previous compressed block's entropy tables
+        // both persist across blocks (the decoder keeps them for repeat-offset
+        // codes and "Repeat" table mode). Thread them as one `EncState`,
+        // committing only when a block is actually emitted compressed.
+        let mut state = EncState { rep: [1, 4, 8], seq: super::sequences::SeqCTables::default() };
         let mut finder = super::lz::Finder::new(&params);
         let n = data.len();
         let mut start = 0usize;
@@ -126,17 +131,12 @@ pub fn compress(data: &[u8], level: i32, checksum: bool, expect_magic: bool) -> 
             write_store_block(&mut store, last, &data[start..end]);
 
             let mut comp = Vec::new();
-            let mut rep_trial = rep;
-            let use_comp = write_compressed_block(
-                &mut comp, last, data, start..end, &mut finder, max_offset, &mut rep_trial,
-            )
-            .is_ok()
-                && comp.len() < store.len();
-            if use_comp {
-                rep = rep_trial;
-                out.extend_from_slice(&comp);
-            } else {
-                out.extend_from_slice(&store);
+            match write_compressed_block(&mut comp, last, data, start..end, &mut finder, max_offset, &state) {
+                Ok(next) if comp.len() < store.len() => {
+                    state = next;
+                    out.extend_from_slice(&comp);
+                }
+                _ => out.extend_from_slice(&store),
             }
             start = end;
         }
@@ -202,7 +202,14 @@ pub fn compress_with_dict(
         combined.extend_from_slice(content);
         combined.extend_from_slice(data);
 
-        let mut rep = dict.entropy().map_or([1u32, 4, 8], |e| e.rep);
+        // Seed the repeat offsets from a structured dictionary (the decoder seeds
+        // the identical values); the entropy tables start empty, so block 1
+        // describes its own and later blocks reuse them. Seeding block 1 from a
+        // structured dict's preset tables is a follow-up.
+        let mut state = EncState {
+            rep: dict.entropy().map_or([1, 4, 8], |e| e.rep),
+            seq: super::sequences::SeqCTables::default(),
+        };
         let mut finder = super::lz::Finder::new(&params);
         finder.prime(&combined, dict_len);
 
@@ -215,23 +222,13 @@ pub fn compress_with_dict(
             write_store_block(&mut store, last, &data[start..end]);
 
             let mut comp = Vec::new();
-            let mut rep_trial = rep;
-            let use_comp = write_compressed_block(
-                &mut comp,
-                last,
-                &combined,
-                (dict_len + start)..(dict_len + end),
-                &mut finder,
-                max_offset,
-                &mut rep_trial,
-            )
-            .is_ok()
-                && comp.len() < store.len();
-            if use_comp {
-                rep = rep_trial;
-                out.extend_from_slice(&comp);
-            } else {
-                out.extend_from_slice(&store);
+            let range = (dict_len + start)..(dict_len + end);
+            match write_compressed_block(&mut comp, last, &combined, range, &mut finder, max_offset, &state) {
+                Ok(next) if comp.len() < store.len() => {
+                    state = next;
+                    out.extend_from_slice(&comp);
+                }
+                _ => out.extend_from_slice(&store),
             }
             start = end;
         }

@@ -186,6 +186,7 @@ fn plan_channel(
     pred_max: usize,
     pred_log: u32,
     max_log: u32,
+    prev: Option<&FseCTable>,
 ) -> ChannelPlan {
     let max_sym = codes.iter().copied().max().unwrap_or(0);
     let mut freq = vec![0u32; max_sym + 1];
@@ -217,6 +218,16 @@ fn plan_channel(
         let cost = ct.stream_cost_bits(codes) + header.len() as u64 * 8;
         candidates.push((cost, ChannelPlan { mode: 2, ct, header }));
     }
+    // Repeat (mode 3): reuse the previous compressed block's table for this
+    // channel — no header bytes — when it can encode every code here. The
+    // decoder keeps the same per-channel table across blocks, so the reused
+    // table is byte-identical on both sides.
+    if let Some(t) = prev {
+        if t.can_encode(codes) {
+            let cost = t.stream_cost_bits(codes);
+            candidates.push((cost, ChannelPlan { mode: 3, ct: t.clone(), header: Vec::new() }));
+        }
+    }
 
     candidates
         .into_iter()
@@ -225,31 +236,50 @@ fn plan_channel(
         .1
 }
 
+/// The per-channel encode tables a compressed block used (LL / OF / ML),
+/// threaded across a frame's blocks so the next block can reuse them via
+/// "Repeat" mode. This is the encode mirror of the decoder's per-channel table
+/// cache ([`crate::sequences::SeqTables`]); it is seeded from a structured
+/// dictionary's tables for a frame's first block and updated, with the same
+/// commit-on-emitted-compressed-block discipline as the repeat offsets, after
+/// each block actually written compressed.
+#[derive(Default, Clone)]
+pub struct SeqCTables {
+    pub ll: Option<FseCTable>,
+    pub of: Option<FseCTable>,
+    pub ml: Option<FseCTable>,
+}
+
 /// Encode a sequences section, choosing the cheapest table mode per channel
-/// (Predefined / RLE / per-block FSE) and appending the count, the modes byte,
-/// the table descriptions (LL, then OF, then ML), and the three-state
-/// bitstream. Never larger than [`write_sequences_predefined`] — predefined is
-/// always a candidate per channel.
-pub fn write_sequences(out: &mut Vec<u8>, seqs: &[Seq]) -> Result<()> {
+/// (Predefined / RLE / per-block FSE / Repeat) and appending the count, the
+/// modes byte, the table descriptions (LL, then OF, then ML), and the
+/// three-state bitstream. `prev` carries the previous compressed block's tables
+/// (empty at frame start, or a dictionary's tables); the returned [`SeqCTables`]
+/// are the tables this section used, to thread to the next block. Never larger
+/// than [`write_sequences_predefined`] — predefined is always a per-channel
+/// candidate.
+pub fn write_sequences(out: &mut Vec<u8>, seqs: &[Seq], prev: &SeqCTables) -> Result<SeqCTables> {
     write_seq_count(out, seqs.len());
     if seqs.is_empty() {
-        return Ok(());
+        // An empty section carries no modes byte or tables, so the decoder
+        // leaves its per-channel table cache untouched — thread `prev` through.
+        return Ok(prev.clone());
     }
 
     let ll_codes: Vec<usize> = seqs.iter().map(|s| ll_code(s.lit_len)).collect();
     let of_codes: Vec<usize> = seqs.iter().map(|s| of_code(s.offset_value)).collect();
     let ml_codes: Vec<usize> = seqs.iter().map(|s| ml_code(s.match_len)).collect();
 
-    let ll = plan_channel(&ll_codes, &LL_DEFAULT, LL_PRED_MAX, LL_PRED_LOG, LL_MAX_LOG);
-    let of = plan_channel(&of_codes, &OF_DEFAULT, OF_PRED_MAX, OF_PRED_LOG, OF_MAX_LOG);
-    let ml = plan_channel(&ml_codes, &ML_DEFAULT, ML_PRED_MAX, ML_PRED_LOG, ML_MAX_LOG);
+    let ll = plan_channel(&ll_codes, &LL_DEFAULT, LL_PRED_MAX, LL_PRED_LOG, LL_MAX_LOG, prev.ll.as_ref());
+    let of = plan_channel(&of_codes, &OF_DEFAULT, OF_PRED_MAX, OF_PRED_LOG, OF_MAX_LOG, prev.of.as_ref());
+    let ml = plan_channel(&ml_codes, &ML_DEFAULT, ML_PRED_MAX, ML_PRED_LOG, ML_MAX_LOG, prev.ml.as_ref());
 
     out.push((ll.mode << 6) | (of.mode << 4) | (ml.mode << 2));
     out.extend_from_slice(&ll.header);
     out.extend_from_slice(&of.header);
     out.extend_from_slice(&ml.header);
     out.extend_from_slice(&encode_seq_bitstream(seqs, &ll.ct, &of.ct, &ml.ct));
-    Ok(())
+    Ok(SeqCTables { ll: Some(ll.ct), of: Some(of.ct), ml: Some(ml.ct) })
 }
 
 /// Write a standalone FSE table description (a `write_ncount` stream) for one
@@ -410,7 +440,7 @@ mod tests {
             let (seqs, literals, expected) = gen_case(&mut rng, steps);
 
             let mut section = Vec::new();
-            write_sequences(&mut section, &seqs).unwrap();
+            write_sequences(&mut section, &seqs, &SeqCTables::default()).unwrap();
             let mut pred = Vec::new();
             write_sequences_predefined(&mut pred, &seqs).unwrap();
             assert!(
@@ -466,7 +496,7 @@ mod tests {
         }
 
         let mut section = Vec::new();
-        write_sequences(&mut section, &seqs).unwrap();
+        write_sequences(&mut section, &seqs, &SeqCTables::default()).unwrap();
         let mut pred = Vec::new();
         write_sequences_predefined(&mut pred, &seqs).unwrap();
         assert!(
@@ -481,5 +511,69 @@ mod tests {
         let mut rep = [1u32, 4, 8];
         decode(&section, &literals, &mut dout, &mut tables, &mut rep).unwrap();
         assert_eq!(dout, out, "skewed-channel round-trip mismatch");
+    }
+
+    /// "Repeat" mode (3): a second block with the same distribution reuses the
+    /// first block's tables — dropping every table description — so it is
+    /// strictly smaller, and the pair round-trips through the decoder with one
+    /// table cache threaded across them exactly as the encoder threaded it.
+    #[test]
+    fn repeat_mode_reuses_previous_block_tables() {
+        // Skewed LL (mostly zero) forces a per-block FSE table on block 1;
+        // constant offsets/match lengths collapse to RLE. The identical second
+        // block can Repeat all three channels.
+        let mut rng = Rng(0x1357_9bdf_2468_ace0);
+        let mut seqs = Vec::new();
+        let mut literals = Vec::new();
+        let mut out = Vec::new();
+        let mut pending = 0u32;
+        for i in 0..1000u32 {
+            let ll = if i % 37 == 0 { 3 } else { 0 };
+            for _ in 0..ll {
+                let b = rng.next() as u8;
+                literals.push(b);
+                out.push(b);
+            }
+            pending += ll;
+            if out.len() < 4 {
+                let b = rng.next() as u8;
+                literals.push(b);
+                out.push(b);
+                pending += 1;
+                continue;
+            }
+            let offset = 1 + (rng.next() % 3); // offset_value 4..6 -> OF code 2 (constant)
+            let match_len = 4u32; // ML code constant
+            let start = out.len() - offset as usize;
+            for k in 0..match_len as usize {
+                let b = out[start + k];
+                out.push(b);
+            }
+            seqs.push(Seq { lit_len: pending, match_len, offset_value: offset + 3 });
+            pending = 0;
+        }
+
+        let mut sec1 = Vec::new();
+        let used = write_sequences(&mut sec1, &seqs, &SeqCTables::default()).unwrap();
+        let mut sec2 = Vec::new();
+        write_sequences(&mut sec2, &seqs, &used).unwrap();
+        assert!(
+            sec2.len() < sec1.len(),
+            "repeat block ({}) should drop the table descriptions block 1 carried ({})",
+            sec2.len(),
+            sec1.len()
+        );
+
+        // Decode both, threading one table cache across them exactly as the
+        // encoder threaded `used`: block 2's Repeat resolves to block 1's tables.
+        let mut dtables = SeqTables::default();
+        let mut d1 = Vec::new();
+        let mut rep1 = [1u32, 4, 8];
+        decode(&sec1, &literals, &mut d1, &mut dtables, &mut rep1).unwrap();
+        assert_eq!(d1, out, "block 1 round-trip mismatch");
+        let mut d2 = Vec::new();
+        let mut rep2 = [1u32, 4, 8];
+        decode(&sec2, &literals, &mut d2, &mut dtables, &mut rep2).unwrap();
+        assert_eq!(d2, out, "repeat block round-trip mismatch");
     }
 }
