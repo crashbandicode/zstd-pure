@@ -114,6 +114,32 @@ pub fn write_compressed_block(
     Ok(EncState { rep, seq, lit })
 }
 
+/// Like [`write_compressed_block`] but with long-distance matching: the forced
+/// long matches `ldm` (from [`super::ldm::LdmState::generate`]) are emitted as
+/// sequences with large offsets, the regular `finder` fills the gaps between
+/// them (see [`super::lz::parse_with_ldm`]), and the result is written through
+/// the same [`emit_split`] path — LDM matches are ordinary sequences, so the
+/// block splitter and entropy-table selection handle them unchanged. With an
+/// empty `ldm` this is exactly [`write_compressed_block`].
+#[allow(clippy::too_many_arguments)]
+pub fn write_compressed_block_ldm(
+    out: &mut Vec<u8>,
+    last: bool,
+    data: &[u8],
+    range: core::ops::Range<usize>,
+    finder: &mut super::lz::Finder,
+    max_offset: usize,
+    state: &EncState,
+    max_split_depth: usize,
+    ldm: &[super::ldm::LdmSeq],
+) -> Result<EncState> {
+    let mut rep = state.rep;
+    let (seqs, literals) = super::lz::parse_with_ldm(finder, data, range, max_offset, &mut rep, ldm);
+    let (seq, lit) =
+        emit_split(out, last, &seqs, &literals, &state.seq, state.lit.as_ref(), max_split_depth)?;
+    Ok(EncState { rep, seq, lit })
+}
+
 /// Emit one compressed block for a pre-parsed `(seqs, literals)` segment: a
 /// literals section (raw / Huffman / Treeless reuse of `prev_lit`) followed by a
 /// sequences section (cheapest per-channel table mode, reusing `prev_seq` for

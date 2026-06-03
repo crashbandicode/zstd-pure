@@ -18,12 +18,15 @@ pub mod block;
 pub mod frame;
 pub mod fse;
 pub mod huff;
+pub mod ldm;
 pub mod lz;
 pub mod params;
 pub mod sequences;
 pub mod train;
 
-pub use frame::{compress, compress_huffman_literals, compress_store, compress_with_dict};
+pub use frame::{
+    compress, compress_huffman_literals, compress_long, compress_store, compress_with_dict,
+};
 pub use train::{train_dictionary, train_dictionary_structured};
 
 /// Compress `data` into a standard (magic-prefixed) store-mode frame. No
@@ -325,6 +328,80 @@ mod tests {
         let mut out = vec![0u8; data.len()];
         let n = dctx.decompress(&mut out, &frame).unwrap();
         assert_eq!(&out[..n], &data[..]);
+    }
+
+    /// `compress_long` (the opt-in LDM path) must round-trip through BOTH libzstd
+    /// and our decoder on ordinary inputs too — where LDM finds nothing it should
+    /// behave like `compress`. libzstd's default `windowLogMax` (27) accepts the
+    /// frame, so `bulk::decompress` decodes it.
+    #[test]
+    fn compress_long_round_trips_on_varied_inputs() {
+        let text = b"the quick brown fox jumps over the lazy dog. ".repeat(120);
+        let structured: Vec<u8> =
+            (0..40_000u32).map(|i| (i.wrapping_mul(2654435761) >> 11) as u8).collect();
+        let cases: Vec<Vec<u8>> = vec![
+            vec![],
+            vec![0u8],
+            b"abcabcabc".to_vec(),
+            text,
+            structured,
+            vec![7u8; 5000],
+        ];
+        for data in &cases {
+            for &level in &[3i32, 19] {
+                let frame = compress_long(data, level, level % 2 == 0, true);
+                let by_lib = zstd::bulk::decompress(&frame, data.len() + 64).unwrap_or_else(|e| {
+                    panic!("libzstd decode of compress_long (L{level}, {} bytes): {e}", data.len())
+                });
+                assert_eq!(by_lib, *data, "libzstd mismatch L{level} ({} bytes)", data.len());
+                assert_eq!(decompress(&frame).unwrap(), *data, "self mismatch L{level}");
+            }
+        }
+    }
+
+    /// On a repeat spaced beyond the regular 8 MiB window, `compress_long` finds
+    /// the far duplicate (via the LDM index) where `compress` cannot, so it
+    /// produces a clearly smaller frame — and still round-trips both ways.
+    #[test]
+    fn compress_long_beats_compress_on_far_repeats() {
+        // Truly-random (incompressible) data, so the ONLY available compression
+        // is the far duplicate: a 512 KiB chunk, ~9 MiB of unrelated filler, then
+        // the same chunk again — its second copy sits ~9.5 MiB back, past the
+        // 8 MiB window the regular finders are capped to at every level. Plain
+        // compression must store it; only the LDM index can reach it.
+        fn prng(n: usize, mut s: u64) -> Vec<u8> {
+            (0..n)
+                .map(|_| {
+                    s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                    let mut z = s;
+                    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                    (z ^ (z >> 31)) as u8
+                })
+                .collect()
+        }
+        let chunk = prng(512 * 1024, 0x00C0_FFEE);
+        let filler = prng(9_000_000, 0x00F1_11E2);
+        let mut data = Vec::with_capacity(chunk.len() * 2 + filler.len());
+        data.extend_from_slice(&chunk);
+        data.extend_from_slice(&filler);
+        data.extend_from_slice(&chunk);
+
+        // Level 1 keeps the parse cheap; the win is the far match, not the parse.
+        let plain = compress(&data, 1, false, true);
+        let long = compress_long(&data, 1, false, true);
+        assert!(
+            long.len() + chunk.len() / 2 < plain.len(),
+            "LDM should recover the far {}-byte duplicate: long {} vs plain {}",
+            chunk.len(),
+            long.len(),
+            plain.len()
+        );
+        // Both decoders reconstruct it exactly (the large offset stays within the
+        // advertised window).
+        assert_eq!(decompress(&long).unwrap(), data, "self decode of LDM frame");
+        let by_lib = zstd::bulk::decompress(&long, data.len() + 64).unwrap();
+        assert_eq!(by_lib, data, "libzstd decode of LDM frame");
     }
 }
 

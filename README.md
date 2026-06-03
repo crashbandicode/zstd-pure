@@ -19,7 +19,7 @@ libzstd, which implements RFC 8878. Notable conformance points:
 
 - **Content checksum** — low 4 bytes of `XXH64(data, seed = 0)`, little-endian (§3.1.1).
 - **Reserved bit** of the `Frame_Header_Descriptor` is required to be 0; a frame that sets it is rejected (§3.1.1.1.1).
-- **Window size** — the encoder caps `Window_Size` at 8 MiB, honoring §3.1.1.1.2's recommendation that a compressor not require more (for broad decoder interoperability); the streaming decoder accepts windows up to 128 MiB, ≥ the 8 MiB a decoder is recommended to support.
+- **Window size** — the encoder caps `Window_Size` at 8 MiB, honoring §3.1.1.1.2's recommendation that a compressor not require more (for broad decoder interoperability); the streaming decoder accepts windows up to 128 MiB, ≥ the 8 MiB a decoder is recommended to support. The opt-in `compress_long` (long-distance matching) is the deliberate exception: to make its long-range matches reachable it may advertise a `Window_Size` up to 128 MiB (log 27) — still within the default `windowLogMax` (27) of a stock `ZSTD_decompress` and of this crate's `StreamingDecoder`, so the frames stay broadly decodable. Plain `compress` is unchanged at 8 MiB.
 - **Block_Maximum_Size** — `min(Window_Size, 128 KiB)` (§3.1.1.2).
 
 ## Feature checklist
@@ -57,7 +57,7 @@ libzstd, which implements RFC 8878. Notable conformance points:
 - [x] Block splitting: partition a block into adjacent blocks each with entropy tables fit to its own statistics, when their distributions differ enough to pay for the extra headers — a recursive midpoint split at the optimal-parse levels (L16+), threading Repeat-mode / Treeless tables across the sub-blocks and **kept only when strictly smaller** (never regresses). Stacks on the `btultra2` pass: L19 `records` 1.26× → 1.12×, `json` 0.84× → 0.80×, `3x90k` 1.07× → 1.01×, and a heterogeneous text/JSON block now beats libzstd — **T2.3 (ratio)**
 - [x] Binary-tree match finder — chain/tree **hybrid** for the optimal parse (L16+): the hash chain supplies the small-offset Pareto set and a faithful binary tree (`encode::lz::BtState`, a port of zstd's `ZSTD_insertBt*`) contributes its longest match, merged only when it's `≥ sufficient_len` (a committable long match the chain's depth bound missed). Ties the chain-opt on the small corpus (never regresses) and wins where the depth bound binds — e.g. **−16 %** on a 150-revision near-duplicate corpus (`examples/bench_large`) — **T2.3 (ratio)**
 - [x] `btlazy2` (L13–15): a lazy2 parse over the same chain/tree hybrid — the chain's recent match, substituted by the tree's longest when it's a longer `≥ target_length` match the (shallow, depth ~16) chain missed. Big wins at L13 where that depth binds: small-corpus `records` 1.14× → **0.96×**, `3x90k` 1.27× → **0.49×**, near-duplicate `revisions` 1.41× → **1.02×**; ties everything else — **T2.3 (ratio)**
-- [ ] Long-distance matching — T2.4
+- [x] Long-distance matching (`compress_long`, opt-in): a coarse, **content-defined** sparse whole-input index (`encode::lz`/`encode::ldm` — keyed by a 64-byte min-match, inserted/probed where the content hash gates, so a repeat is indexed at the same relative offsets in both copies) contributes long matches at offsets *beyond* the regular 8 MiB window; the parse emits them as ordinary large-offset sequences and fills the gaps with the regular finder, and the frame advertises the larger window they need (up to log 27). The decoder is unchanged. — **T2.4**
 - [x] Dictionary encode (`compress_with_dict`) — raw + structured/tagged: match window primed with dict content, seeded repeat offsets, dict-id frame header; verified through libzstd + our decoder, improves ratio on a many-small-files corpus — **T3.1**
 - [x] Dictionary training (`train_dictionary`) — pure-Rust greedy COVER producing a raw-content dictionary (highest-coverage shared substrings, most-valuable last); improves ratio on a many-small-files corpus, verified through libzstd + our decoder — **T3.1**
 - [x] Structured/tagged-dictionary finalize (`train_dictionary_structured`) — `magic | id | Huffman | FSE OF/ML/LL | repeat offsets | content`, entropy tables derived from a dict-primed compression pass over the samples; **libzstd loads it on the strict compress side** and a decoder warm-starts from it — **T3.1**
@@ -177,9 +177,9 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
   re-describing tables. Cross-block reuse is complete.
 - **Benchmark — DONE.** `benches/compression.rs` (criterion throughput) +
   `examples/ratio.rs` (size) vs the `zstd` crate, documented in `BENCHMARKS.md`.
-- **T2.4 LDM** (long-distance matching) remains open — see the dedicated handoff
-  note in the T2.4 section below. (**T1.3 no_std** — including the streaming
-  decoder over the crate's `io::Read` shim — is now done.)
+- **T2.4 LDM** (long-distance matching) — **DONE** (opt-in `compress_long`); see
+  the T2.4 section below. (**T1.3 no_std** — including the streaming decoder over
+  the crate's `io::Read` shim — is now done.)
 
 ### T2.1 entropy encoders
 - **Huff0 encoder — DONE (T2.1a).** `encode/huff.rs`: length-limited Huffman
@@ -329,7 +329,22 @@ decoder** (lib unit tests + the corpus harness's encoder sweep).
   (`records` 1.14× → 0.96×, `3x90k` 1.27× → 0.49×) and on near-duplicate
   `revisions` (1.41× → 1.02×); ties elsewhere, never regresses.
 
-### T2.4 Long-distance matching (LDM) — handoff (the next ratio item)
+### T2.4 Long-distance matching (LDM) — DONE
+
+**What shipped.** The opt-in `compress_long` enables LDM. `encode::ldm::LdmState`
+is a coarse, **content-defined** sparse index over the whole input (64-byte
+min-match; one entry per content-gated point — so a repeat is indexed at the same
+relative offsets in both copies, making detection independent of alignment).
+`encode::lz::parse_with_ldm` injects the long matches it finds into the parse as
+ordinary large-offset sequences and fills the gaps with the regular finder;
+`params::params_for_level_ldm` grows the advertised window to cover the input, up
+to `LDM_MAX_WINDOW_LOG` (27); the block writer reuses the existing `emit_split`
+path unchanged (LDM matches are just sequences, so block splitting + per-channel
+entropy-table selection handle them, and a large offset's `of_code` stays within
+the predefined OF table). The decoder is untouched. v1 simplifications left as
+refinements: forward-only extension (no backward extension into the preceding
+literals), per-block match generation (a match is clamped at the block boundary),
+and no LDM under `compress_with_dict`.
 
 **What it is.** Matches at offsets *beyond* the regular window. Our window caps at
 `window_log` 23 (8 MiB) for portability, and every match finder (chain, dfast,
@@ -377,14 +392,13 @@ actually reaches `minMatch` and its offset is within the advertised window. The
 already copies any in-window offset, and the streaming decoder's `window_log_max`
 already admits the larger window.
 
-**Verification.** Extend `examples/bench_large`'s `revisions` so matching copies
-are spaced > 8 MiB apart (beyond the window), confirm LDM shrinks it while the
-window-bounded finders can't, and round-trip both ways (libzstd with
-`ZSTD_c_enableLongDistanceMatching`, and our decoder).
-
-**Scope.** Moderate: the coarse hash + sequence generation is ~150–250 lines, the
-params + conformance-window bump are small, and injecting the LDM sequences into
-the block parse is the fiddly part.
+**Verification (done).** Lib tests: `encode::ldm` finds a far-spaced repeat and
+every match it generates is valid (in-window, byte-exact, non-overlapping);
+`compress_long` round-trips ordinary inputs through libzstd + our decoder across
+levels; and on truly-random data with a duplicate spaced > 8 MiB apart it
+produces a clearly smaller frame than `compress` (which can't reach past its
+window), with both decoders reconstructing it. Real-world ratio on the Silesia
+corpus is tracked in [`BENCHMARKS.md`](BENCHMARKS.md).
 
 ### T1.3 no_std + alloc — DONE
 Now a standalone crate, so `cargo build --no-default-features --features alloc`

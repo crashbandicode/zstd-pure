@@ -44,6 +44,15 @@ pub struct CParams {
 const MIN_WINDOW_LOG: u32 = 10;
 const MAX_WINDOW_LOG: u32 = 23;
 
+/// Largest window log the encoder advertises under opt-in long-distance matching
+/// ([`params_for_level_ldm`] / `compress_long`): libzstd's default `windowLogMax`
+/// (128 MiB). LDM offsets can exceed the portable 8 MiB cap, so the frame must
+/// advertise a window that admits them; 27 stays within what a stock
+/// `ZSTD_decompress` and this crate's `StreamingDecoder` accept by default. This
+/// is a deliberate, opt-in conformance bump — see the Conformance note in the
+/// README.
+pub const LDM_MAX_WINDOW_LOG: u32 = 27;
+
 use Strategy::*;
 
 /// libzstd default cparams (the "unknown source size" row set), levels 0..=22.
@@ -118,6 +127,22 @@ pub(crate) fn params_for_level_with_dict(level: i32, src_size: usize, dict_size:
     let dict_reach = ceil_log2(dict_size).clamp(MIN_WINDOW_LOG, MAX_WINDOW_LOG);
     if p.window_log < dict_reach {
         p.window_log = dict_reach;
+    }
+    p
+}
+
+/// Like [`params_for_level`] but for opt-in long-distance matching: the window
+/// is grown to cover the whole input (so far matches are reachable), up to
+/// [`LDM_MAX_WINDOW_LOG`], instead of being capped at the portable 8 MiB. The
+/// regular match-finder tables keep their level sizes — only the advertised
+/// window (and thus the reach of LDM's large offsets) grows; on a small input
+/// the window stays where [`params_for_level`] put it, so `compress_long`
+/// behaves like `compress`.
+pub fn params_for_level_ldm(level: i32, src_size: usize) -> CParams {
+    let mut p = params_for_level(level, src_size);
+    let needed = ceil_log2(src_size.max(1)).clamp(MIN_WINDOW_LOG, LDM_MAX_WINDOW_LOG);
+    if p.window_log < needed {
+        p.window_log = needed;
     }
     p
 }

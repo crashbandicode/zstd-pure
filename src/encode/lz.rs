@@ -1386,6 +1386,57 @@ impl Finder {
     }
 }
 
+/// Parse `range` while emitting the forced long-distance matches in `ldm` (the
+/// output of [`super::ldm::LdmState::generate`]: sorted by position, non-
+/// overlapping, each fully inside `range`). The regular `finder` fills the gaps
+/// between LDM matches, and `rep` is threaded through both — so every sequence's
+/// `offset_value` resolves against the same evolving repeat offsets the decoder
+/// will see, whether it came from the gap parse or an LDM long match. Returns
+/// `(sequences, literals)` exactly like [`Finder::parse`]; with an empty `ldm`
+/// it *is* `finder.parse(range)`. The LDM matches' offsets may exceed the
+/// regular window but stay within the frame's advertised (larger) window.
+pub fn parse_with_ldm(
+    finder: &mut Finder,
+    data: &[u8],
+    range: core::ops::Range<usize>,
+    max_offset: usize,
+    rep: &mut [u32; 3],
+    ldm: &[super::ldm::LdmSeq],
+) -> (Vec<Seq>, Vec<u8>) {
+    let end = range.end;
+    let mut seqs = Vec::new();
+    let mut literals = Vec::new();
+    let mut cursor = range.start;
+    for m in ldm {
+        // Fill the gap before this long match with the regular finder; its
+        // trailing literal run becomes the long match's literal length.
+        let ll = if cursor < m.pos {
+            let (gap_seqs, gap_lits) = finder.parse(data, cursor..m.pos, max_offset, rep);
+            // The gap's own sequences consume the front of `gap_lits`; only the
+            // trailing run (after the last gap match) is the long match's literal
+            // length. Using the whole buffer would double-count those literals.
+            let consumed: usize = gap_seqs.iter().map(|s| s.lit_len as usize).sum();
+            let trailing = gap_lits.len() - consumed;
+            seqs.extend(gap_seqs);
+            literals.extend_from_slice(&gap_lits);
+            trailing
+        } else {
+            0
+        };
+        let ll0 = ll == 0;
+        let offset_value = encode_offset(rep, m.offset, ll0);
+        resolve_offset(rep, offset_value, ll0);
+        seqs.push(Seq { lit_len: ll as u32, match_len: m.len as u32, offset_value });
+        cursor = m.pos + m.len;
+    }
+    if cursor < end {
+        let (tail_seqs, tail_lits) = finder.parse(data, cursor..end, max_offset, rep);
+        seqs.extend(tail_seqs);
+        literals.extend_from_slice(&tail_lits);
+    }
+    (seqs, literals)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

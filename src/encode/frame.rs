@@ -9,8 +9,8 @@ use crate::alloc_prelude::*;
 use super::super::frame::ZSTD_MAGIC;
 use super::super::xxhash::xxh64;
 use super::block::{
-    write_compressed_block, write_huffman_literals_block, write_store_block, EncState,
-    BLOCK_SIZE_MAX,
+    write_compressed_block, write_compressed_block_ldm, write_huffman_literals_block,
+    write_store_block, EncState, BLOCK_SIZE_MAX,
 };
 
 /// Window log used by the store-mode encoder. Raw/RLE blocks carry no
@@ -152,6 +152,74 @@ pub fn compress(data: &[u8], level: i32, checksum: bool, expect_magic: bool) -> 
 
             let mut comp = Vec::new();
             match write_compressed_block(&mut comp, last, data, start..end, &mut finder, max_offset, &state, split_depth) {
+                Ok(next) if comp.len() < store.len() => {
+                    state = next;
+                    out.extend_from_slice(&comp);
+                }
+                _ => out.extend_from_slice(&store),
+            }
+            start = end;
+        }
+    }
+
+    if checksum {
+        let digest = (xxh64(data, 0) & 0xFFFF_FFFF) as u32;
+        out.extend_from_slice(&digest.to_le_bytes());
+    }
+    out
+}
+
+/// Compress `data` with **long-distance matching** enabled — the opt-in T2.4
+/// path. Like [`compress`], but a coarse whole-input index ([`super::ldm`])
+/// contributes long matches at offsets *beyond* the regular 8 MiB window, and
+/// the frame advertises the larger window those offsets need (grown to cover the
+/// input, up to [`super::params::LDM_MAX_WINDOW_LOG`] = 128 MiB — still within a
+/// stock decoder's default `windowLogMax`). Best for large inputs with repeats
+/// spaced farther apart than the regular window can reach; on a small input it
+/// behaves like [`compress`] (the window stays small, the index finds nothing).
+///
+/// The output is a conformant frame that both libzstd (default `windowLogMax`
+/// 27) and this crate's decoder accept. **Conformance:** this is the only entry
+/// point that may advertise a `Window_Size` above the portable 8 MiB; see the
+/// Conformance note in the README. The decoder is unchanged — LDM is purely an
+/// encoder concern.
+pub fn compress_long(data: &[u8], level: i32, checksum: bool, expect_magic: bool) -> Vec<u8> {
+    let params = super::params::params_for_level_ldm(level, data.len());
+    let window_log = params.window_log;
+    let max_offset = 1usize << window_log;
+    let split_depth = split_depth_for(params.strategy);
+
+    let mut out = Vec::with_capacity(data.len() / 2 + 64);
+    if expect_magic {
+        out.extend_from_slice(&ZSTD_MAGIC.to_le_bytes());
+    }
+    write_frame_header(&mut out, data.len() as u64, checksum, window_log, 0);
+
+    if data.is_empty() {
+        super::block::write_raw_block(&mut out, true, &[]);
+    } else {
+        let mut state =
+            EncState { rep: [1, 4, 8], seq: super::sequences::SeqCTables::default(), lit: None };
+        let mut finder = super::lz::Finder::new(&params);
+        // The coarse LDM index persists across the frame's blocks, so a long
+        // match can reference any earlier block within the advertised window.
+        let mut ldm = super::ldm::LdmState::new(window_log);
+        let n = data.len();
+        let mut start = 0usize;
+        while start < n {
+            let end = (start + BLOCK_SIZE_MAX).min(n);
+            let last = end == n;
+            let mut store = Vec::new();
+            write_store_block(&mut store, last, &data[start..end]);
+
+            // Generate this block's long matches (updating the index), then parse
+            // the block with them injected and the gaps filled by the finder.
+            let matches = ldm.generate(data, start..end, max_offset);
+            let mut comp = Vec::new();
+            match write_compressed_block_ldm(
+                &mut comp, last, data, start..end, &mut finder, max_offset, &state, split_depth,
+                &matches,
+            ) {
                 Ok(next) if comp.len() < store.len() => {
                     state = next;
                     out.extend_from_slice(&comp);
