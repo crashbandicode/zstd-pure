@@ -28,7 +28,7 @@ const BLOCK_SPLIT_DEPTH: usize = 4;
 /// The split depth for a level's strategy: the splitter runs only for the
 /// optimal-parse strategies, leaving the fast/lazy levels byte-identical and
 /// their throughput untouched.
-fn split_depth_for(strategy: super::params::Strategy) -> usize {
+pub(crate) fn split_depth_for(strategy: super::params::Strategy) -> usize {
     if strategy >= super::params::Strategy::Btopt {
         BLOCK_SPLIT_DEPTH
     } else {
@@ -71,6 +71,24 @@ fn write_frame_header(out: &mut Vec<u8>, content_size: u64, checksum: bool, wind
         2 => out.extend_from_slice(&(content_size as u32).to_le_bytes()),
         _ => out.extend_from_slice(&content_size.to_le_bytes()),
     }
+}
+
+/// Write a frame header for the **streaming** encoder, which does not know the
+/// total content size up front (RFC 8878 §3.1.1.1.1, the unknown-size form).
+///
+/// `Single_Segment_Flag = 0` (a window descriptor is present) and
+/// `Frame_Content_Size_flag = 0`, which together mean the `Frame_Content_Size`
+/// field is **absent** — exactly the frame libzstd's `ZSTD_compressStream`
+/// produces with `ContentSizeFlag(false)`. Our one-shot decoder, our
+/// [`StreamingDecoder`](crate::StreamingDecoder), and libzstd all decode it (the
+/// decoder simply grows its output rather than pre-sizing from a pledge). No
+/// dictionary id is written.
+pub(crate) fn write_frame_header_streaming(out: &mut Vec<u8>, checksum: bool, window_log: u32) {
+    // FHD: fcs_flag = 0 (bits 6-7), single_segment = 0 (bit 5), content_checksum
+    // (bit 2), dict_id_flag = 0 (bits 0-1).
+    out.push((checksum as u8) << 2);
+    // Window descriptor: exponent in bits 3-7, mantissa (0) in bits 0-2.
+    out.push(((window_log - 10) as u8) << 3);
 }
 
 /// Compress `data` into a store-mode frame (raw/RLE blocks only). The output is

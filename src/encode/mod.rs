@@ -22,11 +22,13 @@ pub mod ldm;
 pub mod lz;
 pub mod params;
 pub mod sequences;
+pub mod stream;
 pub mod train;
 
 pub use frame::{
     compress, compress_huffman_literals, compress_long, compress_store, compress_with_dict,
 };
+pub use stream::StreamingEncoder;
 pub use train::{train_dictionary, train_dictionary_structured};
 
 /// Compress `data` into a standard (magic-prefixed) store-mode frame. No

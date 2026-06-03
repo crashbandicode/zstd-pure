@@ -120,7 +120,7 @@ pub mod xxhash;
 pub use dict::Dictionary;
 pub use encode::{
     compress, compress_huffman_literals, compress_long, compress_store, compress_stored,
-    compress_with_dict, train_dictionary, train_dictionary_structured,
+    compress_with_dict, train_dictionary, train_dictionary_structured, StreamingEncoder,
 };
 pub use seekable::{compress_seekable, decompress_seekable_frame, SeekFrame, SeekTable};
 pub use streaming::StreamingDecoder;
