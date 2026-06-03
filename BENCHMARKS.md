@@ -25,16 +25,19 @@ pseudo-random byte records), `text` (40 KB NL-ish repetition), `json` (146 KB
 structured records, multi-block), `3x90k-chunk` (270 KB — three copies of a 90 KB
 incompressible chunk, so only cross-block matching can shrink copies 2–3),
 `mixed` (128 KB — ~64 KB repetitive text then ~64 KB structured JSON in one
-block, two regimes whose entropy statistics differ: the block-splitter case).
+block, two regimes whose entropy statistics differ: the block-splitter case),
+`wiki` (~150 KB synthetic Wikipedia-XML — the enwik shape: `<page>` records with
+`[[links]]`, `{{templates}}`, `'''bold'''`, headings, and mixed-case prose; see
+§4.4).
 
-| level | redundant | records | text | json | 3x90k-chunk | mixed |
-|------:|----------:|--------:|-----:|-----:|------------:|------:|
-|  1 | 0.65× | 1.87× | 1.03× | 0.91× | 3.25× | 0.99× |
-|  3 | 0.65× | 1.02× | 1.02× | 0.76× | 0.12× | 0.85× |
-|  6 | 0.66× | **0.97×** | 1.05× | 0.93× | 1.69× | 0.97× |
-|  9 | 0.66× | **0.97×** | 1.05× | 1.09× | 2.49× | 1.15× |
-| 13 | 1.02× | **0.96×** | 1.02× | 1.32× | **0.49×** | 1.07× |
-| 19 | 1.02× | 1.12× | 1.02× | **0.80×** | 1.01× | **0.98×** |
+| level | redundant | records | text | json | 3x90k-chunk | mixed | wiki |
+|------:|----------:|--------:|-----:|-----:|------------:|------:|-----:|
+|  1 | 0.65× | 1.87× | 1.03× | 0.91× | 3.25× | 0.99× | 1.10× |
+|  3 | 0.65× | 1.02× | 1.02× | 0.76× | 0.12× | 0.85× | **0.98×** |
+|  6 | 0.66× | **0.97×** | 1.05× | 0.93× | 1.69× | 0.97× | 1.07× |
+|  9 | 0.66× | **0.97×** | 1.05× | 1.09× | 2.49× | 1.15× | 1.06× |
+| 13 | 1.02× | **0.96×** | 1.02× | 1.32× | **0.49×** | 1.07× | 1.14× |
+| 19 | 1.02× | 1.12× | 1.02× | **0.80×** | 1.01× | **0.98×** | 1.02× |
 
 Reading it: `level` scales ratio — `dfast` (double-hash) kicks in at L2–3, the
 chain/lazy finder at L4+, the `btlazy2` chain/tree hybrid at L13–15, and the
@@ -81,6 +84,28 @@ Reproduce: `ZSTD_PURE_CORPUS=~/fixtures/silesia/raw cargo test --release
 real_corpus -- --ignored --nocapture`.
 
 [silesia]: https://github.com/MiloszKrajewski/SilesiaCorpus
+
+## Real-world corpus (enwik8, ours ÷ libzstd)
+
+[enwik8][enwik] is the first 100 MB of an English Wikipedia XML dump (the Large
+Text Compression Benchmark) — a single 100,000,000-byte text file. Round-tripped
+both ways through `real_corpus`:
+
+| level | ours | libzstd | ratio |
+|------:|-----:|--------:|------:|
+|  3 | 36,218,624 B | 35,419,425 B | 1.023× |
+|  9 | 33,413,666 B | 31,076,602 B | 1.075× |
+
+Within ~2–8 % of libzstd, the same shape as Silesia — the high-level gap is the
+parse/entropy modelling (§ "Standing"), not window reach (enwik8 is one
+sequential text with no far-apart duplicates, so `compress_long` doesn't help).
+L19 is omitted here (our optimal parse is ~2.4 MiB/s → minutes on 100 MB); use
+`ZSTD_PURE_CORPUS_LEVELS` to choose. The synthetic `wiki` profile in the ratio
+table above tracks this regime without the fixture. Reproduce:
+`ZSTD_PURE_CORPUS=~/fixtures/enwik ZSTD_PURE_CORPUS_LEVELS=3,9 cargo test --release
+--test real_corpus -- --ignored --nocapture`.
+
+[enwik]: https://mattmahoney.net/dc/textdata.html
 
 ## Long-distance matching (`compress_long`)
 

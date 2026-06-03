@@ -7,6 +7,9 @@
 
 use zstd_pure::compress;
 
+mod common;
+use common::enwik_like;
+
 fn profiles() -> Vec<(&'static str, Vec<u8>)> {
     // Highly redundant (>128 KiB, multi-block).
     let redundant: Vec<u8> = (0..40_000u32).flat_map(|i| (i % 13).to_le_bytes()).collect();
@@ -41,6 +44,9 @@ fn profiles() -> Vec<(&'static str, Vec<u8>)> {
         .collect();
     jsonish.truncate(64 * 1024);
     mixed.extend_from_slice(&jsonish);
+    // ~150 KiB of Wikipedia-XML-like markup + prose (the enwik shape): repeated
+    // tag structure for the matcher, mixed-case prose for the entropy coder.
+    let wiki = enwik_like(150_000, 0x5747_494b_4900_0001);
     vec![
         ("redundant", redundant),
         ("records", records),
@@ -48,6 +54,7 @@ fn profiles() -> Vec<(&'static str, Vec<u8>)> {
         ("json", json),
         ("3x90k-chunk", chunk.repeat(3)),
         ("mixed", mixed),
+        ("wiki", wiki),
     ]
 }
 

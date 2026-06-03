@@ -10,6 +10,9 @@
 use std::time::Instant;
 use zstd_pure::{compress, compress_long, compress_parallel};
 
+mod common;
+use common::enwik_like;
+
 /// Deterministic LCG (no wall-clock / RNG syscalls, so both runs see identical
 /// inputs).
 struct Rng(u64);
@@ -173,6 +176,7 @@ fn main() {
         ("logs", logs()),
         ("binstruct", binstruct()),
         ("far_dup", far_dup()),
+        ("wiki", enwik_like(2_000_000, 0x5747_494b_4900_0002)),
     ];
     for level in [13i32, 19] {
         println!("\n=== level {level} ===");
