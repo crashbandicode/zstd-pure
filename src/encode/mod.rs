@@ -21,6 +21,9 @@ pub mod huff;
 pub mod ldm;
 pub mod lz;
 pub mod params;
+/// Parallel (multi-threaded) compression. `std`-only — it uses `std::thread`.
+#[cfg(feature = "std")]
+pub mod parallel;
 pub mod sequences;
 pub mod stream;
 pub mod train;
@@ -28,6 +31,8 @@ pub mod train;
 pub use frame::{
     compress, compress_huffman_literals, compress_long, compress_store, compress_with_dict,
 };
+#[cfg(feature = "std")]
+pub use parallel::compress_parallel;
 pub use stream::StreamingEncoder;
 pub use train::{train_dictionary, train_dictionary_structured};
 

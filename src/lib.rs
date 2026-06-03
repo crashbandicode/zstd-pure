@@ -149,6 +149,9 @@ pub use encode::{
     compress, compress_huffman_literals, compress_long, compress_store, compress_stored,
     compress_with_dict, train_dictionary, train_dictionary_structured, StreamingEncoder,
 };
+/// Parallel compression (`std`-only — uses `std::thread`).
+#[cfg(feature = "std")]
+pub use encode::compress_parallel;
 pub use seekable::{compress_seekable, decompress_seekable_frame, SeekFrame, SeekTable};
 pub use streaming::StreamingDecoder;
 pub use error::{Result, ZstdError};
