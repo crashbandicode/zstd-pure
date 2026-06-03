@@ -32,9 +32,9 @@
 //! the regular window, and the frame advertises a larger window to admit them —
 //! the streaming analogue of [`compress_long`](crate::compress_long). Because LDM
 //! matches reach back across the advertised window, the LDM encoder retains that
-//! much history (so a larger window costs proportionally more memory). (The LDM
-//! path currently retains *all* input; bounding it by sliding the index is a
-//! follow-up — the regular path is already bounded.)
+//! much history (so a larger window costs proportionally more memory) — but it is
+//! still bounded the same way: a slide rebuilds both the finder and the coarse
+//! index over the retained window.
 //!
 //! [`push`]: StreamingEncoder::push
 //! [`finish`]: StreamingEncoder::finish
@@ -233,12 +233,6 @@ impl StreamingEncoder {
     /// tables consistent with the slid buffer — correct for every strategy,
     /// including the binary tree, with no bespoke index-shifting.
     fn maybe_slide(&mut self) {
-        // LDM path: a slide must also rebase/rebuild the coarse index, which lands
-        // in a follow-up — for now the LDM encoder retains all input (its matches
-        // already respect the advertised window, so output is still correct).
-        if self.ldm.is_some() {
-            return;
-        }
         let history = self.emitted - self.dropped;
         if history <= 2 * self.max_offset {
             return;
@@ -246,9 +240,26 @@ impl StreamingEncoder {
         let drop = history - self.max_offset; // leave exactly one window of history
         self.input.drain(..drop);
         self.dropped += drop;
+        let retained = self.emitted - self.dropped; // == max_offset (the advertised window)
+
+        // Rebuild the regular finder over the retained window. Bounded to its own
+        // `regular_reach` (= `max_offset` without LDM); priming a larger retained
+        // LDM window is safe because the binary tree clamps its search to its array
+        // coverage (the b34cb85 window_low fix).
         self.finder = super::lz::Finder::new(&self.params);
-        let retained_history = self.emitted - self.dropped; // == max_offset
-        self.finder.prime(&self.input, retained_history, self.max_offset);
+        self.finder.prime(&self.input, retained, self.regular_reach);
+
+        // Rebuild the coarse LDM index the same way: re-scan the retained window
+        // and discard the matches, which repopulates the index over exactly the
+        // bytes still reachable. (Like the finder rebuild, this trades the
+        // in-place index reduction's CPU win for simplicity and reuse of tested
+        // code.)
+        if self.ldm.is_some() {
+            let window_log = self.max_offset.trailing_zeros();
+            let mut ldm = super::ldm::LdmState::new(window_log);
+            let _ = ldm.generate(&self.input[..retained], 0..retained, self.regular_reach, self.max_offset);
+            self.ldm = Some(ldm);
+        }
     }
 
     /// Remove and return the compressed output produced so far (the frame header
@@ -287,11 +298,9 @@ impl StreamingEncoder {
         self.out.len()
     }
 
-    /// Bytes of input currently retained. For the regular encoder this stays
-    /// bounded as the stream advances (~`2 * window` plus a couple of blocks),
-    /// independent of the total input. The LDM encoder
-    /// ([`with_options_long`](Self::with_options_long)) currently retains all
-    /// input (bounded-memory LDM is a follow-up).
+    /// Bytes of input currently retained. Stays bounded as the stream advances
+    /// (~`2 * window` plus a couple of blocks), independent of the total input —
+    /// for both the regular and the LDM encoder (the LDM window is just larger).
     pub fn buffered_input_len(&self) -> usize {
         self.input.len()
     }
@@ -680,5 +689,50 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn streaming_long_memory_bounded_while_sliding() {
+        // window_log 20 (1 MiB) so a ~3 MiB input forces slides cheaply. A 128 KiB
+        // chunk recurs at offset ~768 KiB — beyond L1's 512 KiB regular reach but
+        // inside the 1 MiB LDM window — and the slide happens later (in the
+        // trailing filler), so the LDM index rebuild runs without losing the match.
+        let chunk = prng(128 * 1024, 0x0000_ABCD);
+        let mut data = Vec::new();
+        data.extend_from_slice(&chunk);
+        data.extend_from_slice(&prng(640 * 1024, 0x0000_1111)); // 2nd copy lands at ~768 KiB
+        data.extend_from_slice(&chunk);
+        data.extend_from_slice(&prng(2_100_000, 0x0000_2222)); // push total past 2*window
+
+        let window_log = 20;
+        let push_chunk = 64 * 1024;
+        let mut enc = StreamingEncoder::with_options_long(1, true, true, window_log);
+        let window = enc.window_size();
+        let bound = 2 * window + 2 * BLOCK_SIZE_MAX;
+        assert!(bound < data.len(), "input must exceed the bound to force a slide");
+
+        for part in data.chunks(push_chunk) {
+            enc.push(part);
+            assert!(
+                enc.buffered_input_len() <= bound,
+                "retained {} exceeded bound {bound}",
+                enc.buffered_input_len()
+            );
+        }
+        let frame = enc.finish();
+        assert_round_trips_three_ways(&frame, &data);
+
+        // The far dup (offset ~768 KiB, beyond L1's regular reach) is recovered
+        // before the slide, so the LDM stream beats the regular one despite sliding.
+        let regular = stream(&data, 1, true, push_chunk);
+        assert!(
+            frame.len() + 64 * 1024 < regular.len(),
+            "LDM should recover the far dup: {} vs {}",
+            frame.len(),
+            regular.len()
+        );
+
+        // Deterministic despite sliding: a single big push yields the identical frame.
+        assert_eq!(frame, stream_long(&data, 1, true, window_log, 0), "LDM slide must be chunk-independent");
     }
 }
