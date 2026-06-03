@@ -145,12 +145,17 @@ Ratio + throughput vs libzstd are tracked in [`BENCHMARKS.md`](BENCHMARKS.md).
 
 ## Handoff — remaining work (notes for the next agent)
 
-> **The current task list and execution model live in [`HANDOFF.md`](HANDOFF.md)**
-> (overnight autonomous run: streaming encoder, LDM decode-side, multithreading, an
-> enwik8/enwik9 corpus, then the `records` cost-model lever and a `ruzstd` perf
-> comparison). Production-grade testing (proptest + cargo-fuzz + a fixture-gated
-> real-world corpus) and T2.4 long-distance matching (`compress_long`) are **done**.
-> The notes below are background on how the decoder/encoder got here.
+> **The task list and execution model live in [`HANDOFF.md`](HANDOFF.md)** (see its
+> "Run status"). The latest overnight run landed the **streaming encoder**
+> (`StreamingEncoder`: incremental + `io::Write` + bounded memory), **LDM decode-side**
+> coverage, **multithreading** (`compress_parallel`), an **enwik8 / synthetic-wiki**
+> text corpus, and the **`ruzstd` decode comparison** plus the decode hot-spot
+> optimizations it motivated (now on par with ruzstd on decode). Production-grade
+> testing (proptest + cargo-fuzz + a fixture-gated real-world corpus) and T2.4
+> long-distance matching (`compress_long`) were already done. **Still open:** the
+> `records` L19 cost-model lever (a simple rep-probe regresses `json` — it needs the
+> deeper optimal-parse rework; see HANDOFF §4.5). The notes below are background on
+> how the decoder/encoder got here.
 
 State at this point: the **decoder** is at ecosystem parity (multi-frame,
 magicless, dictionaries [raw + tagged], streaming/bounded-memory, frame
