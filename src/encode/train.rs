@@ -233,17 +233,16 @@ pub fn train_dictionary_structured(samples: &[&[u8]], max_size: usize) -> Vec<u8
         combined.extend_from_slice(s);
         let mut finder = Finder::new(&params);
         finder.prime(&combined, content.len(), max_offset);
-        let mut rep = [1u32, 4, 8];
-        let (sq, lits) = finder.parse(
+        let parsed = finder.parse(
             &combined,
             content.len()..combined.len(),
             max_offset,
-            &mut rep,
+            [1u32, 4, 8],
         );
-        for &b in &lits {
+        for &b in &parsed.literals {
             lit_freq[b as usize] += 1;
         }
-        seqs.extend(sq);
+        seqs.extend(parsed.seqs);
     }
 
     // Literal Huffman table — from the residual literals, falling back to the

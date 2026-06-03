@@ -1220,23 +1220,55 @@ fn run_dp(
 /// parse's actual statistics ([`Prices::from_stats`]). Same contract as
 /// [`parse_block`] (persistent state, cross-block offsets, `rep` in lockstep).
 #[allow(clippy::too_many_arguments)]
+/// A block parse: the chosen sequences + literals and the post-block repeat
+/// offsets, plus — for the optimal parse only — an `alt`ernative parse the caller
+/// emits alongside the primary, keeping whichever is smaller. The optimal parse
+/// uses this to offer a *rep-candidate-enabled* parse as the alternative to the
+/// rep-free baseline, so enabling repeat-offset matches can never make a block
+/// larger than the baseline (a hard no-regression guard — see COST_MODEL_NOTES.md).
+/// `alt` nests at most one level deep (an alt never has its own alt).
+pub(crate) struct Parsed {
+    pub seqs: Vec<Seq>,
+    pub literals: Vec<u8>,
+    pub rep: [u32; 3],
+    pub alt: Option<Box<Parsed>>,
+}
+
+/// Materialize a block's literal buffer (every sequence's literal run, then the
+/// trailing run) from its sequence list — the bytes the decoder copies verbatim.
+fn materialize_literals(data: &[u8], range: core::ops::Range<usize>, seqs: &[Seq]) -> Vec<u8> {
+    let (start, end) = (range.start, range.end);
+    let mut literals = Vec::new();
+    let mut p = start;
+    for s in seqs {
+        literals.extend_from_slice(&data[p..p + s.lit_len as usize]);
+        p += s.lit_len as usize + s.match_len as usize;
+    }
+    literals.extend_from_slice(&data[p..end]);
+    literals
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn opt_parse_block(
     data: &[u8],
     range: core::ops::Range<usize>,
     state: &mut ChainState,
     tree: &mut BtState,
     max_offset: usize,
-    rep: &mut [u32; 3],
+    rep_in: [u32; 3],
     depth: usize,
     sufficient_len: usize,
     two_pass: bool,
-) -> (Vec<Seq>, Vec<u8>) {
+) -> Parsed {
     let (start, end) = (range.start, range.end);
     let n = end - start;
-    let mut literals = Vec::new();
     if n < MIN_MATCH + 1 {
-        literals.extend_from_slice(&data[start..end]);
-        return (Vec::new(), literals);
+        return Parsed {
+            seqs: Vec::new(),
+            literals: data[start..end].to_vec(),
+            rep: rep_in,
+            alt: None,
+        };
     }
 
     let suff = sufficient_len.max(MIN_MATCH);
@@ -1334,7 +1366,7 @@ pub fn opt_parse_block(
         &match_starts,
         &matches_flat,
         &pos_long,
-        *rep,
+        rep_in,
     );
 
     // --- DP pass 2 (`btultra2`): re-parse against the actual statistics. ---
@@ -1348,21 +1380,19 @@ pub fn opt_parse_block(
             &match_starts,
             &matches_flat,
             &pos_long,
-            *rep,
+            rep_in,
         )
     } else {
         (seqs1, rep1)
     };
 
-    // Materialize literals and commit the post-block repeat-offset state.
-    let mut p = start;
-    for s in &seqs {
-        literals.extend_from_slice(&data[p..p + s.lit_len as usize]);
-        p += s.lit_len as usize + s.match_len as usize;
+    let literals = materialize_literals(data, start..end, &seqs);
+    Parsed {
+        seqs,
+        literals,
+        rep: final_rep,
+        alt: None,
     }
-    literals.extend_from_slice(&data[p..end]);
-    *rep = final_rep;
-    (seqs, literals)
 }
 
 /// The active match finder for a frame, selected from the level's strategy.
@@ -1439,28 +1469,61 @@ impl Finder {
         }
     }
 
-    /// Parse one block's `range`, dispatching to the chosen finder.
+    /// Parse one block's `range`, dispatching to the chosen finder. Returns a
+    /// [`Parsed`] (the post-block `rep` is in the result, not threaded by `&mut`);
+    /// only the optimal parse populates `alt`.
     pub fn parse(
         &mut self,
         data: &[u8],
         range: core::ops::Range<usize>,
         max_offset: usize,
-        rep: &mut [u32; 3],
-    ) -> (Vec<Seq>, Vec<u8>) {
+        rep_in: [u32; 3],
+    ) -> Parsed {
+        // The simpler finders thread `rep` by `&mut` and have no alternative; wrap
+        // their `(seqs, literals)` into a `Parsed` with the evolved `rep`.
+        let mut rep = rep_in;
+        let plain = |seqs, literals, rep| Parsed {
+            seqs,
+            literals,
+            rep,
+            alt: None,
+        };
         match self {
-            Finder::Fast(state) => parse_block(data, range, state, max_offset, rep),
-            Finder::DFast(state) => dfast_parse_block(data, range, state, max_offset, rep),
+            Finder::Fast(state) => {
+                let (s, l) = parse_block(data, range, state, max_offset, &mut rep);
+                plain(s, l, rep)
+            }
+            Finder::DFast(state) => {
+                let (s, l) = dfast_parse_block(data, range, state, max_offset, &mut rep);
+                plain(s, l, rep)
+            }
             Finder::Chain {
                 state,
                 lazy_steps,
                 depth,
-            } => lazy_parse_block(data, range, state, max_offset, rep, *lazy_steps, *depth),
+            } => {
+                let (s, l) = lazy_parse_block(
+                    data,
+                    range,
+                    state,
+                    max_offset,
+                    &mut rep,
+                    *lazy_steps,
+                    *depth,
+                );
+                plain(s, l, rep)
+            }
             Finder::BtLazy {
                 state,
                 tree,
                 depth,
                 target,
-            } => bt_lazy_parse_block(data, range, state, tree, max_offset, rep, *depth, *target),
+            } => {
+                let (s, l) = bt_lazy_parse_block(
+                    data, range, state, tree, max_offset, &mut rep, *depth, *target,
+                );
+                plain(s, l, rep)
+            }
             Finder::Opt {
                 state,
                 tree,
@@ -1473,7 +1536,7 @@ impl Finder {
                 state,
                 tree,
                 max_offset,
-                rep,
+                rep_in,
                 *depth,
                 *sufficient_len,
                 *two_pass,
@@ -1555,14 +1618,17 @@ pub fn parse_with_ldm(
         // Fill the gap before this long match with the regular finder; its
         // trailing literal run becomes the long match's literal length.
         let ll = if cursor < m.pos {
-            let (gap_seqs, gap_lits) = finder.parse(data, cursor..m.pos, max_offset, rep);
-            // The gap's own sequences consume the front of `gap_lits`; only the
+            // Gap parse: take the primary (baseline) parse and thread its `rep`;
+            // the optimal parse's rep-candidate `alt` is not used on the LDM path.
+            let gap = finder.parse(data, cursor..m.pos, max_offset, *rep);
+            *rep = gap.rep;
+            // The gap's own sequences consume the front of `gap.literals`; only the
             // trailing run (after the last gap match) is the long match's literal
             // length. Using the whole buffer would double-count those literals.
-            let consumed: usize = gap_seqs.iter().map(|s| s.lit_len as usize).sum();
-            let trailing = gap_lits.len() - consumed;
-            seqs.extend(gap_seqs);
-            literals.extend_from_slice(&gap_lits);
+            let consumed: usize = gap.seqs.iter().map(|s| s.lit_len as usize).sum();
+            let trailing = gap.literals.len() - consumed;
+            seqs.extend(gap.seqs);
+            literals.extend_from_slice(&gap.literals);
             trailing
         } else {
             0
@@ -1578,9 +1644,10 @@ pub fn parse_with_ldm(
         cursor = m.pos + m.len;
     }
     if cursor < end {
-        let (tail_seqs, tail_lits) = finder.parse(data, cursor..end, max_offset, rep);
-        seqs.extend(tail_seqs);
-        literals.extend_from_slice(&tail_lits);
+        let tail = finder.parse(data, cursor..end, max_offset, *rep);
+        *rep = tail.rep;
+        seqs.extend(tail.seqs);
+        literals.extend_from_slice(&tail.literals);
     }
     (seqs, literals)
 }
@@ -1706,18 +1773,18 @@ mod tests {
         for two_pass in [false, true] {
             let mut state = ChainState::new(18, 18);
             let mut tree = BtState::new(18, 20);
-            let mut rep = [1u32, 4, 8];
-            let (seqs, literals) = opt_parse_block(
+            let parsed = opt_parse_block(
                 &data,
                 0..data.len(),
                 &mut state,
                 &mut tree,
                 1 << 20,
-                &mut rep,
+                [1u32, 4, 8],
                 64,
                 64,
                 two_pass,
             );
+            let (seqs, literals, rep) = (parsed.seqs, parsed.literals, parsed.rep);
 
             let mut section = Vec::new();
             super::super::sequences::write_sequences(

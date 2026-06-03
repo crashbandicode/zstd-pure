@@ -110,18 +110,68 @@ pub fn write_compressed_block(
     state: &EncState,
     max_split_depth: usize,
 ) -> Result<EncState> {
-    let mut rep = state.rep;
-    let (seqs, literals) = finder.parse(data, range, max_offset, &mut rep);
-    let (seq, lit) = emit_split(
+    let parsed = finder.parse(data, range, max_offset, state.rep);
+    emit_and_pick(
         out,
         last,
-        &seqs,
-        &literals,
+        parsed,
         &state.seq,
         state.lit.as_ref(),
         max_split_depth,
+    )
+}
+
+/// Emit a [`Parsed`](super::lz::Parsed) block, keeping the smaller of its primary
+/// and (if present) alternative encodings — the no-regression guard for the
+/// optimal parse's rep-candidate alternative. Both candidates are emitted through
+/// the same [`emit_split`] (so the comparison is the *exact* encoded size,
+/// splitting included); the winner's repeat offsets + entropy tables become the
+/// committed [`EncState`]. A simpler finder has no `alt`, so this is just one
+/// `emit_split`.
+fn emit_and_pick(
+    out: &mut Vec<u8>,
+    last: bool,
+    parsed: super::lz::Parsed,
+    prev_seq: &super::sequences::SeqCTables,
+    prev_lit: Option<&super::huff::CodeTable>,
+    max_split_depth: usize,
+) -> Result<EncState> {
+    let mut buf_p = Vec::new();
+    let (seq_p, lit_p) = emit_split(
+        &mut buf_p,
+        last,
+        &parsed.seqs,
+        &parsed.literals,
+        prev_seq,
+        prev_lit,
+        max_split_depth,
     )?;
-    Ok(EncState { rep, seq, lit })
+    if let Some(alt) = parsed.alt {
+        let mut buf_a = Vec::new();
+        let (seq_a, lit_a) = emit_split(
+            &mut buf_a,
+            last,
+            &alt.seqs,
+            &alt.literals,
+            prev_seq,
+            prev_lit,
+            max_split_depth,
+        )?;
+        if buf_a.len() < buf_p.len() {
+            out.extend_from_slice(&buf_a);
+            return Ok(EncState {
+                rep: alt.rep,
+                seq: seq_a,
+                lit: lit_a,
+            });
+        }
+    }
+    out.extend_from_slice(&buf_p);
+    Ok(EncState {
+        rep: parsed.rep,
+        seq: seq_p,
+        lit: lit_p,
+    })
 }
 
 /// Like [`write_compressed_block`] but with long-distance matching: the forced
