@@ -47,3 +47,17 @@ path = "fuzz_targets/encode_roundtrip.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "streaming_roundtrip"
+path = "fuzz_targets/streaming_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "seekable_roundtrip"
+path = "fuzz_targets/seekable_roundtrip.rs"
+test = false
+doc = false
+bench = false
