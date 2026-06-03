@@ -42,7 +42,7 @@ const ML_MAX_LOG: u32 = 9;
 
 /// One sequence: copy `lit_len` literals, then a match of `match_len` bytes at
 /// the offset encoded by `offset_value` (`repeat + 3`).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Seq {
     pub lit_len: u32,
     pub match_len: u32,

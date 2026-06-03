@@ -90,6 +90,23 @@ fn encode_offset(rep: &[u32; 3], offset: u32, ll0: bool) -> u32 {
     offset + 3
 }
 
+/// The back-distance repeat-offset code `offset_value` (1..=3) resolves to given
+/// the running `rep` and `ll0` — the read-only sibling of [`resolve_offset`]'s
+/// offset computation (no mutation). Lets the optimal parse *offer* the three
+/// repeat offsets as candidate matches at each position (libzstd's
+/// `ZSTD_BtGetAllMatches` seeds the same), so a cheap repeat-coded match competes
+/// in the DP even when the hash/tree finder didn't surface it. A `0` result (the
+/// `ll0` rep0−1 case underflowing) means "no usable rep here" — the caller skips.
+#[inline]
+fn rep_resolved_offset(rep: &[u32; 3], offset_value: u32, ll0: bool) -> u32 {
+    let rep_code = offset_value - 1 + ll0 as u32;
+    match rep_code {
+        0 => rep[0],
+        3 => rep[0].saturating_sub(1),
+        c => rep[c as usize],
+    }
+}
+
 /// Persistent match-finder state across a frame's blocks: one slot per 4-byte
 /// hash holding the most recent **absolute** position, so a match in any block
 /// can reference earlier blocks (subject to the window). Carrying it across
@@ -1069,6 +1086,7 @@ fn run_dp(
     matches_flat: &[(u32, u32)],
     pos_long: &[Option<(u32, u32)>],
     init_rep: [u32; 3],
+    offer_reps: bool,
 ) -> (Vec<Seq>, [u32; 3]) {
     let big = u64::MAX / 4;
     let mut opt = vec![
@@ -1141,6 +1159,60 @@ fn run_dp(
                 };
             }
             continue;
+        }
+
+        // Offer the three repeat offsets as candidate matches (when `offer_reps`)
+        // — libzstd's `ZSTD_BtGetAllMatches` seeds the same. The hash/tree finder
+        // may not surface a short repeat-coded match, yet on periodic / rep-heavy
+        // data it is the cheapest option (offset code 0/1). Each is resolved from
+        // this cell's best-path rep state, verified against the bytes, and priced
+        // through the same `encode_offset`/offset path as any match (coded as the
+        // tiny rep code). Rep offsets only ever hold previously valid distances,
+        // so they are inherently within the window.
+        for ov in (1..=3u32).filter(|_| offer_reps) {
+            let off = rep_resolved_offset(&opt[i].rep, ov, ll0) as usize;
+            if off == 0 || off > start + i {
+                continue; // no history at this distance
+            }
+            let src = start + i - off;
+            let mut ml = 0usize;
+            while i + ml < n && data[src + ml] == data[start + i + ml] {
+                ml += 1;
+            }
+            if ml < MIN_MATCH {
+                continue;
+            }
+            let offval = encode_offset(&opt[i].rep, off as u32, ll0);
+            let ocost = prices.off[of_code(offval).min(31)];
+            let mut new_rep = opt[i].rep;
+            resolve_offset(&mut new_rep, offval, ll0);
+            let hi = ml.min(MAX_SUBLEN);
+            for l in MIN_MATCH..=hi {
+                let j = i + l;
+                let price = base + ll_owed + ocost + prices.ml[ml_code(l as u32)];
+                if price < opt[j].price {
+                    opt[j] = Opt {
+                        price,
+                        mlen: l as u32,
+                        litlen: pend as u32,
+                        offval,
+                        rep: new_rep,
+                    };
+                }
+            }
+            if ml > MAX_SUBLEN {
+                let j = i + ml;
+                let price = base + ll_owed + ocost + prices.ml[ml_code(ml as u32)];
+                if price < opt[j].price {
+                    opt[j] = Opt {
+                        price,
+                        mlen: ml as u32,
+                        litlen: pend as u32,
+                        offval,
+                        rep: new_rep,
+                    };
+                }
+            }
         }
 
         // Short-match region: weigh each candidate length — where the optimal
@@ -1356,42 +1428,61 @@ pub fn opt_parse_block(
     }
     match_starts[n] = matches_flat.len() as u32;
 
-    // --- DP pass 1 (static prior). Identical to the single-pass output. ---
+    // The full DP for one `offer_reps` setting: pass 1 under the static prior,
+    // then (for `btultra2`) pass 2 re-priced from pass 1's actual statistics.
     let prices1 = Prices::predef(&data[start..end]);
-    let (seqs1, rep1) = run_dp(
-        data,
-        start,
-        n,
-        &prices1,
-        &match_starts,
-        &matches_flat,
-        &pos_long,
-        rep_in,
-    );
-
-    // --- DP pass 2 (`btultra2`): re-parse against the actual statistics. ---
-    let (seqs, final_rep) = if two_pass {
-        let prices2 = Prices::from_stats(&data[start..end], &seqs1);
-        run_dp(
+    let run_two_pass = |offer_reps: bool| -> (Vec<Seq>, [u32; 3]) {
+        let (seqs1, rep1) = run_dp(
             data,
             start,
             n,
-            &prices2,
+            &prices1,
             &match_starts,
             &matches_flat,
             &pos_long,
             rep_in,
-        )
-    } else {
-        (seqs1, rep1)
+            offer_reps,
+        );
+        if two_pass {
+            let prices2 = Prices::from_stats(&data[start..end], &seqs1);
+            run_dp(
+                data,
+                start,
+                n,
+                &prices2,
+                &match_starts,
+                &matches_flat,
+                &pos_long,
+                rep_in,
+                offer_reps,
+            )
+        } else {
+            (seqs1, rep1)
+        }
     };
 
-    let literals = materialize_literals(data, start..end, &seqs);
+    // Primary = the rep-free baseline (its emitted size is the bar). Alternative =
+    // the same DP but offering repeat-offset candidates; the caller emits both and
+    // keeps the smaller, so reps can never enlarge a block past the baseline
+    // (the hard no-regression guard). Skip the alt when reps changed nothing.
+    let (base_seqs, base_rep) = run_two_pass(false);
+    let (rep_seqs, rep_rep) = run_two_pass(true);
+    let alt = (rep_seqs != base_seqs).then(|| {
+        let rep_literals = materialize_literals(data, start..end, &rep_seqs);
+        Box::new(Parsed {
+            seqs: rep_seqs,
+            literals: rep_literals,
+            rep: rep_rep,
+            alt: None,
+        })
+    });
+
+    let base_literals = materialize_literals(data, start..end, &base_seqs);
     Parsed {
-        seqs,
-        literals,
-        rep: final_rep,
-        alt: None,
+        seqs: base_seqs,
+        literals: base_literals,
+        rep: base_rep,
+        alt,
     }
 }
 
