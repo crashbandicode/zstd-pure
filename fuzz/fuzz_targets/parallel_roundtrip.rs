@@ -12,23 +12,35 @@ use libfuzzer_sys::fuzz_target;
 use zstd_pure::{compress_parallel, decompress};
 
 fuzz_target!(|data: &[u8]| {
-    // A 2-byte prefix selects the level (1..=22), the checksum flag, and the job
-    // count (2..=9); the rest is the seed. One corpus entry thus sweeps levels and
-    // job counts under mutation.
+    // A 2-byte prefix selects the level, the checksum flag, and the job count
+    // (2..=9); the rest is the seed. The level is capped at 12 (the chain
+    // strategies — fast/dfast/greedy/lazy/lazy2): the cross-seam logic this target
+    // exists to stress (the `[0,0,0]` rep self-heal and forced fresh entropy
+    // tables) is *strategy-independent*, so the chain finders exercise the exact
+    // same seam paths, but their O(n) priming keeps each iteration cheap enough to
+    // run thousands of mutations. The binary-tree strategies' parallel path (the
+    // expensive per-worker tree priming over the overlap) is covered by the
+    // `decodes_identically_regardless_of_job_count` unit test (L19) and the
+    // real-corpus parallel pass.
     let (level, checksum, n_jobs, seed) = match data {
-        [a, b, rest @ ..] => (1 + (a % 22) as i32, a & 0x80 != 0, 2 + (*b % 8) as usize, rest),
+        [a, b, rest @ ..] => (
+            1 + (a % 12) as i32,
+            a & 0x80 != 0,
+            2 + (*b % 8) as usize,
+            rest,
+        ),
         _ => (3, false, 4, data),
     };
 
-    // `compress_parallel` only splits past ~2*MIN_JOB_SIZE, so amplify the
-    // fuzzer's bytes into a ~640 KiB payload to force several segment seams (the
+    // `compress_parallel` only splits past ~2*MIN_JOB_SIZE (256 KiB), so amplify
+    // the fuzzer's bytes into a ~384 KiB payload to force segment seams (the
     // single-job fallback is already covered by `encode_roundtrip`). Tiling the
     // seed seeds cross-seam matches; the per-copy varying byte makes adjacent
     // regions differ, so workers must emit fresh entropy tables at each seam.
     let unit: &[u8] = if seed.is_empty() { b"\0" } else { seed };
-    let mut payload = Vec::with_capacity(640 * 1024 + unit.len() + 256);
+    let mut payload = Vec::with_capacity(384 * 1024 + unit.len() + 256);
     let mut k: u8 = 0;
-    while payload.len() < 640 * 1024 {
+    while payload.len() < 384 * 1024 {
         payload.extend_from_slice(unit);
         payload.push(k);
         k = k.wrapping_add(1);
