@@ -8,7 +8,17 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
+use std::io::Read;
 use zstd_pure::{compress, decompress};
+
+/// Decode a standard frame with the pure-Rust `ruzstd` decoder (the decode-speed
+/// peer; libzstd is the C reference). Reads to a fresh buffer each call.
+fn ruzstd_decode(frame: &[u8]) -> Vec<u8> {
+    let mut dec = ruzstd::StreamingDecoder::new(frame).expect("ruzstd: construct decoder");
+    let mut out = Vec::new();
+    dec.read_to_end(&mut out).expect("ruzstd: decode");
+    out
+}
 
 fn corpus() -> Vec<u8> {
     let mut v = Vec::new();
@@ -56,6 +66,13 @@ fn bench_decompress(c: &mut Criterion) {
     });
     g.bench_function("libzstd/libzstd_frame", |b| {
         b.iter(|| zstd::bulk::decompress(black_box(&frame_lz), cap).unwrap())
+    });
+    // Pure-Rust peer: ruzstd decoding the same two frames.
+    g.bench_function("ruzstd/our_frame", |b| {
+        b.iter(|| ruzstd_decode(black_box(&frame_ours)))
+    });
+    g.bench_function("ruzstd/libzstd_frame", |b| {
+        b.iter(|| ruzstd_decode(black_box(&frame_lz)))
     });
     g.finish();
 }
