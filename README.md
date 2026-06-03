@@ -167,6 +167,9 @@ Skippable frames are skipped on decode (their payload isn't surfaced).
 - **`StreamingEncoder`** keeps retained input bounded to ~`2× window` + a couple
   of blocks, independent of the total stream length.
 
+See [`examples/safe_decompress.rs`](examples/safe_decompress.rs)
+(`cargo run --example safe_decompress`) for these patterns end to end.
+
 ## Testing
 
 - **Always-run** (`cargo test`): unit tests + a deterministic decode/encode
