@@ -128,7 +128,7 @@ pub fn compress_store(data: &[u8], checksum: bool, expect_magic: bool) -> Vec<u8
 ///
 /// `level` selects the compression parameters (window/hash sizes and, once the
 /// stronger strategies land, the parse strategy) from the zstd level table; see
-/// [`super::params`]. Today every level uses the `fast` finder, but `level`
+/// the `params` module. Today every level uses the `fast` finder, but `level`
 /// already drives the window log (back-reference reach + frame header) and the
 /// match-table size.
 pub fn compress(data: &[u8], level: i32, checksum: bool, expect_magic: bool) -> Vec<u8> {
@@ -188,10 +188,10 @@ pub fn compress(data: &[u8], level: i32, checksum: bool, expect_magic: bool) -> 
 }
 
 /// Compress `data` with **long-distance matching** enabled — the opt-in T2.4
-/// path. Like [`compress`], but a coarse whole-input index ([`super::ldm`])
+/// path. Like [`compress`], but a coarse whole-input index (the `ldm` module)
 /// contributes long matches at offsets *beyond* the regular 8 MiB window, and
 /// the frame advertises the larger window those offsets need (grown to cover the
-/// input, up to [`super::params::LDM_MAX_WINDOW_LOG`] = 128 MiB — still within a
+/// input, up to `LDM_MAX_WINDOW_LOG` = 128 MiB — still within a
 /// stock decoder's default `windowLogMax`). Best for large inputs with repeats
 /// spaced farther apart than the regular window can reach; on a small input it
 /// behaves like [`compress`] (the window stays small, the index finds nothing).
@@ -285,7 +285,7 @@ pub fn compress_long(data: &[u8], level: i32, checksum: bool, expect_magic: bool
 ///
 /// `level` selects the parse strategy and table sizes; the window is sized for
 /// the dictionary and input together and widened to span the whole dictionary
-/// (see [`super::params::params_for_level_with_dict`]). Never larger than a
+/// (see `params::params_for_level_with_dict`). Never larger than a
 /// dictionary-primed store would be: each block falls back to raw/RLE if the
 /// compressed form isn't smaller.
 pub fn compress_with_dict(

@@ -13,24 +13,30 @@
 
 #[allow(unused_imports)]
 use crate::alloc_prelude::*;
-pub mod bitstream;
-pub mod block;
-pub mod frame;
-pub mod fse;
-pub mod huff;
-pub mod ldm;
-pub mod lz;
-pub mod params;
+// These submodules are encoder *implementation* — match finders, bit writers,
+// entropy coders, the level table, etc. They are crate-private; the public API is
+// the re-exports below (and the crate-root re-exports), so the internals can
+// evolve without breaking the published surface.
+pub(crate) mod bitstream;
+pub(crate) mod block;
+pub(crate) mod frame;
+pub(crate) mod fse;
+pub(crate) mod huff;
+pub(crate) mod ldm;
+pub(crate) mod lz;
+pub(crate) mod params;
 /// Parallel (multi-threaded) compression. `std`-only — it uses `std::thread`.
 #[cfg(feature = "std")]
-pub mod parallel;
-pub mod sequences;
-pub mod stream;
-pub mod train;
+pub(crate) mod parallel;
+pub(crate) mod sequences;
+pub(crate) mod stream;
+pub(crate) mod train;
 
-pub use frame::{
-    compress, compress_huffman_literals, compress_long, compress_store, compress_with_dict,
-};
+pub use frame::{compress, compress_long, compress_store, compress_with_dict};
+/// A T2.1a stepping-stone (Huffman-coded literals, no match finding) — strictly
+/// worse than [`compress`]. Hidden from the public API; kept for internal tests.
+#[doc(hidden)]
+pub use frame::compress_huffman_literals;
 #[cfg(feature = "std")]
 pub use parallel::compress_parallel;
 pub use stream::StreamingEncoder;

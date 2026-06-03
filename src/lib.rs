@@ -150,9 +150,13 @@ pub mod xxhash;
 
 pub use dict::Dictionary;
 pub use encode::{
-    compress, compress_huffman_literals, compress_long, compress_store, compress_stored,
-    compress_with_dict, train_dictionary, train_dictionary_structured, StreamingEncoder,
+    compress, compress_long, compress_store, compress_stored, compress_with_dict,
+    train_dictionary, train_dictionary_structured, StreamingEncoder,
 };
+/// A T2.1a stepping-stone (Huffman-coded literals, no match finding) — strictly
+/// worse than [`compress`]. Hidden from the public API; kept for internal tests.
+#[doc(hidden)]
+pub use encode::compress_huffman_literals;
 /// Parallel compression (`std`-only — uses `std::thread`).
 #[cfg(feature = "std")]
 pub use encode::compress_parallel;

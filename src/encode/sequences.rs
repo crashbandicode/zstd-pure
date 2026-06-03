@@ -142,7 +142,10 @@ fn encode_seq_bitstream(
 
 /// Encode a sequences section using the **predefined** FSE tables and append it
 /// to `out`. An empty sequence list writes the single-byte `nb_seq = 0` form
-/// (the decoder then emits the literals verbatim).
+/// (the decoder then emits the literals verbatim). Test-only: the real encoder
+/// goes through `write_sequences` (per-block mode selection); this fixed-mode
+/// variant is kept for round-trip tests.
+#[cfg(test)]
 pub fn write_sequences_predefined(out: &mut Vec<u8>, seqs: &[Seq]) -> Result<()> {
     write_seq_count(out, seqs.len());
     if seqs.is_empty() {

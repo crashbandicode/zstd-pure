@@ -30,6 +30,9 @@ pub struct CParams {
     pub hash_log: u32,
     pub chain_log: u32,
     pub search_log: u32,
+    /// Modeled from libzstd's table for completeness, but not yet consumed (the
+    /// finders use the fixed `MIN_MATCH`); kept so the row mirrors libzstd's.
+    #[allow(dead_code)]
     pub min_match: u32,
     pub target_length: u32,
     pub strategy: Strategy,

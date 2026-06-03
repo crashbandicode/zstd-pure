@@ -22,7 +22,8 @@ use super::sequences::{ll_code, ml_code, of_code, Seq};
 
 /// Minimum match length (in bytes) the fast parser will emit.
 const MIN_MATCH: usize = 4;
-/// Hash log used by the single-block [`fast_parse`] convenience wrapper.
+/// Hash log used by the single-block `fast_parse` convenience wrapper (tests only).
+#[cfg(test)]
 const DEFAULT_HASH_LOG: u32 = 17;
 /// Clamp for a [`MatchState`] hash log: floor avoids a degenerate table, ceiling
 /// caps the allocation at `1 << 22` entries (16 MiB) for very high levels.
@@ -193,8 +194,9 @@ pub fn parse_block(
 }
 
 /// Single-block convenience parse from a fresh match state (offsets relative to
-/// `data`'s start). Used in tests; the frame encoder uses [`parse_block`] with a
-/// persistent [`MatchState`] so matches span block boundaries.
+/// `data`'s start). Used in tests; the frame encoder uses `parse_block` with a
+/// persistent `MatchState` so matches span block boundaries.
+#[cfg(test)]
 pub fn fast_parse(data: &[u8], max_offset: usize, rep: &mut [u32; 3]) -> (Vec<Seq>, Vec<u8>) {
     let mut state = MatchState::new(DEFAULT_HASH_LOG);
     parse_block(data, 0..data.len(), &mut state, max_offset, rep)
