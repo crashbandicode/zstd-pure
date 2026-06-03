@@ -1,2 +1,4 @@
 /target
 Cargo.lock
+# Internal handoff / working doc — kept local, not part of the published crate.
+HANDOFF.md
