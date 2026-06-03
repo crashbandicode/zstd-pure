@@ -4,10 +4,10 @@
 //! decoded Huffman table is threaded through `cache` so a Treeless block can
 //! reuse the previous block's table.
 
-#[allow(unused_imports)]
-use crate::alloc_prelude::*;
 use super::error::{Result, ZstdError};
 use super::huff::{self, HuffTable};
+#[allow(unused_imports)]
+use crate::alloc_prelude::*;
 
 /// Decode the literals section at the front of `src`. Returns the literal bytes
 /// and the number of bytes consumed from `src`.
@@ -34,9 +34,7 @@ pub fn decode(src: &[u8], cache: &mut Option<HuffTable>) -> Result<(Vec<u8>, usi
                 _ => {
                     need(src, 3)?;
                     (
-                        ((b0 >> 4) as usize)
-                            | ((src[1] as usize) << 4)
-                            | ((src[2] as usize) << 12),
+                        ((b0 >> 4) as usize) | ((src[1] as usize) << 4) | ((src[2] as usize) << 12),
                         3,
                     )
                 }

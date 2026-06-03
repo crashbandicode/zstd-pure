@@ -5,11 +5,11 @@
 //! (literals_length, match_length, offset) triple and reconstructing output by
 //! copying literals and back-references (with the three repeat offsets).
 
-#[allow(unused_imports)]
-use crate::alloc_prelude::*;
 use super::bits::ReverseBitReader;
 use super::error::{Result, ZstdError};
 use super::fse::{self, FseDecodeTable, FseDecoder};
+#[allow(unused_imports)]
+use crate::alloc_prelude::*;
 
 /// Cached LL/OF/ML FSE tables (for the "Repeat" compression mode).
 #[derive(Debug, Default, Clone)]
@@ -235,10 +235,7 @@ pub fn decode(
         if lit_pos + lit_len > literals.len() {
             return Err(ZstdError::Invalid {
                 what: "sequence literals length",
-                detail: format!(
-                    "want {lit_len} literals at {lit_pos} of {}",
-                    literals.len()
-                ),
+                detail: format!("want {lit_len} literals at {lit_pos} of {}", literals.len()),
             });
         }
         out.extend_from_slice(&literals[lit_pos..lit_pos + lit_len]);

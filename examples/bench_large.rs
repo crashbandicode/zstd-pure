@@ -18,7 +18,10 @@ use common::enwik_like;
 struct Rng(u64);
 impl Rng {
     fn n(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0 >> 1
     }
     fn byte(&mut self) -> u8 {
@@ -38,7 +41,13 @@ fn revisions() -> Vec<u8> {
     let mut base = Vec::new();
     while base.len() < 12_000 {
         base.extend_from_slice(
-            format!("k{:04}: {} -- note {}\n", base.len() % 1000, r.upto(1_000_000), r.upto(64)).as_bytes(),
+            format!(
+                "k{:04}: {} -- note {}\n",
+                base.len() % 1000,
+                r.upto(1_000_000),
+                r.upto(64)
+            )
+            .as_bytes(),
         );
     }
     let mut out = Vec::new();
@@ -59,7 +68,9 @@ fn revisions() -> Vec<u8> {
 fn logs_sized(target: usize, seed: u64) -> Vec<u8> {
     let mut r = Rng(seed);
     let lvl = ["INFO ", "WARN ", "ERROR", "DEBUG"];
-    let op = ["connect", "timeout", "retry", "flush", "commit", "rollback", "evict", "accept"];
+    let op = [
+        "connect", "timeout", "retry", "flush", "commit", "rollback", "evict", "accept",
+    ];
     let mut out = Vec::with_capacity(target + 64);
     while out.len() < target {
         out.extend_from_slice(
@@ -92,7 +103,11 @@ fn binstruct() -> Vec<u8> {
     while out.len() < 2_000_000 {
         out.extend_from_slice(&header);
         for k in 0..24u8 {
-            out.push(if r.upto(4) == 0 { r.byte() } else { k.wrapping_mul(7) });
+            out.push(if r.upto(4) == 0 {
+                r.byte()
+            } else {
+                k.wrapping_mul(7)
+            });
         }
     }
     out
@@ -111,13 +126,25 @@ fn far_dup() -> Vec<u8> {
     let mut block = Vec::new();
     while block.len() < 1_500_000 {
         block.extend_from_slice(
-            format!("rec={:08} val={} tag={}\n", block.len(), r.upto(1_000_000), r.upto(256)).as_bytes(),
+            format!(
+                "rec={:08} val={} tag={}\n",
+                block.len(),
+                r.upto(1_000_000),
+                r.upto(256)
+            )
+            .as_bytes(),
         );
     }
     let mut filler = Vec::new();
     while filler.len() < 10_000_000 {
         filler.extend_from_slice(
-            format!("fill {} {} {}\n", r.upto(1 << 30), r.upto(1 << 30), r.upto(1 << 30)).as_bytes(),
+            format!(
+                "fill {} {} {}\n",
+                r.upto(1 << 30),
+                r.upto(1 << 30),
+                r.upto(1 << 30)
+            )
+            .as_bytes(),
         );
     }
     let mut out = Vec::with_capacity(block.len() * 2 + filler.len());
@@ -135,17 +162,29 @@ fn far_dup() -> Vec<u8> {
 fn parallel_speedup() {
     let data = logs_sized(24 << 20, 0x5151_5151_2323_2323); // 24 MiB, distinct stream
     let level = 12;
-    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
     println!(
         "\n=== compress_parallel vs serial (L{level}, {} MiB, available_parallelism={cores}) ===",
         data.len() >> 20
     );
-    println!("{:<8} {:>8} {:>11} {:>9} {:>10}", "n_jobs", "ms", "bytes", "speedup", "seam cost");
+    println!(
+        "{:<8} {:>8} {:>11} {:>9} {:>10}",
+        "n_jobs", "ms", "bytes", "speedup", "seam cost"
+    );
 
     let t = Instant::now();
     let serial = compress(&data, level, false, true);
     let serial_ms = t.elapsed().as_millis().max(1);
-    println!("{:<8} {:>8} {:>11} {:>9} {:>10}", "serial", serial_ms, serial.len(), "1.00x", "-");
+    println!(
+        "{:<8} {:>8} {:>11} {:>9} {:>10}",
+        "serial",
+        serial_ms,
+        serial.len(),
+        "1.00x",
+        "-"
+    );
 
     for &n_jobs in &[2usize, 4, 8] {
         let t = Instant::now();

@@ -24,19 +24,19 @@ pub(crate) mod fse;
 pub(crate) mod huff;
 pub(crate) mod ldm;
 pub(crate) mod lz;
-pub(crate) mod params;
 /// Parallel (multi-threaded) compression. `std`-only — it uses `std::thread`.
 #[cfg(feature = "std")]
 pub(crate) mod parallel;
+pub(crate) mod params;
 pub(crate) mod sequences;
 pub(crate) mod stream;
 pub(crate) mod train;
 
-pub use frame::{compress, compress_long, compress_store, compress_with_dict};
 /// A T2.1a stepping-stone (Huffman-coded literals, no match finding) — strictly
 /// worse than [`compress`]. Hidden from the public API; kept for internal tests.
 #[doc(hidden)]
 pub use frame::compress_huffman_literals;
+pub use frame::{compress, compress_long, compress_store, compress_with_dict};
 #[cfg(feature = "std")]
 pub use parallel::compress_parallel;
 pub use stream::StreamingEncoder;
@@ -63,7 +63,10 @@ mod tests {
         // Our own decoder decodes it (self-consistency).
         assert_eq!(decompress(&frame).unwrap(), data, "self mismatch");
         // The pledged content size is visible without decoding.
-        assert_eq!(frame_header(&frame).unwrap().content_size, Some(data.len() as u64));
+        assert_eq!(
+            frame_header(&frame).unwrap().content_size,
+            Some(data.len() as u64)
+        );
     }
 
     #[test]
@@ -76,9 +79,9 @@ mod tests {
             vec![],
             vec![0u8],
             b"hello world".to_vec(),
-            vec![0xAB; 100_000],         // single RLE block
-            vec![0x7F; 300_000],         // multi-block RLE (chunked at 128 KiB)
-            big,                         // multi-block raw
+            vec![0xAB; 100_000], // single RLE block
+            vec![0x7F; 300_000], // multi-block RLE (chunked at 128 KiB)
+            big,                 // multi-block raw
         ];
         for data in &cases {
             assert_store_roundtrips(data, false);
@@ -91,7 +94,11 @@ mod tests {
         // A 100 KiB run must encode far smaller than raw (1 payload byte/block).
         let data = vec![0x42u8; 100_000];
         let frame = compress_store(&data, false, true);
-        assert!(frame.len() < 64, "RLE run should be tiny, got {}", frame.len());
+        assert!(
+            frame.len() < 64,
+            "RLE run should be tiny, got {}",
+            frame.len()
+        );
         assert_eq!(decompress(&frame).unwrap(), data);
     }
 
@@ -188,7 +195,12 @@ mod tests {
         let frame = compress(data, level, checksum, true);
         let by_libzstd = zstd::bulk::decompress(&frame, data.len() + 64)
             .unwrap_or_else(|e| panic!("libzstd decode (L{level}, {} bytes): {e}", data.len()));
-        assert_eq!(by_libzstd, data, "libzstd mismatch L{level} ({} bytes)", data.len());
+        assert_eq!(
+            by_libzstd,
+            data,
+            "libzstd mismatch L{level} ({} bytes)",
+            data.len()
+        );
         assert_eq!(decompress(&frame).unwrap(), data, "self mismatch L{level}");
         assert!(
             frame.len() <= compress_store(data, checksum, true).len(),
@@ -223,7 +235,9 @@ mod tests {
             .collect();
         // Highly periodic, multi-block: the case that first exposed an
         // offset-0 self-match bug in the optimal parser (L13+).
-        let periodic: Vec<u8> = (0..40_000u32).flat_map(|i| (i % 13).to_le_bytes()).collect();
+        let periodic: Vec<u8> = (0..40_000u32)
+            .flat_map(|i| (i % 13).to_le_bytes())
+            .collect();
         // Heterogeneous: distinct regimes (repetitive text, then structured
         // binary records, then a zero run) concatenated within and across 128 KiB
         // blocks — exercises the block splitter (L16+) through both decoders.
@@ -350,8 +364,9 @@ mod tests {
     #[test]
     fn compress_long_round_trips_on_varied_inputs() {
         let text = b"the quick brown fox jumps over the lazy dog. ".repeat(120);
-        let structured: Vec<u8> =
-            (0..40_000u32).map(|i| (i.wrapping_mul(2654435761) >> 11) as u8).collect();
+        let structured: Vec<u8> = (0..40_000u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 11) as u8)
+            .collect();
         let cases: Vec<Vec<u8>> = vec![
             vec![],
             vec![0u8],
@@ -364,9 +379,17 @@ mod tests {
             for &level in &[3i32, 19] {
                 let frame = compress_long(data, level, level % 2 == 0, true);
                 let by_lib = zstd::bulk::decompress(&frame, data.len() + 64).unwrap_or_else(|e| {
-                    panic!("libzstd decode of compress_long (L{level}, {} bytes): {e}", data.len())
+                    panic!(
+                        "libzstd decode of compress_long (L{level}, {} bytes): {e}",
+                        data.len()
+                    )
                 });
-                assert_eq!(by_lib, *data, "libzstd mismatch L{level} ({} bytes)", data.len());
+                assert_eq!(
+                    by_lib,
+                    *data,
+                    "libzstd mismatch L{level} ({} bytes)",
+                    data.len()
+                );
                 assert_eq!(decompress(&frame).unwrap(), *data, "self mismatch L{level}");
             }
         }
@@ -433,14 +456,24 @@ mod dict_tests {
 
         let mut dec = zstd::bulk::Decompressor::with_dictionary(dict_bytes)
             .expect("libzstd decompressor with dict");
-        let by_libzstd = dec
-            .decompress(&frame, data.len() + 64)
-            .unwrap_or_else(|e| panic!("libzstd dict decode (L{level}, {} bytes): {e}", data.len()));
-        assert_eq!(by_libzstd, data, "libzstd dict mismatch L{level} ({} bytes)", data.len());
+        let by_libzstd = dec.decompress(&frame, data.len() + 64).unwrap_or_else(|e| {
+            panic!("libzstd dict decode (L{level}, {} bytes): {e}", data.len())
+        });
+        assert_eq!(
+            by_libzstd,
+            data,
+            "libzstd dict mismatch L{level} ({} bytes)",
+            data.len()
+        );
 
         let by_us = decompress_with_dict(&frame, &dict, data.len() + 64)
             .unwrap_or_else(|e| panic!("self dict decode (L{level}): {e}"));
-        assert_eq!(by_us, data, "self dict mismatch L{level} ({} bytes)", data.len());
+        assert_eq!(
+            by_us,
+            data,
+            "self dict mismatch L{level} ({} bytes)",
+            data.len()
+        );
     }
 
     #[test]
@@ -499,7 +532,10 @@ mod dict_tests {
         // match; with one, every record references shared structure in the dict.
         // The dict-primed total must be clearly smaller across the corpus.
         for &level in &[3, 19] {
-            let no_dict: usize = samples.iter().map(|s| compress(s, level, false, true).len()).sum();
+            let no_dict: usize = samples
+                .iter()
+                .map(|s| compress(s, level, false, true).len())
+                .sum();
             let with_dict: usize = samples
                 .iter()
                 .map(|s| compress_with_dict(s, &dict, level, false, true).len())
@@ -520,8 +556,14 @@ mod dict_tests {
         let samples = small_records();
         let refs: Vec<&[u8]> = samples.iter().map(|v| v.as_slice()).collect();
         let dict_bytes = train_dictionary(&refs, 8 * 1024);
-        assert!(!dict_bytes.is_empty(), "trainer produced an empty dictionary");
-        assert!(dict_bytes.len() <= 8 * 1024, "trainer exceeded the size budget");
+        assert!(
+            !dict_bytes.is_empty(),
+            "trainer produced an empty dictionary"
+        );
+        assert!(
+            dict_bytes.len() <= 8 * 1024,
+            "trainer exceeded the size budget"
+        );
         let dict = Dictionary::parse(&dict_bytes).expect("parse trained dict");
         assert_eq!(dict.id(), 0, "a raw-content dictionary carries no id");
 
@@ -532,8 +574,10 @@ mod dict_tests {
         }
 
         for &level in &[3, 19] {
-            let no_dict: usize =
-                samples.iter().map(|s| compress(s, level, false, true).len()).sum();
+            let no_dict: usize = samples
+                .iter()
+                .map(|s| compress(s, level, false, true).len())
+                .sum();
             let with_dict: usize = samples
                 .iter()
                 .map(|s| compress_with_dict(s, &dict, level, false, true).len())
@@ -554,7 +598,10 @@ mod dict_tests {
 
         // It must be a real structured dictionary: magic + non-zero id + entropy.
         let dict = Dictionary::parse(&dict_bytes).expect("parse our structured dict");
-        assert!(dict.entropy().is_some(), "structured dict must carry entropy tables");
+        assert!(
+            dict.entropy().is_some(),
+            "structured dict must carry entropy tables"
+        );
         assert_ne!(dict.id(), 0, "structured dict must carry a non-zero id");
 
         // (a) libzstd LOADS it on the compress side — the strict ZSTD_loadCEntropy
@@ -565,7 +612,10 @@ mod dict_tests {
                 .expect("libzstd must load our structured dict (compress side)");
             let comp = c.compress(s).expect("libzstd compress with our dict");
             let got = decompress_with_dict(&comp, &dict, s.len() + 64).expect("our decode");
-            assert_eq!(&got, s, "libzstd-compressed-with-our-dict round-trip mismatch");
+            assert_eq!(
+                &got, s,
+                "libzstd-compressed-with-our-dict round-trip mismatch"
+            );
         }
 
         // (b) Our own compress_with_dict output decodes through libzstd + us.
@@ -623,7 +673,10 @@ mod dict_tests {
             let cs = compress_with_dict(s, &structured, 19, false, true);
             let cr = compress_with_dict(s, &raw, 19, false, true);
             // Both must round-trip through our decoder with their dictionary.
-            assert_eq!(decompress_with_dict(&cs, &structured, s.len() + 64).unwrap(), *s);
+            assert_eq!(
+                decompress_with_dict(&cs, &structured, s.len() + 64).unwrap(),
+                *s
+            );
             assert_eq!(decompress_with_dict(&cr, &raw, s.len() + 64).unwrap(), *s);
             struct_body += cs.len() - frame_header(&cs).unwrap().header_len;
             raw_body += cr.len() - frame_header(&cr).unwrap().header_len;

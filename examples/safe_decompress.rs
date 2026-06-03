@@ -18,7 +18,10 @@ fn main() {
     //     default ceiling.)
     let cap = 1 << 20; // 1 MiB
     match decompress_capped(&frame, cap) {
-        Ok(plain) => println!("one-shot: decoded {} bytes (within the {cap}-byte cap)", plain.len()),
+        Ok(plain) => println!(
+            "one-shot: decoded {} bytes (within the {cap}-byte cap)",
+            plain.len()
+        ),
         Err(e) => println!("one-shot: refused: {e}"),
     }
 
@@ -35,8 +38,13 @@ fn main() {
     //     and `with_options(.., window_log_max)` rejects up front any frame that
     //     declares a window larger than you permit.
     let window_log_max = 23; // accept windows up to 8 MiB; reject anything larger
-    let mut dec = StreamingDecoder::with_options(&frame, /*magic=*/ true, /*dict=*/ None, window_log_max)
-        .expect("frame's declared window is within our budget");
+    let mut dec = StreamingDecoder::with_options(
+        &frame,
+        /*magic=*/ true,
+        /*dict=*/ None,
+        window_log_max,
+    )
+    .expect("frame's declared window is within our budget");
     let mut out = Vec::new();
     let mut buf = [0u8; 64 * 1024];
     let mut peak = 0usize;

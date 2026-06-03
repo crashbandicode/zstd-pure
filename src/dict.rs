@@ -13,12 +13,12 @@
 //!   whose first block selects the "Repeat" entropy mode (or treeless literals)
 //!   reuses these preset tables, and the initial repeat offsets are the dict's.
 
-#[allow(unused_imports)]
-use crate::alloc_prelude::*;
 use super::error::{Result, ZstdError};
 use super::fse;
 use super::huff::{self, HuffTable};
 use super::sequences::SeqTables;
+#[allow(unused_imports)]
+use crate::alloc_prelude::*;
 
 /// Structured-dictionary magic (`0xEC30A437`, little-endian `37 A4 30 EC`).
 pub const DICT_MAGIC: u32 = 0xEC30_A437;
@@ -198,10 +198,14 @@ mod tests {
         let samples = training_samples();
         let dict_bytes = zstd::dict::from_samples(&samples, 8 * 1024).expect("train dict");
         // A trained dict is structured: magic + entropy + non-zero id.
-        let magic = u32::from_le_bytes([dict_bytes[0], dict_bytes[1], dict_bytes[2], dict_bytes[3]]);
+        let magic =
+            u32::from_le_bytes([dict_bytes[0], dict_bytes[1], dict_bytes[2], dict_bytes[3]]);
         assert_eq!(magic, DICT_MAGIC);
         let dict = Dictionary::parse(&dict_bytes).expect("parse trained dict");
-        assert!(dict.entropy().is_some(), "structured dict must carry entropy");
+        assert!(
+            dict.entropy().is_some(),
+            "structured dict must carry entropy"
+        );
         assert_ne!(dict.id(), 0);
 
         for s in samples.iter().take(80) {

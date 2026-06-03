@@ -46,8 +46,8 @@ use crate::alloc_prelude::*;
 use super::super::frame::ZSTD_MAGIC;
 use super::super::xxhash::Xxh64;
 use super::block::{
-    write_compressed_block, write_compressed_block_ldm, write_raw_block, write_store_block, EncState,
-    BLOCK_SIZE_MAX,
+    write_compressed_block, write_compressed_block_ldm, write_raw_block, write_store_block,
+    EncState, BLOCK_SIZE_MAX,
 };
 use super::frame::{split_depth_for, write_frame_header_streaming};
 
@@ -150,7 +150,11 @@ impl StreamingEncoder {
             emitted: 0,
             out,
             finder: super::lz::Finder::new(&params),
-            state: EncState { rep: [1, 4, 8], seq: super::sequences::SeqCTables::default(), lit: None },
+            state: EncState {
+                rep: [1, 4, 8],
+                seq: super::sequences::SeqCTables::default(),
+                lit: None,
+            },
             hasher: Xxh64::new(0),
         }
     }
@@ -168,7 +172,12 @@ impl StreamingEncoder {
     /// **retains that much history** — a larger `window_log` costs proportionally
     /// more memory. This is newer and less battle-tested than the core paths, so
     /// the API is marked experimental.
-    pub fn with_options_long(level: i32, checksum: bool, expect_magic: bool, window_log: u32) -> Self {
+    pub fn with_options_long(
+        level: i32,
+        checksum: bool,
+        expect_magic: bool,
+        window_log: u32,
+    ) -> Self {
         let params = super::params::params_for_level(level, usize::MAX);
         let regular_reach = 1usize << params.window_log;
         // The advertised LDM window: at least the regular window (else LDM adds no
@@ -196,7 +205,11 @@ impl StreamingEncoder {
             emitted: 0,
             out,
             finder: super::lz::Finder::new(&params),
-            state: EncState { rep: [1, 4, 8], seq: super::sequences::SeqCTables::default(), lit: None },
+            state: EncState {
+                rep: [1, 4, 8],
+                seq: super::sequences::SeqCTables::default(),
+                lit: None,
+            },
             hasher: Xxh64::new(0),
         }
     }
@@ -264,7 +277,12 @@ impl StreamingEncoder {
         if self.ldm.is_some() {
             let window_log = self.max_offset.trailing_zeros();
             let mut ldm = super::ldm::LdmState::new(window_log);
-            let _ = ldm.generate(&self.input[..retained], 0..retained, self.regular_reach, self.max_offset);
+            let _ = ldm.generate(
+                &self.input[..retained],
+                0..retained,
+                self.regular_reach,
+                self.max_offset,
+            );
             self.ldm = Some(ldm);
         }
     }
@@ -338,8 +356,12 @@ impl StreamingEncoder {
         // far, `> regular_reach`, offsets the advertised window admits). Without
         // LDM: the regular finder over the full window.
         let result = if let Some(ldm) = self.ldm.as_mut() {
-            let matches =
-                ldm.generate(&self.input[..end_rel], start_rel..end_rel, self.regular_reach, self.max_offset);
+            let matches = ldm.generate(
+                &self.input[..end_rel],
+                start_rel..end_rel,
+                self.regular_reach,
+                self.max_offset,
+            );
             write_compressed_block_ldm(
                 &mut comp,
                 last,
@@ -396,8 +418,8 @@ impl crate::io::Write for StreamingEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{decompress, StreamingDecoder};
     use crate::io::Read;
+    use crate::{decompress, StreamingDecoder};
 
     /// Build a frame by pushing `data` in `chunk`-sized writes (0 = one write).
     fn stream(data: &[u8], level: i32, checksum: bool, chunk: usize) -> Vec<u8> {
@@ -431,8 +453,9 @@ mod tests {
     /// text, structured records, near-random, and a multi-block mixture.
     fn corpus() -> Vec<Vec<u8>> {
         let text = b"the quick brown fox jumps over the lazy dog. ".repeat(120);
-        let structured: Vec<u8> =
-            (0..40_000u32).map(|i| (i.wrapping_mul(2654435761) >> 11) as u8).collect();
+        let structured: Vec<u8> = (0..40_000u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 11) as u8)
+            .collect();
         let json: Vec<u8> = (0..3000u32)
             .flat_map(|i| format!("{{\"id\":{i},\"k\":\"v_{}\"}}\n", i % 39).into_bytes())
             .collect();
@@ -477,7 +500,15 @@ mod tests {
             for &checksum in &[false, true] {
                 let reference = stream(&data, level, checksum, 0);
                 // 1-byte, sub-block, block-sized, and super-block write sizes.
-                for &chunk in &[1usize, 7, 1000, 65_536, BLOCK_SIZE_MAX, BLOCK_SIZE_MAX + 1, 300_000] {
+                for &chunk in &[
+                    1usize,
+                    7,
+                    1000,
+                    65_536,
+                    BLOCK_SIZE_MAX,
+                    BLOCK_SIZE_MAX + 1,
+                    300_000,
+                ] {
                     let f = stream(&data, level, checksum, chunk);
                     assert_eq!(
                         f, reference,
@@ -593,7 +624,10 @@ mod tests {
         let mut enc = StreamingEncoder::with_options(1, true, true);
         let window = enc.window_size();
         let bound = 2 * window + 2 * BLOCK_SIZE_MAX;
-        assert!(bound < data.len(), "test input must exceed the memory bound to force a slide");
+        assert!(
+            bound < data.len(),
+            "test input must exceed the memory bound to force a slide"
+        );
 
         for part in data.chunks(push_chunk) {
             enc.push(part);
@@ -610,9 +644,15 @@ mod tests {
         // produce the identical frame.
         let mut enc2 = StreamingEncoder::with_options(1, true, true);
         enc2.push(&data);
-        assert!(enc2.buffered_input_len() <= bound, "single-push retained too much");
+        assert!(
+            enc2.buffered_input_len() <= bound,
+            "single-push retained too much"
+        );
         let whole = enc2.finish();
-        assert_eq!(chunked, whole, "sliding frame must be independent of push chunking");
+        assert_eq!(
+            chunked, whole,
+            "sliding frame must be independent of push chunking"
+        );
     }
 
     /// Incompressible bytes, so the only available match is a deliberately planted
@@ -643,7 +683,13 @@ mod tests {
 
     /// Build a frame via the LDM streaming encoder, pushing in `chunk`-sized writes
     /// (0 = one write).
-    fn stream_long(data: &[u8], level: i32, checksum: bool, window_log: u32, chunk: usize) -> Vec<u8> {
+    fn stream_long(
+        data: &[u8],
+        level: i32,
+        checksum: bool,
+        window_log: u32,
+        chunk: usize,
+    ) -> Vec<u8> {
         let mut enc = StreamingEncoder::with_options_long(level, checksum, true, window_log);
         if chunk == 0 {
             enc.push(data);
@@ -661,7 +707,11 @@ mod tests {
         // window_log 24 (16 MiB) covers the ~9.5 MiB-back duplicate.
         let frame = stream_long(&data, 1, true, 24, 0);
         let h = crate::frame_header(&frame).unwrap();
-        assert!(h.window_size > (8 << 20), "expected a > 8 MiB window, got {}", h.window_size);
+        assert!(
+            h.window_size > (8 << 20),
+            "expected a > 8 MiB window, got {}",
+            h.window_size
+        );
         assert_round_trips_three_ways(&frame, &data);
         // The far duplicate is recovered, so the LDM stream is clearly smaller than
         // the regular stream (whose window can't reach it).
@@ -679,7 +729,11 @@ mod tests {
         let data = far_repeat();
         let reference = stream_long(&data, 1, true, 24, 0);
         for &chunk in &[1usize, 1000, 65_536, BLOCK_SIZE_MAX, 777_777] {
-            assert_eq!(stream_long(&data, 1, true, 24, chunk), reference, "chunk={chunk}");
+            assert_eq!(
+                stream_long(&data, 1, true, 24, chunk),
+                reference,
+                "chunk={chunk}"
+            );
         }
         assert_round_trips_three_ways(&reference, &data);
     }
@@ -716,7 +770,10 @@ mod tests {
         let mut enc = StreamingEncoder::with_options_long(1, true, true, window_log);
         let window = enc.window_size();
         let bound = 2 * window + 2 * BLOCK_SIZE_MAX;
-        assert!(bound < data.len(), "input must exceed the bound to force a slide");
+        assert!(
+            bound < data.len(),
+            "input must exceed the bound to force a slide"
+        );
 
         for part in data.chunks(push_chunk) {
             enc.push(part);
@@ -740,6 +797,10 @@ mod tests {
         );
 
         // Deterministic despite sliding: a single big push yields the identical frame.
-        assert_eq!(frame, stream_long(&data, 1, true, window_log, 0), "LDM slide must be chunk-independent");
+        assert_eq!(
+            frame,
+            stream_long(&data, 1, true, window_log, 0),
+            "LDM slide must be chunk-independent"
+        );
     }
 }

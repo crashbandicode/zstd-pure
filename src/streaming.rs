@@ -383,9 +383,15 @@ mod tests {
             data.push((x >> 24) as u8);
         }
         let comp = zstd_with_window(&data, 3, 20); // 1 MiB window
-        // A window_log_max below the frame's window must be rejected.
+                                                   // A window_log_max below the frame's window must be rejected.
         let err = StreamingDecoder::with_options(&comp, true, None, 18);
-        assert!(matches!(err, Err(ZstdError::Invalid { what: "window size", .. })));
+        assert!(matches!(
+            err,
+            Err(ZstdError::Invalid {
+                what: "window size",
+                ..
+            })
+        ));
         // And accepted when the ceiling is high enough.
         assert!(StreamingDecoder::with_options(&comp, true, None, 21).is_ok());
     }
@@ -442,7 +448,11 @@ mod tests {
         let frame = crate::compress_long(&data, 1, true, true);
         // The frame must advertise a window past 8 MiB (so the far offset is legal).
         let h = crate::frame_header(&frame).unwrap();
-        assert!(h.window_size > (8 << 20), "expected a > 8 MiB window, got {}", h.window_size);
+        assert!(
+            h.window_size > (8 << 20),
+            "expected a > 8 MiB window, got {}",
+            h.window_size
+        );
 
         let mut dec = StreamingDecoder::new(&frame).unwrap();
         assert_eq!(dec.window_size(), h.window_size as usize);
@@ -462,7 +472,7 @@ mod tests {
         let payload = b"tiny payload inside a frame that declares a 128 MiB window. ".repeat(20);
         let mut frame = Vec::new();
         frame.extend_from_slice(&0xFD2F_B528u32.to_le_bytes()); // magic
-        // FHD: fcs_flag 0, single_segment 0, no checksum, no dict id.
+                                                                // FHD: fcs_flag 0, single_segment 0, no checksum, no dict id.
         frame.push(0x00);
         // Window descriptor: exponent = window_log - 10 = 17 (→ log 27), mantissa 0.
         frame.push((17u8) << 3);
@@ -490,6 +500,9 @@ mod tests {
         );
         // libzstd (default windowLogMax 27) and our one-shot path also accept it.
         assert_eq!(decompress(&frame).unwrap(), payload);
-        assert_eq!(zstd::bulk::decompress(&frame, payload.len() + 64).unwrap(), payload);
+        assert_eq!(
+            zstd::bulk::decompress(&frame, payload.len() + 64).unwrap(),
+            payload
+        );
     }
 }

@@ -17,15 +17,15 @@
 //! header — a structured / tagged dictionary (entropy tables + dict id) is a
 //! follow-up. The output is deterministic.
 
-#[allow(unused_imports)]
-use crate::alloc_prelude::*;
-use alloc::collections::{BTreeMap, BTreeSet};
 use super::super::dict::DICT_MAGIC;
 use super::super::xxhash::xxh64;
 use super::huff::write_dict_huffman_table;
 use super::lz::Finder;
 use super::params::params_for_level_with_dict;
 use super::sequences::{write_dict_seq_tables, Seq};
+#[allow(unused_imports)]
+use crate::alloc_prelude::*;
+use alloc::collections::{BTreeMap, BTreeSet};
 
 /// Compression level used to gather representative entropy statistics when
 /// finalizing a structured dictionary — a mid-level lazy2 chain parse: good
@@ -41,8 +41,14 @@ const DEFAULT_SEGMENT: usize = 1024;
 #[inline]
 fn dmer_at(buf: &[u8], i: usize) -> u64 {
     u64::from_le_bytes([
-        buf[i], buf[i + 1], buf[i + 2], buf[i + 3],
-        buf[i + 4], buf[i + 5], buf[i + 6], buf[i + 7],
+        buf[i],
+        buf[i + 1],
+        buf[i + 2],
+        buf[i + 3],
+        buf[i + 4],
+        buf[i + 5],
+        buf[i + 6],
+        buf[i + 7],
     ])
 }
 
@@ -228,8 +234,12 @@ pub fn train_dictionary_structured(samples: &[&[u8]], max_size: usize) -> Vec<u8
         let mut finder = Finder::new(&params);
         finder.prime(&combined, content.len(), max_offset);
         let mut rep = [1u32, 4, 8];
-        let (sq, lits) =
-            finder.parse(&combined, content.len()..combined.len(), max_offset, &mut rep);
+        let (sq, lits) = finder.parse(
+            &combined,
+            content.len()..combined.len(),
+            max_offset,
+            &mut rep,
+        );
         for &b in &lits {
             lit_freq[b as usize] += 1;
         }

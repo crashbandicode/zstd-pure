@@ -6,9 +6,9 @@
 //! followed by an empty sequences section (the T2.1 entropy-encoder building
 //! block; the match finder / real sequences land in T2.3).
 
+use super::super::error::Result;
 #[allow(unused_imports)]
 use crate::alloc_prelude::*;
-use super::super::error::Result;
 
 /// Maximum bytes a single block may regenerate (`Block_Maximum_Size` cap).
 pub const BLOCK_SIZE_MAX: usize = 128 * 1024;
@@ -24,7 +24,10 @@ pub enum BlockType {
 /// Append a 3-byte block header: `Last_Block` (bit 0), `Block_Type` (bits 1-2),
 /// `Block_Size` (bits 3-23).
 pub fn write_block_header(out: &mut Vec<u8>, last: bool, block_type: BlockType, block_size: usize) {
-    debug_assert!(block_size < (1 << 21), "block size {block_size} exceeds 21 bits");
+    debug_assert!(
+        block_size < (1 << 21),
+        "block size {block_size} exceeds 21 bits"
+    );
     let v = (last as u32) | ((block_type as u32) << 1) | ((block_size as u32) << 3);
     out.push((v & 0xFF) as u8);
     out.push(((v >> 8) & 0xFF) as u8);
@@ -109,8 +112,15 @@ pub fn write_compressed_block(
 ) -> Result<EncState> {
     let mut rep = state.rep;
     let (seqs, literals) = finder.parse(data, range, max_offset, &mut rep);
-    let (seq, lit) =
-        emit_split(out, last, &seqs, &literals, &state.seq, state.lit.as_ref(), max_split_depth)?;
+    let (seq, lit) = emit_split(
+        out,
+        last,
+        &seqs,
+        &literals,
+        &state.seq,
+        state.lit.as_ref(),
+        max_split_depth,
+    )?;
     Ok(EncState { rep, seq, lit })
 }
 
@@ -134,9 +144,17 @@ pub fn write_compressed_block_ldm(
     ldm: &[super::ldm::LdmSeq],
 ) -> Result<EncState> {
     let mut rep = state.rep;
-    let (seqs, literals) = super::lz::parse_with_ldm(finder, data, range, max_offset, &mut rep, ldm);
-    let (seq, lit) =
-        emit_split(out, last, &seqs, &literals, &state.seq, state.lit.as_ref(), max_split_depth)?;
+    let (seqs, literals) =
+        super::lz::parse_with_ldm(finder, data, range, max_offset, &mut rep, ldm);
+    let (seq, lit) = emit_split(
+        out,
+        last,
+        &seqs,
+        &literals,
+        &state.seq,
+        state.lit.as_ref(),
+        max_split_depth,
+    )?;
     Ok(EncState { rep, seq, lit })
 }
 
@@ -195,7 +213,10 @@ fn emit_split(
     }
 
     // Split at the sequence boundary nearest the regenerated-byte midpoint.
-    let total: usize = seqs.iter().map(|s| (s.lit_len + s.match_len) as usize).sum();
+    let total: usize = seqs
+        .iter()
+        .map(|s| (s.lit_len + s.match_len) as usize)
+        .sum();
     let mut acc = 0usize;
     let mut k = 0usize;
     for (i, s) in seqs.iter().enumerate() {
@@ -218,9 +239,25 @@ fn emit_split(
     // Emit A (never last) then B (last iff this node is), threading A's tables
     // into B. Each child recursively decides whether to split further.
     let mut buf_a = Vec::new();
-    let (a_seq, a_lit) = emit_split(&mut buf_a, false, &seqs[..k], lits_a, prev_seq, prev_lit, depth - 1)?;
+    let (a_seq, a_lit) = emit_split(
+        &mut buf_a,
+        false,
+        &seqs[..k],
+        lits_a,
+        prev_seq,
+        prev_lit,
+        depth - 1,
+    )?;
     let mut buf_b = Vec::new();
-    let b_tables = emit_split(&mut buf_b, last, &seqs[k..], lits_b, &a_seq, a_lit.as_ref(), depth - 1)?;
+    let b_tables = emit_split(
+        &mut buf_b,
+        last,
+        &seqs[k..],
+        lits_b,
+        &a_seq,
+        a_lit.as_ref(),
+        depth - 1,
+    )?;
 
     if buf_a.len() + buf_b.len() < whole.len() {
         out.extend_from_slice(&buf_a);
@@ -234,8 +271,8 @@ fn emit_split(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::sequences::{Seq, SeqCTables};
+    use super::*;
 
     /// `emit_split` must never produce a larger block than the single-block
     /// encoding (the split is kept only when strictly smaller), and on a clearly
@@ -245,25 +282,69 @@ mod tests {
     #[test]
     fn split_never_grows_and_helps_on_bimodal_offsets() {
         let bimodal: Vec<Seq> = (0..200)
-            .map(|_| Seq { lit_len: 0, match_len: 3, offset_value: 4 })
-            .chain((0..200).map(|_| Seq { lit_len: 0, match_len: 3, offset_value: 1 << 20 }))
+            .map(|_| Seq {
+                lit_len: 0,
+                match_len: 3,
+                offset_value: 4,
+            })
+            .chain((0..200).map(|_| Seq {
+                lit_len: 0,
+                match_len: 3,
+                offset_value: 1 << 20,
+            }))
             .collect();
         let homogeneous: Vec<Seq> = (0..400)
-            .map(|_| Seq { lit_len: 0, match_len: 3, offset_value: 4 })
+            .map(|_| Seq {
+                lit_len: 0,
+                match_len: 3,
+                offset_value: 4,
+            })
             .collect();
 
         for (seqs, expect_smaller) in [(bimodal, true), (homogeneous, false)] {
             let mut single = Vec::new();
-            emit_split(&mut single, true, &seqs, &[], &SeqCTables::default(), None, 0).unwrap();
+            emit_split(
+                &mut single,
+                true,
+                &seqs,
+                &[],
+                &SeqCTables::default(),
+                None,
+                0,
+            )
+            .unwrap();
             let mut split = Vec::new();
-            emit_split(&mut split, true, &seqs, &[], &SeqCTables::default(), None, 4).unwrap();
-            assert!(split.len() <= single.len(), "split ({}) grew past single ({})", split.len(), single.len());
+            emit_split(
+                &mut split,
+                true,
+                &seqs,
+                &[],
+                &SeqCTables::default(),
+                None,
+                4,
+            )
+            .unwrap();
+            assert!(
+                split.len() <= single.len(),
+                "split ({}) grew past single ({})",
+                split.len(),
+                single.len()
+            );
             if expect_smaller {
-                assert!(split.len() < single.len(), "bimodal block should split smaller: {} vs {}", split.len(), single.len());
+                assert!(
+                    split.len() < single.len(),
+                    "bimodal block should split smaller: {} vs {}",
+                    split.len(),
+                    single.len()
+                );
             } else {
                 // Homogeneous: every split costs extra headers, so the guard
                 // rejects all of them and the output is exactly the single block.
-                assert_eq!(split.len(), single.len(), "homogeneous block should not split");
+                assert_eq!(
+                    split.len(),
+                    single.len(),
+                    "homogeneous block should not split"
+                );
             }
         }
     }

@@ -18,7 +18,7 @@ fuzz_target!(|data: &[u8]| {
     let ours = decompress(&frame).expect("our decoder must decode our own frame");
     assert_eq!(ours.as_slice(), payload, "our decoder round-trip mismatch");
 
-    let theirs = zstd::bulk::decompress(&frame, payload.len() + 64)
-        .expect("libzstd must decode our frame");
+    let theirs =
+        zstd::bulk::decompress(&frame, payload.len() + 64).expect("libzstd must decode our frame");
     assert_eq!(theirs.as_slice(), payload, "libzstd round-trip mismatch");
 });

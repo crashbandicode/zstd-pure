@@ -60,12 +60,18 @@ pub fn xxh64(data: &[u8], seed: u64) -> u64 {
     while idx + 8 <= data.len() {
         let k1 = round(0, read_u64(data, idx));
         h64 ^= k1;
-        h64 = h64.rotate_left(27).wrapping_mul(PRIME64_1).wrapping_add(PRIME64_4);
+        h64 = h64
+            .rotate_left(27)
+            .wrapping_mul(PRIME64_1)
+            .wrapping_add(PRIME64_4);
         idx += 8;
     }
     if idx + 4 <= data.len() {
         h64 ^= (read_u32(data, idx) as u64).wrapping_mul(PRIME64_1);
-        h64 = h64.rotate_left(23).wrapping_mul(PRIME64_2).wrapping_add(PRIME64_3);
+        h64 = h64
+            .rotate_left(23)
+            .wrapping_mul(PRIME64_2)
+            .wrapping_add(PRIME64_3);
         idx += 4;
     }
     while idx < data.len() {
@@ -239,7 +245,9 @@ mod tests {
     #[test]
     fn streaming_matches_oneshot_regardless_of_chunking() {
         // A buffer spanning many 32-byte stripes plus a partial tail.
-        let data: Vec<u8> = (0..1000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        let data: Vec<u8> = (0..1000u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
         let one = xxh64(&data, 0);
         // Feed it in a variety of chunk sizes that cross stripe boundaries.
         for &chunk in &[1usize, 3, 7, 8, 13, 31, 32, 33, 64, 257] {

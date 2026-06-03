@@ -9,9 +9,9 @@
 //! * [`ForwardBitReader`] — a plain little-endian, LSB-first reader used for
 //!   the FSE table description (`FSE_readNCount`).
 
+use super::error::{Result, ZstdError};
 #[allow(unused_imports)]
 use crate::alloc_prelude::*;
-use super::error::{Result, ZstdError};
 
 /// Position (0-based) of the most-significant set bit of `x` (`x` must be > 0).
 #[inline]

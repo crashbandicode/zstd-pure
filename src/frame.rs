@@ -1,13 +1,13 @@
 //! Frame decoding — RFC 8878 §3.1.1.1: frame header parse, the block loop,
 //! and the optional XXH64 content checksum.
 
-#[allow(unused_imports)]
-use crate::alloc_prelude::*;
 use super::block::{self, BlockState};
 use super::dict::Dictionary;
 use super::error::{Result, ZstdError};
 use super::sequences::SeqTables;
 use super::xxhash::xxh64;
+#[allow(unused_imports)]
+use crate::alloc_prelude::*;
 
 /// Standard Zstandard frame magic (`0xFD2FB528`, little-endian `28 B5 2F FD`).
 pub const ZSTD_MAGIC: u32 = 0xFD2F_B528;
@@ -364,11 +364,7 @@ pub fn decompress_magicless(src: &[u8], max_output: usize) -> Result<DecodedFram
 
 /// Decompress a standard stream using a dictionary (raw-content or structured).
 /// The dictionary primes every frame in the stream.
-pub fn decompress_with_dict(
-    src: &[u8],
-    dict: &Dictionary,
-    max_output: usize,
-) -> Result<Vec<u8>> {
+pub fn decompress_with_dict(src: &[u8], dict: &Dictionary, max_output: usize) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut pos = 0usize;
     while pos < src.len() {

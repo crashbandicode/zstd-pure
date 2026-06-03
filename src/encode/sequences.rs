@@ -13,15 +13,17 @@
 //! then the `LL`/`ML`/offset extra bits, and the three states flush in
 //! `ML`/`OF`/`LL` order — exactly inverting the decoder's read sequence.
 
-#[allow(unused_imports)]
-use crate::alloc_prelude::*;
 use super::super::error::Result;
-use super::super::sequences::{LL_BASE, LL_BITS, LL_DEFAULT, ML_BASE, ML_BITS, ML_DEFAULT, OF_DEFAULT};
+use super::super::sequences::{
+    LL_BASE, LL_BITS, LL_DEFAULT, ML_BASE, ML_BITS, ML_DEFAULT, OF_DEFAULT,
+};
 use super::bitstream::BitWriter;
 use super::fse::{
     build_ctable, build_rle_ctable, min_table_log, normalize_counts, optimal_table_log,
     write_ncount, FseCTable,
 };
+#[allow(unused_imports)]
+use crate::alloc_prelude::*;
 
 // Predefined table parameters (max symbol, accuracy log) — must match the
 // decoder's `resolve_table` calls.
@@ -56,13 +58,19 @@ fn highbit32(x: u32) -> u32 {
 /// `pub(crate)` so the optimal parser can price literal-length codes.
 #[inline]
 pub(crate) fn ll_code(lit_len: u32) -> usize {
-    (0..LL_BASE.len()).rev().find(|&c| LL_BASE[c] <= lit_len).unwrap()
+    (0..LL_BASE.len())
+        .rev()
+        .find(|&c| LL_BASE[c] <= lit_len)
+        .unwrap()
 }
 
 /// Match-length code for `match_len` (`match_len >= 3`).
 #[inline]
 pub(crate) fn ml_code(match_len: u32) -> usize {
-    (0..ML_BASE.len()).rev().find(|&c| ML_BASE[c] <= match_len).unwrap()
+    (0..ML_BASE.len())
+        .rev()
+        .find(|&c| ML_BASE[c] <= match_len)
+        .unwrap()
 }
 
 /// Offset code = `floor(log2(offset_value))` (`offset_value >= 1`).
@@ -203,12 +211,26 @@ fn plan_channel(
     if max_sym <= pred_max {
         let ct = build_ctable(pred_dist, pred_max, pred_log);
         let cost = ct.stream_cost_bits(codes);
-        candidates.push((cost, ChannelPlan { mode: 0, ct, header: Vec::new() }));
+        candidates.push((
+            cost,
+            ChannelPlan {
+                mode: 0,
+                ct,
+                header: Vec::new(),
+            },
+        ));
     }
     if num_present == 1 {
         let sym = codes[0] as u8;
         // 1 header byte; the FSE states cost nothing for a single-symbol table.
-        candidates.push((8, ChannelPlan { mode: 1, ct: build_rle_ctable(sym), header: vec![sym] }));
+        candidates.push((
+            8,
+            ChannelPlan {
+                mode: 1,
+                ct: build_rle_ctable(sym),
+                header: vec![sym],
+            },
+        ));
     }
     if num_present >= 2 {
         let n = codes.len();
@@ -219,7 +241,14 @@ fn plan_channel(
         let header = write_ncount(&norm, max_sym, table_log);
         let ct = build_ctable(&norm, max_sym, table_log);
         let cost = ct.stream_cost_bits(codes) + header.len() as u64 * 8;
-        candidates.push((cost, ChannelPlan { mode: 2, ct, header }));
+        candidates.push((
+            cost,
+            ChannelPlan {
+                mode: 2,
+                ct,
+                header,
+            },
+        ));
     }
     // Repeat (mode 3): reuse the previous compressed block's table for this
     // channel — no header bytes — when it can encode every code here. The
@@ -228,7 +257,14 @@ fn plan_channel(
     if let Some(t) = prev {
         if t.can_encode(codes) {
             let cost = t.stream_cost_bits(codes);
-            candidates.push((cost, ChannelPlan { mode: 3, ct: t.clone(), header: Vec::new() }));
+            candidates.push((
+                cost,
+                ChannelPlan {
+                    mode: 3,
+                    ct: t.clone(),
+                    header: Vec::new(),
+                },
+            ));
         }
     }
 
@@ -273,16 +309,41 @@ pub fn write_sequences(out: &mut Vec<u8>, seqs: &[Seq], prev: &SeqCTables) -> Re
     let of_codes: Vec<usize> = seqs.iter().map(|s| of_code(s.offset_value)).collect();
     let ml_codes: Vec<usize> = seqs.iter().map(|s| ml_code(s.match_len)).collect();
 
-    let ll = plan_channel(&ll_codes, &LL_DEFAULT, LL_PRED_MAX, LL_PRED_LOG, LL_MAX_LOG, prev.ll.as_ref());
-    let of = plan_channel(&of_codes, &OF_DEFAULT, OF_PRED_MAX, OF_PRED_LOG, OF_MAX_LOG, prev.of.as_ref());
-    let ml = plan_channel(&ml_codes, &ML_DEFAULT, ML_PRED_MAX, ML_PRED_LOG, ML_MAX_LOG, prev.ml.as_ref());
+    let ll = plan_channel(
+        &ll_codes,
+        &LL_DEFAULT,
+        LL_PRED_MAX,
+        LL_PRED_LOG,
+        LL_MAX_LOG,
+        prev.ll.as_ref(),
+    );
+    let of = plan_channel(
+        &of_codes,
+        &OF_DEFAULT,
+        OF_PRED_MAX,
+        OF_PRED_LOG,
+        OF_MAX_LOG,
+        prev.of.as_ref(),
+    );
+    let ml = plan_channel(
+        &ml_codes,
+        &ML_DEFAULT,
+        ML_PRED_MAX,
+        ML_PRED_LOG,
+        ML_MAX_LOG,
+        prev.ml.as_ref(),
+    );
 
     out.push((ll.mode << 6) | (of.mode << 4) | (ml.mode << 2));
     out.extend_from_slice(&ll.header);
     out.extend_from_slice(&of.header);
     out.extend_from_slice(&ml.header);
     out.extend_from_slice(&encode_seq_bitstream(seqs, &ll.ct, &of.ct, &ml.ct));
-    Ok(SeqCTables { ll: Some(ll.ct), of: Some(of.ct), ml: Some(ml.ct) })
+    Ok(SeqCTables {
+        ll: Some(ll.ct),
+        of: Some(of.ct),
+        ml: Some(ml.ct),
+    })
 }
 
 /// Write a standalone FSE table description (a `write_ncount` stream) for one
@@ -328,9 +389,30 @@ pub(crate) fn write_dict_seq_tables(out: &mut Vec<u8>, seqs: &[Seq]) {
     let ll_codes: Vec<usize> = seqs.iter().map(|s| ll_code(s.lit_len)).collect();
     let of_codes: Vec<usize> = seqs.iter().map(|s| of_code(s.offset_value)).collect();
     let ml_codes: Vec<usize> = seqs.iter().map(|s| ml_code(s.match_len)).collect();
-    write_dict_fse_table(out, &of_codes, &OF_DEFAULT, OF_PRED_MAX, OF_PRED_LOG, OF_MAX_LOG);
-    write_dict_fse_table(out, &ml_codes, &ML_DEFAULT, ML_PRED_MAX, ML_PRED_LOG, ML_MAX_LOG);
-    write_dict_fse_table(out, &ll_codes, &LL_DEFAULT, LL_PRED_MAX, LL_PRED_LOG, LL_MAX_LOG);
+    write_dict_fse_table(
+        out,
+        &of_codes,
+        &OF_DEFAULT,
+        OF_PRED_MAX,
+        OF_PRED_LOG,
+        OF_MAX_LOG,
+    );
+    write_dict_fse_table(
+        out,
+        &ml_codes,
+        &ML_DEFAULT,
+        ML_PRED_MAX,
+        ML_PRED_LOG,
+        ML_MAX_LOG,
+    );
+    write_dict_fse_table(
+        out,
+        &ll_codes,
+        &LL_DEFAULT,
+        LL_PRED_MAX,
+        LL_PRED_LOG,
+        LL_MAX_LOG,
+    );
 }
 
 #[cfg(test)]
@@ -414,7 +496,10 @@ mod tests {
             let mut tables = SeqTables::default();
             let mut rep = [1u32, 4, 8];
             decode(&section, &literals, &mut out, &mut tables, &mut rep).unwrap();
-            assert_eq!(out, expected, "sequence round-trip mismatch (trial {trial})");
+            assert_eq!(
+                out, expected,
+                "sequence round-trip mismatch (trial {trial})"
+            );
         }
     }
 
@@ -457,7 +542,10 @@ mod tests {
             let mut tables = SeqTables::default();
             let mut rep = [1u32, 4, 8];
             decode(&section, &literals, &mut out, &mut tables, &mut rep).unwrap();
-            assert_eq!(out, expected, "auto-table round-trip mismatch (trial {trial})");
+            assert_eq!(
+                out, expected,
+                "auto-table round-trip mismatch (trial {trial})"
+            );
         }
     }
 
@@ -494,7 +582,11 @@ mod tests {
                 let b = out[start + k];
                 out.push(b);
             }
-            seqs.push(Seq { lit_len: pending, match_len, offset_value: offset + 3 });
+            seqs.push(Seq {
+                lit_len: pending,
+                match_len,
+                offset_value: offset + 3,
+            });
             pending = 0;
         }
 
@@ -552,7 +644,11 @@ mod tests {
                 let b = out[start + k];
                 out.push(b);
             }
-            seqs.push(Seq { lit_len: pending, match_len, offset_value: offset + 3 });
+            seqs.push(Seq {
+                lit_len: pending,
+                match_len,
+                offset_value: offset + 3,
+            });
             pending = 0;
         }
 

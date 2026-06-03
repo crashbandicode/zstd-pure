@@ -14,10 +14,10 @@
 //! [`encode`]) follow, both verified by round-tripping through the decoder's
 //! `fse::decompress`.
 
-#[allow(unused_imports)]
-use crate::alloc_prelude::*;
 use super::super::fse::FSE_MAX_TABLELOG;
 use super::bitstream::BitWriter;
+#[allow(unused_imports)]
+use crate::alloc_prelude::*;
 
 #[inline]
 fn highbit32(x: u32) -> u32 {
@@ -35,7 +35,10 @@ pub fn choose_table_log(max_log: u32, num_present: usize) -> u32 {
     let max_log = max_log.min(FSE_MAX_TABLELOG);
     // Smallest log that can host one count per present symbol (`ceil(log2)`).
     let need = (32 - (num_present as u32).saturating_sub(1).leading_zeros()).max(5);
-    debug_assert!(need <= max_log, "alphabet of {num_present} too large for log {max_log}");
+    debug_assert!(
+        need <= max_log,
+        "alphabet of {num_present} too large for log {max_log}"
+    );
     max_log
 }
 
@@ -74,12 +77,7 @@ pub fn min_table_log(num_present: usize) -> u32 {
 /// Every present symbol (`freq > 0`) receives a count ≥ 1; absent symbols get
 /// 0. The result is suitable for both [`write_ncount`] and the encode table
 /// build. Returns counts indexed by symbol `0..=max_symbol`.
-pub fn normalize_counts(
-    freq: &[u32],
-    total: u32,
-    max_symbol: usize,
-    table_log: u32,
-) -> Vec<i16> {
+pub fn normalize_counts(freq: &[u32], total: u32, max_symbol: usize, table_log: u32) -> Vec<i16> {
     let size = 1u32 << table_log;
     let mut norm = vec![0i16; max_symbol + 1];
     debug_assert!(total > 0);
@@ -341,7 +339,9 @@ impl FseCTable {
     /// gate for reusing it in "Repeat" mode. A code beyond the table's alphabet,
     /// or one whose symbol is a `0`-count filler, cannot be encoded.
     pub fn can_encode(&self, codes: &[usize]) -> bool {
-        codes.iter().all(|&c| c < self.present.len() && self.present[c])
+        codes
+            .iter()
+            .all(|&c| c < self.present.len() && self.present[c])
     }
 
     /// Initialize a state for the first symbol it will encode (`FSE_initCState2`).
@@ -481,7 +481,11 @@ mod tests {
             let norm = normalize_counts(&freq, total, max_symbol, table_log);
             // Sanity: valid normalization.
             let sum: i32 = norm.iter().map(|&c| (c as i32).abs()).sum();
-            assert_eq!(sum, 1 << table_log, "norm sum != table size (trial {trial})");
+            assert_eq!(
+                sum,
+                1 << table_log,
+                "norm sum != table size (trial {trial})"
+            );
             for (s, &c) in norm.iter().enumerate() {
                 if freq[s] > 0 {
                     assert!(c >= 1, "present symbol {s} got count {c}");
@@ -492,8 +496,14 @@ mod tests {
 
             let header = write_ncount(&norm, max_symbol, table_log);
             let nc = read_ncount(&header, max_log).expect("read_ncount must parse our header");
-            assert_eq!(nc.table_log, table_log, "table_log mismatch (trial {trial})");
-            assert_eq!(nc.max_symbol, max_symbol, "max_symbol mismatch (trial {trial})");
+            assert_eq!(
+                nc.table_log, table_log,
+                "table_log mismatch (trial {trial})"
+            );
+            assert_eq!(
+                nc.max_symbol, max_symbol,
+                "max_symbol mismatch (trial {trial})"
+            );
             assert_eq!(
                 &nc.counts[..=max_symbol],
                 &norm[..],

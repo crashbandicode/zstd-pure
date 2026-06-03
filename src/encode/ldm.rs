@@ -32,8 +32,14 @@ const LDM_HASH_RATE_LOG: u32 = 5;
 #[inline]
 fn ldm_hash(data: &[u8], p: usize) -> u64 {
     let v = u64::from_le_bytes([
-        data[p], data[p + 1], data[p + 2], data[p + 3],
-        data[p + 4], data[p + 5], data[p + 6], data[p + 7],
+        data[p],
+        data[p + 1],
+        data[p + 2],
+        data[p + 3],
+        data[p + 4],
+        data[p + 5],
+        data[p + 6],
+        data[p + 7],
     ]);
     v.wrapping_mul(0x9E37_79B1_85EB_CA87)
 }
@@ -116,7 +122,11 @@ impl LdmState {
                         ml += 1;
                     }
                     if ml >= LDM_MIN_MATCH {
-                        out.push(LdmSeq { pos: p, len: ml, offset: offset as u32 });
+                        out.push(LdmSeq {
+                            pos: p,
+                            len: ml,
+                            offset: offset as u32,
+                        });
                         p += ml; // skip the matched span (don't index its interior)
                         continue;
                     }
@@ -137,8 +147,12 @@ mod tests {
         // A distinctive 4 KB block, ~200 KB of unrelated filler, then the same
         // block again. generate() must surface the second copy as a long match
         // whose offset points back exactly to the first copy.
-        let block: Vec<u8> = (0..4096u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
-        let filler: Vec<u8> = (0..200_000u32).map(|i| (i.wrapping_mul(40503) >> 7) as u8).collect();
+        let block: Vec<u8> = (0..4096u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
+        let filler: Vec<u8> = (0..200_000u32)
+            .map(|i| (i.wrapping_mul(40503) >> 7) as u8)
+            .collect();
         let mut data = Vec::new();
         data.extend_from_slice(&block);
         data.extend_from_slice(&filler);
@@ -154,11 +168,18 @@ mod tests {
             .expect("LDM should find the far-repeated block");
         // A gate point in the duplicate at `dup_at + φ` matches the first copy at
         // `φ`, so the offset is exactly the distance between the two copies.
-        assert_eq!(m.offset as usize, dup_at, "offset should point to the first copy");
+        assert_eq!(
+            m.offset as usize, dup_at,
+            "offset should point to the first copy"
+        );
         assert!(m.len >= LDM_MIN_MATCH, "match too short: {}", m.len);
         // The match must be real.
         let (p, o, l) = (m.pos, m.offset as usize, m.len);
-        assert_eq!(&data[p..p + l], &data[p - o..p - o + l], "LDM match bytes differ");
+        assert_eq!(
+            &data[p..p + l],
+            &data[p - o..p - o + l],
+            "LDM match bytes differ"
+        );
     }
 
     #[test]
@@ -166,7 +187,9 @@ mod tests {
         // Whatever generate() returns on arbitrary data must be real: long enough,
         // in-window, in-bounds, byte-for-byte correct, sorted, and non-overlapping
         // (these are exactly the invariants the parser relies on).
-        let data: Vec<u8> = (0..300_000u32).map(|i| (i.wrapping_mul(2654435761) >> 9) as u8).collect();
+        let data: Vec<u8> = (0..300_000u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 9) as u8)
+            .collect();
         let window = 1usize << 24;
         let mut ldm = LdmState::new(24);
         let matches = ldm.generate(&data, 0..data.len(), 0, window);
@@ -177,7 +200,11 @@ mod tests {
             assert!(o >= 1 && o <= window, "offset out of window: {o}");
             assert!(p >= o, "source before buffer start");
             assert!(p + l <= data.len(), "match crosses the end");
-            assert_eq!(&data[p..p + l], &data[p - o..p - o + l], "match bytes differ");
+            assert_eq!(
+                &data[p..p + l],
+                &data[p - o..p - o + l],
+                "match bytes differ"
+            );
             assert!(p >= prev_end, "matches overlap or are out of order");
             prev_end = p + l;
         }

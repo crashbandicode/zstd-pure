@@ -15,10 +15,12 @@
 //! and offsets are absolute back-distances — which the decoder reconstructs
 //! correctly because its copy offset is relative to the current output end.
 
+use super::super::sequences::{
+    resolve_offset, LL_BITS, LL_DEFAULT, ML_BITS, ML_DEFAULT, OF_DEFAULT,
+};
+use super::sequences::{ll_code, ml_code, of_code, Seq};
 #[allow(unused_imports)]
 use crate::alloc_prelude::*;
-use super::super::sequences::{resolve_offset, LL_BITS, LL_DEFAULT, ML_BITS, ML_DEFAULT, OF_DEFAULT};
-use super::sequences::{ll_code, ml_code, of_code, Seq};
 
 /// Minimum match length (in bytes) the fast parser will emit.
 const MIN_MATCH: usize = 4;
@@ -47,8 +49,14 @@ fn hash4(v: u32, hash_log: u32) -> usize {
 #[inline]
 fn read_u64(data: &[u8], p: usize) -> u64 {
     u64::from_le_bytes([
-        data[p], data[p + 1], data[p + 2], data[p + 3],
-        data[p + 4], data[p + 5], data[p + 6], data[p + 7],
+        data[p],
+        data[p + 1],
+        data[p + 2],
+        data[p + 3],
+        data[p + 4],
+        data[p + 5],
+        data[p + 6],
+        data[p + 7],
     ])
 }
 
@@ -149,7 +157,9 @@ pub fn parse_block(
         if cand >= 0 {
             let c = cand as usize;
             let offset = p - c;
-            if offset <= max_offset && offset >= 1 && data[c..c + MIN_MATCH] == data[p..p + MIN_MATCH]
+            if offset <= max_offset
+                && offset >= 1
+                && data[c..c + MIN_MATCH] == data[p..p + MIN_MATCH]
             {
                 // Extend the match forward, bounded by this block's `end` (the
                 // matched bytes belong to this block's output). Overlap-safe:
@@ -358,7 +368,14 @@ impl ChainState {
     /// Longest match for `ip` among up to `depth` chained candidates within the
     /// window — `(match_len, match_pos)`, or `(0, 0)` if none reaches
     /// `MIN_MATCH`. Read-only; the caller inserts positions via [`Self::insert`].
-    fn find(&self, data: &[u8], ip: usize, end: usize, max_offset: usize, depth: usize) -> (usize, usize) {
+    fn find(
+        &self,
+        data: &[u8],
+        ip: usize,
+        end: usize,
+        max_offset: usize,
+        depth: usize,
+    ) -> (usize, usize) {
         let h = hash4(read_u32(data, ip), self.hash_log);
         let mut cand = self.head[h];
         let mut best_ml = MIN_MATCH - 1; // a candidate must beat this to count
@@ -582,7 +599,14 @@ impl BtState {
     /// probe `ip` and `ip+1` (its look-ahead) without inserting either, then
     /// inserts positions in order separately; this is the query half of the
     /// descent (same `commonLength`-bounded walk as the inserting variants).
-    fn find_longest(&self, data: &[u8], ip: usize, end: usize, max_offset: usize, nb_compares: usize) -> (usize, usize) {
+    fn find_longest(
+        &self,
+        data: &[u8],
+        ip: usize,
+        end: usize,
+        max_offset: usize,
+        nb_compares: usize,
+    ) -> (usize, usize) {
         let window_low = self.window_low(ip, max_offset);
         let h = hash4(read_u32(data, ip), self.hash_log);
         let mut match_index = self.hash[h];
@@ -622,7 +646,14 @@ impl BtState {
     /// skips (inside a committed long match). Same descent as
     /// [`Self::insert_and_get_longest`] but **caps** the extension at
     /// [`BT_INSERT_CAP`] to bound the per-position cost on periodic data.
-    fn insert_bt1(&mut self, data: &[u8], curr: usize, end: usize, max_offset: usize, nb_compares: usize) {
+    fn insert_bt1(
+        &mut self,
+        data: &[u8],
+        curr: usize,
+        end: usize,
+        max_offset: usize,
+        nb_compares: usize,
+    ) {
         let window_low = self.window_low(curr, max_offset);
         let ext_end = (curr + BT_INSERT_CAP).min(end);
         let h = hash4(read_u32(data, curr), self.hash_log);
@@ -822,7 +853,8 @@ pub fn bt_lazy_parse_block(
             tree.insert_bt1(data, inserted, end, max_offset, depth);
             inserted += 1;
         }
-        let (mut ml, mut mpos) = bt_lazy_best(chain, tree, data, ip, end, max_offset, depth, target);
+        let (mut ml, mut mpos) =
+            bt_lazy_best(chain, tree, data, ip, end, max_offset, depth, target);
         if ml < MIN_MATCH {
             ip += 1;
             continue;
@@ -835,7 +867,8 @@ pub fn bt_lazy_parse_block(
                 tree.insert_bt1(data, inserted, end, max_offset, depth);
                 inserted += 1;
             }
-            let (ml1, mpos1) = bt_lazy_best(chain, tree, data, ip + 1, end, max_offset, depth, target);
+            let (ml1, mpos1) =
+                bt_lazy_best(chain, tree, data, ip + 1, end, max_offset, depth, target);
             if ml1 > ml {
                 ml = ml1;
                 mpos = mpos1;
@@ -852,7 +885,11 @@ pub fn bt_lazy_parse_block(
         let ll0 = lit_len == 0;
         let offset_value = encode_offset(rep, offset as u32, ll0);
         resolve_offset(rep, offset_value, ll0);
-        seqs.push(Seq { lit_len: lit_len as u32, match_len: ml as u32, offset_value });
+        seqs.push(Seq {
+            lit_len: lit_len as u32,
+            match_len: ml as u32,
+            offset_value,
+        });
 
         let match_end = ip + ml;
         while inserted < match_end && inserted <= ilimit {
@@ -941,7 +978,11 @@ impl Prices {
         }
         let mut off = [0u64; 32];
         for (c, p) in off.iter_mut().enumerate() {
-            let count = if c < OF_DEFAULT.len() { OF_DEFAULT[c] } else { -1 };
+            let count = if c < OF_DEFAULT.len() {
+                OF_DEFAULT[c]
+            } else {
+                -1
+            };
             *p = code_price(count, 5) + (c as u64) * 256;
         }
         Prices { lit, ll, ml, off }
@@ -1030,12 +1071,31 @@ fn run_dp(
     init_rep: [u32; 3],
 ) -> (Vec<Seq>, [u32; 3]) {
     let big = u64::MAX / 4;
-    let mut opt = vec![Opt { price: big, mlen: 0, litlen: 0, offval: 0, rep: [0; 3] }; n + 1];
-    opt[0] = Opt { price: 0, mlen: 0, litlen: 0, offval: 0, rep: init_rep };
+    let mut opt = vec![
+        Opt {
+            price: big,
+            mlen: 0,
+            litlen: 0,
+            offval: 0,
+            rep: [0; 3]
+        };
+        n + 1
+    ];
+    opt[0] = Opt {
+        price: 0,
+        mlen: 0,
+        litlen: 0,
+        offval: 0,
+        rep: init_rep,
+    };
 
     for i in 0..n {
         let base = opt[i].price;
-        let pend = if opt[i].mlen > 0 { 0 } else { opt[i].litlen as usize };
+        let pend = if opt[i].mlen > 0 {
+            0
+        } else {
+            opt[i].litlen as usize
+        };
 
         // Literal extension i -> i+1. Pre-pay the literal-length code so a
         // closing match adds no further ll cost; opening a run pays the ll code
@@ -1047,7 +1107,13 @@ fn run_dp(
         };
         let cand = base + prices.lit[data[start + i] as usize] + ll_add;
         if cand < opt[i + 1].price {
-            opt[i + 1] = Opt { price: cand, mlen: 0, litlen: pend as u32 + 1, offval: 0, rep: opt[i].rep };
+            opt[i + 1] = Opt {
+                price: cand,
+                mlen: 0,
+                litlen: pend as u32 + 1,
+                offval: 0,
+                rep: opt[i].rep,
+            };
         }
 
         let ll0 = pend == 0;
@@ -1066,7 +1132,13 @@ fn run_dp(
             let j = i + long_len;
             let price = base + ll_owed + ocost + prices.ml[ml_code(long_len as u32)];
             if price < opt[j].price {
-                opt[j] = Opt { price, mlen: long_len as u32, litlen: pend as u32, offval, rep: new_rep };
+                opt[j] = Opt {
+                    price,
+                    mlen: long_len as u32,
+                    litlen: pend as u32,
+                    offval,
+                    rep: new_rep,
+                };
             }
             continue;
         }
@@ -1075,7 +1147,8 @@ fn run_dp(
         // parse earns its keep. Each length is provided most cheaply by the
         // first Pareto entry reaching it, so cover only (prev_len, len_k].
         let mut prev_len = MIN_MATCH - 1;
-        for &(len_k, off_k) in &matches_flat[match_starts[i] as usize..match_starts[i + 1] as usize] {
+        for &(len_k, off_k) in &matches_flat[match_starts[i] as usize..match_starts[i + 1] as usize]
+        {
             let len_k = len_k as usize;
             let offval = encode_offset(&opt[i].rep, off_k, ll0);
             let ocost = prices.off[of_code(offval).min(31)];
@@ -1086,14 +1159,26 @@ fn run_dp(
                 let j = i + l;
                 let price = base + ll_owed + ocost + prices.ml[ml_code(l as u32)];
                 if price < opt[j].price {
-                    opt[j] = Opt { price, mlen: l as u32, litlen: pend as u32, offval, rep: new_rep };
+                    opt[j] = Opt {
+                        price,
+                        mlen: l as u32,
+                        litlen: pend as u32,
+                        offval,
+                        rep: new_rep,
+                    };
                 }
             }
             if len_k > MAX_SUBLEN {
                 let j = i + len_k;
                 let price = base + ll_owed + ocost + prices.ml[ml_code(len_k as u32)];
                 if price < opt[j].price {
-                    opt[j] = Opt { price, mlen: len_k as u32, litlen: pend as u32, offval, rep: new_rep };
+                    opt[j] = Opt {
+                        price,
+                        mlen: len_k as u32,
+                        litlen: pend as u32,
+                        offval,
+                        rep: new_rep,
+                    };
                 }
             }
             prev_len = len_k;
@@ -1111,7 +1196,11 @@ fn run_dp(
         let m = opt[pos].mlen as usize;
         let ll = opt[pos].litlen as usize;
         debug_assert!(m >= MIN_MATCH, "backtrack landed off a match boundary");
-        seqs.push(Seq { lit_len: ll as u32, match_len: m as u32, offset_value: opt[pos].offval });
+        seqs.push(Seq {
+            lit_len: ll as u32,
+            match_len: m as u32,
+            offset_value: opt[pos].offval,
+        });
         pos -= m + ll;
     }
     seqs.reverse();
@@ -1237,12 +1326,30 @@ pub fn opt_parse_block(
 
     // --- DP pass 1 (static prior). Identical to the single-pass output. ---
     let prices1 = Prices::predef(&data[start..end]);
-    let (seqs1, rep1) = run_dp(data, start, n, &prices1, &match_starts, &matches_flat, &pos_long, *rep);
+    let (seqs1, rep1) = run_dp(
+        data,
+        start,
+        n,
+        &prices1,
+        &match_starts,
+        &matches_flat,
+        &pos_long,
+        *rep,
+    );
 
     // --- DP pass 2 (`btultra2`): re-parse against the actual statistics. ---
     let (seqs, final_rep) = if two_pass {
         let prices2 = Prices::from_stats(&data[start..end], &seqs1);
-        run_dp(data, start, n, &prices2, &match_starts, &matches_flat, &pos_long, *rep)
+        run_dp(
+            data,
+            start,
+            n,
+            &prices2,
+            &match_starts,
+            &matches_flat,
+            &pos_long,
+            *rep,
+        )
     } else {
         (seqs1, rep1)
     };
@@ -1343,15 +1450,34 @@ impl Finder {
         match self {
             Finder::Fast(state) => parse_block(data, range, state, max_offset, rep),
             Finder::DFast(state) => dfast_parse_block(data, range, state, max_offset, rep),
-            Finder::Chain { state, lazy_steps, depth } => {
-                lazy_parse_block(data, range, state, max_offset, rep, *lazy_steps, *depth)
-            }
-            Finder::BtLazy { state, tree, depth, target } => {
-                bt_lazy_parse_block(data, range, state, tree, max_offset, rep, *depth, *target)
-            }
-            Finder::Opt { state, tree, depth, sufficient_len, two_pass } => {
-                opt_parse_block(data, range, state, tree, max_offset, rep, *depth, *sufficient_len, *two_pass)
-            }
+            Finder::Chain {
+                state,
+                lazy_steps,
+                depth,
+            } => lazy_parse_block(data, range, state, max_offset, rep, *lazy_steps, *depth),
+            Finder::BtLazy {
+                state,
+                tree,
+                depth,
+                target,
+            } => bt_lazy_parse_block(data, range, state, tree, max_offset, rep, *depth, *target),
+            Finder::Opt {
+                state,
+                tree,
+                depth,
+                sufficient_len,
+                two_pass,
+            } => opt_parse_block(
+                data,
+                range,
+                state,
+                tree,
+                max_offset,
+                rep,
+                *depth,
+                *sufficient_len,
+                *two_pass,
+            ),
         }
     }
 
@@ -1387,7 +1513,12 @@ impl Finder {
                     p += 1;
                 }
             }
-            Finder::BtLazy { state, tree, depth, .. } | Finder::Opt { state, tree, depth, .. } => {
+            Finder::BtLazy {
+                state, tree, depth, ..
+            }
+            | Finder::Opt {
+                state, tree, depth, ..
+            } => {
                 let mut p = 0;
                 while p + MIN_MATCH <= dict_len {
                     state.insert(data, p);
@@ -1439,7 +1570,11 @@ pub fn parse_with_ldm(
         let ll0 = ll == 0;
         let offset_value = encode_offset(rep, m.offset, ll0);
         resolve_offset(rep, offset_value, ll0);
-        seqs.push(Seq { lit_len: ll as u32, match_len: m.len as u32, offset_value });
+        seqs.push(Seq {
+            lit_len: ll as u32,
+            match_len: m.len as u32,
+            offset_value,
+        });
         cursor = m.pos + m.len;
     }
     if cursor < end {
@@ -1486,8 +1621,15 @@ mod tests {
         let (ml, mpos) = tree.find_longest(&data, probe, data.len(), 1 << 26, 16);
         if ml >= MIN_MATCH {
             let off = probe - mpos;
-            assert!(off <= coverage, "tree returned an out-of-coverage offset {off}");
-            assert_eq!(&data[mpos..mpos + ml], &data[probe..probe + ml], "tree match not real");
+            assert!(
+                off <= coverage,
+                "tree returned an out-of-coverage offset {off}"
+            );
+            assert_eq!(
+                &data[mpos..mpos + ml],
+                &data[probe..probe + ml],
+                "tree match not real"
+            );
         }
     }
 
@@ -1522,7 +1664,11 @@ mod tests {
     /// byte-for-byte the decoder's. Drives the real encode→decode path.
     #[test]
     fn rep_coded_parse_round_trips_through_decoder() {
-        for data in [rep_heavy_input(), b"abcdabcdabcdabcdabcd".to_vec(), vec![0x55u8; 5000]] {
+        for data in [
+            rep_heavy_input(),
+            b"abcdabcdabcdabcdabcd".to_vec(),
+            vec![0x55u8; 5000],
+        ] {
             let mut rep = [1u32, 4, 8];
             let (seqs, literals) = fast_parse(&data, 1 << 17, &mut rep);
 
@@ -1552,15 +1698,26 @@ mod tests {
         let mut data = rep_heavy_input();
         let mut s = 0x2468_ace0_1357_9bdfu64;
         for _ in 0..4000 {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             data.push((s >> 33) as u8);
         }
         for two_pass in [false, true] {
             let mut state = ChainState::new(18, 18);
             let mut tree = BtState::new(18, 20);
             let mut rep = [1u32, 4, 8];
-            let (seqs, literals) =
-                opt_parse_block(&data, 0..data.len(), &mut state, &mut tree, 1 << 20, &mut rep, 64, 64, two_pass);
+            let (seqs, literals) = opt_parse_block(
+                &data,
+                0..data.len(),
+                &mut state,
+                &mut tree,
+                1 << 20,
+                &mut rep,
+                64,
+                64,
+                two_pass,
+            );
 
             let mut section = Vec::new();
             super::super::sequences::write_sequences(
@@ -1574,8 +1731,14 @@ mod tests {
             let mut tables = SeqTables::default();
             let mut drep = [1u32, 4, 8];
             decode(&section, &literals, &mut out, &mut tables, &mut drep).unwrap();
-            assert_eq!(out, data, "two_pass={two_pass}: opt parse must reconstruct the input");
-            assert_eq!(rep, drep, "two_pass={two_pass}: encoder/decoder rep-offset state diverged");
+            assert_eq!(
+                out, data,
+                "two_pass={two_pass}: opt parse must reconstruct the input"
+            );
+            assert_eq!(
+                rep, drep,
+                "two_pass={two_pass}: encoder/decoder rep-offset state diverged"
+            );
         }
     }
 }

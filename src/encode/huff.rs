@@ -17,12 +17,12 @@
 //! sentinel bit. That pairs with the decoder's reverse `BIT_DStream` reader:
 //! `add(v, nb)` on encode ↔ `read(nb) == v` on decode.
 
-#[allow(unused_imports)]
-use crate::alloc_prelude::*;
 use super::super::error::{Result, ZstdError};
 use super::super::huff;
 use super::bitstream::BitWriter;
 use super::fse as efse;
+#[allow(unused_imports)]
+use crate::alloc_prelude::*;
 
 /// Maximum FSE accuracy log for Huffman weight tables (RFC 8878 §4.2.1.1).
 const HUF_WEIGHT_MAX_LOG: u32 = 6;
@@ -489,7 +489,9 @@ mod tests {
         let mut s = seed | 1;
         (0..n)
             .map(|_| {
-                s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                s = s
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 // Square the uniform to skew toward small symbols (richer Huffman).
                 let u = (s >> 33) as u32 % alphabet;
                 ((u * u) / alphabet) as u8
@@ -581,7 +583,10 @@ mod tests {
             _ => 5,
         };
         let weight_byte = sect[hdr_len];
-        assert!(weight_byte < 128, "expected FSE weight header, got {weight_byte}");
+        assert!(
+            weight_byte < 128,
+            "expected FSE weight header, got {weight_byte}"
+        );
 
         let mut cache = None;
         let (got, consumed) = literals::decode(&sect, &mut cache).unwrap();
@@ -625,7 +630,10 @@ mod tests {
 
         let mut sec1 = Vec::new();
         let t1 = write_literals_auto(&mut sec1, &lits1, None);
-        assert!(t1.is_some(), "block 1 should pick a compressed (tree) section");
+        assert!(
+            t1.is_some(),
+            "block 1 should pick a compressed (tree) section"
+        );
 
         let mut sec2 = Vec::new();
         let _t2 = write_literals_auto(&mut sec2, &lits2, t1.as_ref());

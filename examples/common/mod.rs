@@ -16,24 +16,59 @@ pub fn enwik_like(target: usize, seed: u64) -> Vec<u8> {
     // Capitalized tokens (titles, sentence starts, link targets) and lowercase
     // function words — a small vocabulary gives realistic word-level redundancy.
     const CAPS: &[&str] = &[
-        "The", "In", "After", "During", "History", "Geography", "Science", "Music",
-        "Europe", "America", "Asia", "Africa", "King", "Queen", "River", "Mountain",
-        "City", "University", "Government", "Empire", "Republic", "War", "Battle",
-        "Treaty", "Church", "Party", "Company", "Island", "Region", "Language",
+        "The",
+        "In",
+        "After",
+        "During",
+        "History",
+        "Geography",
+        "Science",
+        "Music",
+        "Europe",
+        "America",
+        "Asia",
+        "Africa",
+        "King",
+        "Queen",
+        "River",
+        "Mountain",
+        "City",
+        "University",
+        "Government",
+        "Empire",
+        "Republic",
+        "War",
+        "Battle",
+        "Treaty",
+        "Church",
+        "Party",
+        "Company",
+        "Island",
+        "Region",
+        "Language",
     ];
     const WORDS: &[&str] = &[
-        "the", "of", "and", "in", "to", "a", "is", "was", "for", "on", "as", "by",
-        "with", "that", "from", "at", "an", "were", "are", "which", "also", "its",
-        "this", "be", "has", "or", "but", "not", "they", "their", "had", "who",
-        "one", "first", "after", "new", "used", "known", "called", "later", "time",
-        "year", "century", "people", "between", "during", "while", "within", "such",
+        "the", "of", "and", "in", "to", "a", "is", "was", "for", "on", "as", "by", "with", "that",
+        "from", "at", "an", "were", "are", "which", "also", "its", "this", "be", "has", "or",
+        "but", "not", "they", "their", "had", "who", "one", "first", "after", "new", "used",
+        "known", "called", "later", "time", "year", "century", "people", "between", "during",
+        "while", "within", "such",
     ];
-    const TEMPLATES: &[&str] =
-        &["cite web", "cite book", "reflist", "main", "see also", "convert", "lang"];
+    const TEMPLATES: &[&str] = &[
+        "cite web",
+        "cite book",
+        "reflist",
+        "main",
+        "see also",
+        "convert",
+        "lang",
+    ];
 
     let mut s = seed | 1;
     let mut rnd = move || {
-        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (s >> 33) as usize
     };
 
@@ -49,9 +84,16 @@ pub fn enwik_like(target: usize, seed: u64) -> Vec<u8> {
                  <contributor>\n        <username>{}{}</username>\n      </contributor>\n      \
                  <comment>{} {}</comment>\n      <text xml:space=\"preserve\">",
                 rnd() % 100_000_000,
-                rnd() % 24, 1 + rnd() % 12, 1 + rnd() % 28, rnd() % 24, rnd() % 60, rnd() % 60,
-                CAPS[rnd() % CAPS.len()], rnd() % 1000,
-                WORDS[rnd() % WORDS.len()], WORDS[rnd() % WORDS.len()],
+                rnd() % 24,
+                1 + rnd() % 12,
+                1 + rnd() % 28,
+                rnd() % 24,
+                rnd() % 60,
+                rnd() % 60,
+                CAPS[rnd() % CAPS.len()],
+                rnd() % 1000,
+                WORDS[rnd() % WORDS.len()],
+                WORDS[rnd() % WORDS.len()],
             )
             .as_bytes(),
         );
@@ -67,7 +109,9 @@ pub fn enwik_like(target: usize, seed: u64) -> Vec<u8> {
                 for _ in 0..words {
                     out.extend_from_slice(b" ");
                     match rnd() % 16 {
-                        0 => out.extend_from_slice(format!("[[{}]]", CAPS[rnd() % CAPS.len()]).as_bytes()),
+                        0 => out.extend_from_slice(
+                            format!("[[{}]]", CAPS[rnd() % CAPS.len()]).as_bytes(),
+                        ),
                         1 => out.extend_from_slice(
                             format!(
                                 "[[{} {}|{}]]",
@@ -77,8 +121,12 @@ pub fn enwik_like(target: usize, seed: u64) -> Vec<u8> {
                             )
                             .as_bytes(),
                         ),
-                        2 => out.extend_from_slice(format!("{{{{{}}}}}", TEMPLATES[rnd() % TEMPLATES.len()]).as_bytes()),
-                        3 => out.extend_from_slice(format!("'''{}'''", WORDS[rnd() % WORDS.len()]).as_bytes()),
+                        2 => out.extend_from_slice(
+                            format!("{{{{{}}}}}", TEMPLATES[rnd() % TEMPLATES.len()]).as_bytes(),
+                        ),
+                        3 => out.extend_from_slice(
+                            format!("'''{}'''", WORDS[rnd() % WORDS.len()]).as_bytes(),
+                        ),
                         _ => out.extend_from_slice(WORDS[rnd() % WORDS.len()].as_bytes()),
                     }
                 }

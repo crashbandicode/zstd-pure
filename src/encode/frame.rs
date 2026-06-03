@@ -4,14 +4,14 @@
 //! checksum. The block bodies come from [`super::block`] (raw/RLE today;
 //! compressed blocks land with the match finder in T2.3).
 
-#[allow(unused_imports)]
-use crate::alloc_prelude::*;
 use super::super::frame::ZSTD_MAGIC;
 use super::super::xxhash::xxh64;
 use super::block::{
     write_compressed_block, write_compressed_block_ldm, write_huffman_literals_block,
     write_store_block, EncState, BLOCK_SIZE_MAX,
 };
+#[allow(unused_imports)]
+use crate::alloc_prelude::*;
 
 /// Window log used by the store-mode encoder. Raw/RLE blocks carry no
 /// back-references, so the window only has to admit one full block (128 KiB =
@@ -44,9 +44,19 @@ pub(crate) fn split_depth_for(strategy: super::params::Strategy) -> usize {
 /// in the smallest field that holds it (1, 2, or 4 bytes), after the window
 /// descriptor and before the content size — the byte order the decoder's
 /// `parse_frame_header` reads.
-fn write_frame_header(out: &mut Vec<u8>, content_size: u64, checksum: bool, window_log: u32, dict_id: u32) {
+fn write_frame_header(
+    out: &mut Vec<u8>,
+    content_size: u64,
+    checksum: bool,
+    window_log: u32,
+    dict_id: u32,
+) {
     // FCS field size: 2 = 4 bytes, 3 = 8 bytes.
-    let fcs_flag: u8 = if content_size <= u32::MAX as u64 { 2 } else { 3 };
+    let fcs_flag: u8 = if content_size <= u32::MAX as u64 {
+        2
+    } else {
+        3
+    };
     // Dictionary_ID flag (FHD bits 0-1): smallest field that holds the id; the
     // decoder maps the flag to a size via `[0, 1, 2, 4]`.
     let (dict_id_flag, dict_id_size): (u8, usize) = match dict_id {
@@ -157,8 +167,11 @@ pub fn compress(data: &[u8], level: i32, checksum: bool, expect_magic: bool) -> 
         // both persist across blocks (the decoder keeps them for repeat-offset
         // codes and "Repeat" table mode). Thread them as one `EncState`,
         // committing only when a block is actually emitted compressed.
-        let mut state =
-            EncState { rep: [1, 4, 8], seq: super::sequences::SeqCTables::default(), lit: None };
+        let mut state = EncState {
+            rep: [1, 4, 8],
+            seq: super::sequences::SeqCTables::default(),
+            lit: None,
+        };
         let mut finder = super::lz::Finder::new(&params);
         let n = data.len();
         let mut start = 0usize;
@@ -169,7 +182,16 @@ pub fn compress(data: &[u8], level: i32, checksum: bool, expect_magic: bool) -> 
             write_store_block(&mut store, last, &data[start..end]);
 
             let mut comp = Vec::new();
-            match write_compressed_block(&mut comp, last, data, start..end, &mut finder, max_offset, &state, split_depth) {
+            match write_compressed_block(
+                &mut comp,
+                last,
+                data,
+                start..end,
+                &mut finder,
+                max_offset,
+                &state,
+                split_depth,
+            ) {
                 Ok(next) if comp.len() < store.len() => {
                     state = next;
                     out.extend_from_slice(&comp);
@@ -221,8 +243,11 @@ pub fn compress_long(data: &[u8], level: i32, checksum: bool, expect_magic: bool
     if data.is_empty() {
         super::block::write_raw_block(&mut out, true, &[]);
     } else {
-        let mut state =
-            EncState { rep: [1, 4, 8], seq: super::sequences::SeqCTables::default(), lit: None };
+        let mut state = EncState {
+            rep: [1, 4, 8],
+            seq: super::sequences::SeqCTables::default(),
+            lit: None,
+        };
         let mut finder = super::lz::Finder::new(&params);
         // The coarse LDM index persists across the frame's blocks, so a long
         // match can reference any earlier block within the advertised window.
@@ -246,7 +271,14 @@ pub fn compress_long(data: &[u8], level: i32, checksum: bool, expect_magic: bool
             // bounded to its tables' reach, while the LDM matches carry the large
             // offsets the frame's advertised window admits.
             match write_compressed_block_ldm(
-                &mut comp, last, data, start..end, &mut finder, regular_reach, &state, split_depth,
+                &mut comp,
+                last,
+                data,
+                start..end,
+                &mut finder,
+                regular_reach,
+                &state,
+                split_depth,
                 &matches,
             ) {
                 Ok(next) if comp.len() < store.len() => {
@@ -355,7 +387,16 @@ pub fn compress_with_dict(
 
             let mut comp = Vec::new();
             let range = (dict_len + start)..(dict_len + end);
-            match write_compressed_block(&mut comp, last, &combined, range, &mut finder, max_offset, &state, split_depth) {
+            match write_compressed_block(
+                &mut comp,
+                last,
+                &combined,
+                range,
+                &mut finder,
+                max_offset,
+                &state,
+                split_depth,
+            ) {
                 Ok(next) if comp.len() < store.len() => {
                     state = next;
                     out.extend_from_slice(&comp);

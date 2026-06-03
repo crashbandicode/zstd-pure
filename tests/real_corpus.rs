@@ -76,7 +76,10 @@ fn real_corpus_round_trips_both_ways() {
         return;
     };
     let levels = env_levels();
-    assert!(!levels.is_empty(), "ZSTD_PURE_CORPUS_LEVELS parsed to no levels");
+    assert!(
+        !levels.is_empty(),
+        "ZSTD_PURE_CORPUS_LEVELS parsed to no levels"
+    );
     let max_bytes = env_max_bytes();
     let use_long = std::env::var("ZSTD_PURE_CORPUS_LONG").is_ok();
 
@@ -116,7 +119,10 @@ fn real_corpus_round_trips_both_ways() {
                 path.display()
             );
             let by_lib = zstd::bulk::decompress(&ours, data.len() + 64).unwrap_or_else(|e| {
-                panic!("{}: libzstd decode of our L{level} frame: {e}", path.display())
+                panic!(
+                    "{}: libzstd decode of our L{level} frame: {e}",
+                    path.display()
+                )
             });
             assert!(
                 by_lib == data,
@@ -126,7 +132,10 @@ fn real_corpus_round_trips_both_ways() {
 
             let lib = zstd::bulk::compress(&data, level).expect("libzstd compress");
             let by_us = decompress(&lib).unwrap_or_else(|e| {
-                panic!("{}: our decode of libzstd L{level} frame: {e}", path.display())
+                panic!(
+                    "{}: our decode of libzstd L{level} frame: {e}",
+                    path.display()
+                )
             });
             assert!(
                 by_us == data,
@@ -139,8 +148,14 @@ fn real_corpus_round_trips_both_ways() {
         }
     }
 
-    let mode = if use_long { "compress_long" } else { "compress" };
-    eprintln!("real corpus {root} [{mode}]: {n_files} files ({total_raw} raw bytes), {n_skipped} skipped");
+    let mode = if use_long {
+        "compress_long"
+    } else {
+        "compress"
+    };
+    eprintln!(
+        "real corpus {root} [{mode}]: {n_files} files ({total_raw} raw bytes), {n_skipped} skipped"
+    );
     for (i, &level) in levels.iter().enumerate() {
         let ratio = ours_bytes[i] as f64 / lib_bytes[i].max(1) as f64;
         eprintln!(

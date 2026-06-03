@@ -124,7 +124,10 @@ pub mod io {
             /// Build an error from a kind and a message — mirroring
             /// `std::io::Error::new`'s signature for the decoder's call sites.
             pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
-                Error { kind, message: message.into() }
+                Error {
+                    kind,
+                    message: message.into(),
+                }
             }
 
             /// The error category.
@@ -149,10 +152,6 @@ pub mod streaming;
 pub mod xxhash;
 
 pub use dict::Dictionary;
-pub use encode::{
-    compress, compress_long, compress_store, compress_stored, compress_with_dict,
-    train_dictionary, train_dictionary_structured, StreamingEncoder,
-};
 /// A T2.1a stepping-stone (Huffman-coded literals, no match finding) — strictly
 /// worse than [`compress`]. Hidden from the public API; kept for internal tests.
 #[doc(hidden)]
@@ -160,14 +159,18 @@ pub use encode::compress_huffman_literals;
 /// Parallel compression (`std`-only — uses `std::thread`).
 #[cfg(feature = "std")]
 pub use encode::compress_parallel;
-pub use seekable::{compress_seekable, decompress_seekable_frame, SeekFrame, SeekTable};
-pub use streaming::StreamingDecoder;
+pub use encode::{
+    compress, compress_long, compress_store, compress_stored, compress_with_dict, train_dictionary,
+    train_dictionary_structured, StreamingEncoder,
+};
 pub use error::{Result, ZstdError};
 pub use frame::{
     decode_one, decode_one_with_dict, decompress, decompress_capped, decompress_magicless,
     decompress_magicless_with_dict, decompress_with_dict, frame_header, frame_header_magicless,
     DecodedFrame, FrameHeader,
 };
+pub use seekable::{compress_seekable, decompress_seekable_frame, SeekFrame, SeekTable};
+pub use streaming::StreamingDecoder;
 
 /// Decompress a single magicless frame and return just the bytes (the common
 /// case for the MeshCodec BFRES frame).
@@ -190,7 +193,9 @@ mod tests {
     #[test]
     fn matches_libzstd_across_levels_and_inputs() {
         // Highly redundant (lots of matches / repeat offsets).
-        let redundant: Vec<u8> = (0..20_000u32).flat_map(|i| (i % 11).to_le_bytes()).collect();
+        let redundant: Vec<u8> = (0..20_000u32)
+            .flat_map(|i| (i % 11).to_le_bytes())
+            .collect();
         // Structured-ish (FRES-like header + counted body).
         let mut structured = b"FRES____".to_vec();
         for i in 0..8000u32 {

@@ -63,19 +63,25 @@ pub fn compress_parallel(
     // so segment sizes differ by at most one byte, and every segment is non-empty
     // (jobs <= data.len() / MIN_JOB_SIZE).
     let len = data.len();
-    let bounds: Vec<(usize, usize)> =
-        (0..jobs).map(|i| (i * len / jobs, (i + 1) * len / jobs)).collect();
+    let bounds: Vec<(usize, usize)> = (0..jobs)
+        .map(|i| (i * len / jobs, (i + 1) * len / jobs))
+        .collect();
 
     // One scoped worker per segment: scoped threads may borrow `data`, and they
     // all join before the scope returns, so no `'static` bound or copy is needed.
     let results: Vec<Vec<u8>> = std::thread::scope(|s| {
         let handles: Vec<_> = bounds
             .iter()
-            .map(|&(a, b)| s.spawn(move || super::frame::compress(&data[a..b], level, checksum, expect_magic)))
+            .map(|&(a, b)| {
+                s.spawn(move || super::frame::compress(&data[a..b], level, checksum, expect_magic))
+            })
             .collect();
         // Collect in spawn order (== segment order), not completion order, which
         // is what makes the concatenated stream deterministic.
-        handles.into_iter().map(|h| h.join().expect("compression worker panicked")).collect()
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("compression worker panicked"))
+            .collect()
     });
 
     let total: usize = results.iter().map(Vec::len).sum();
@@ -118,7 +124,11 @@ mod tests {
             for &level in &[1i32, 3, 9] {
                 let frame = compress_parallel(&data, level, n_jobs, true, true);
                 // Our multi-frame decoder reconstructs it.
-                assert_eq!(decompress(&frame).unwrap(), data, "self decode n_jobs={n_jobs} L{level}");
+                assert_eq!(
+                    decompress(&frame).unwrap(),
+                    data,
+                    "self decode n_jobs={n_jobs} L{level}"
+                );
                 // libzstd reads the concatenated frames (decode_all, not bulk).
                 let by_lib = zstd::stream::decode_all(&frame[..])
                     .unwrap_or_else(|e| panic!("libzstd decode_all n_jobs={n_jobs} L{level}: {e}"));
@@ -134,10 +144,18 @@ mod tests {
         let parallel = compress_parallel(&data, 6, 4, true, true);
         // 1 job is exactly `compress`; 4 jobs must produce a different (multi-frame)
         // framing on an input this size.
-        assert_eq!(serial, compress(&data, 6, true, true), "1 job must equal compress");
+        assert_eq!(
+            serial,
+            compress(&data, 6, true, true),
+            "1 job must equal compress"
+        );
         assert_ne!(parallel, serial, "4 jobs should split into multiple frames");
         // Deterministic: same arguments -> identical bytes.
-        assert_eq!(parallel, compress_parallel(&data, 6, 4, true, true), "must be deterministic");
+        assert_eq!(
+            parallel,
+            compress_parallel(&data, 6, 4, true, true),
+            "must be deterministic"
+        );
         // It decodes correctly.
         assert_eq!(decompress(&parallel).unwrap(), data);
     }
@@ -149,7 +167,12 @@ mod tests {
         for data in [vec![], vec![0u8], b"tiny".to_vec(), vec![7u8; 300_000]] {
             for &n_jobs in &[1usize, 4, 1000] {
                 let frame = compress_parallel(&data, 3, n_jobs, false, true);
-                assert_eq!(decompress(&frame).unwrap(), data, "len {} n_jobs {n_jobs}", data.len());
+                assert_eq!(
+                    decompress(&frame).unwrap(),
+                    data,
+                    "len {} n_jobs {n_jobs}",
+                    data.len()
+                );
             }
         }
     }
@@ -215,8 +238,16 @@ mod tests {
         let jobs = effective_jobs(data.len(), 64);
         assert!(jobs >= 32, "expected many segments, got {jobs}");
         let frame = compress_parallel(&data, 1, 64, true, true);
-        assert_eq!(decompress(&frame).unwrap(), data, "self decode of {jobs}-frame stream");
-        assert_eq!(zstd::stream::decode_all(&frame[..]).unwrap(), data, "libzstd decode_all");
+        assert_eq!(
+            decompress(&frame).unwrap(),
+            data,
+            "self decode of {jobs}-frame stream"
+        );
+        assert_eq!(
+            zstd::stream::decode_all(&frame[..]).unwrap(),
+            data,
+            "libzstd decode_all"
+        );
     }
 
     #[test]

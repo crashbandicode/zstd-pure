@@ -159,7 +159,11 @@ mod tests {
         // A tiny input must not advertise a 21-bit window or allocate a huge
         // table; the window collapses toward the data size (floored at 10).
         let p = params_for_level(3, 5_000);
-        assert!(p.window_log <= 13, "window_log {} too large for 5 KB", p.window_log);
+        assert!(
+            p.window_log <= 13,
+            "window_log {} too large for 5 KB",
+            p.window_log
+        );
         assert!(p.window_log >= MIN_WINDOW_LOG);
         assert!(p.hash_log <= p.window_log + 1);
     }

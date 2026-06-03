@@ -16,11 +16,11 @@
 
 use std::io::Read;
 
+use zstd::zstd_safe::{CCtx, CParameter};
 use zstd_pure::{
     compress as our_compress, compress_long as our_compress_long, decompress, decompress_capped,
     decompress_with_dict, frame_header, Dictionary, StreamingDecoder,
 };
-use zstd::zstd_safe::{CParameter, CCtx};
 
 /// Small deterministic LCG so the harness is reproducible (no rand dep).
 struct Rng(u64);
@@ -47,7 +47,9 @@ impl Rng {
 
 /// A spread of input profiles that exercise different decoder paths.
 fn input_profiles() -> Vec<(&'static str, Vec<u8>)> {
-    let redundant: Vec<u8> = (0..40_000u32).flat_map(|i| (i % 13).to_le_bytes()).collect();
+    let redundant: Vec<u8> = (0..40_000u32)
+        .flat_map(|i| (i % 13).to_le_bytes())
+        .collect();
     let mut structured = b"FRES____".to_vec();
     for i in 0..12_000u32 {
         structured.extend_from_slice(&(i.wrapping_mul(2654435761) % 251).to_le_bytes());
@@ -71,12 +73,15 @@ fn input_profiles() -> Vec<(&'static str, Vec<u8>)> {
 
 fn compress(data: &[u8], level: i32, window_log: Option<u32>, checksum: bool) -> Vec<u8> {
     let mut cctx = CCtx::create();
-    cctx.set_parameter(CParameter::CompressionLevel(level)).unwrap();
-    cctx.set_parameter(CParameter::ChecksumFlag(checksum)).unwrap();
+    cctx.set_parameter(CParameter::CompressionLevel(level))
+        .unwrap();
+    cctx.set_parameter(CParameter::ChecksumFlag(checksum))
+        .unwrap();
     if let Some(wl) = window_log {
         cctx.set_parameter(CParameter::WindowLog(wl)).unwrap();
         // Drop the content size so a real window descriptor is emitted.
-        cctx.set_parameter(CParameter::ContentSizeFlag(false)).unwrap();
+        cctx.set_parameter(CParameter::ContentSizeFlag(false))
+            .unwrap();
     }
     let mut out = Vec::with_capacity(zstd::zstd_safe::compress_bound(data.len()));
     cctx.compress2(&mut out, data).unwrap();
@@ -100,11 +105,18 @@ fn decode_corpus_matrix() {
                 for &wl in &[None, Some(10u32), Some(15), Some(18)] {
                     // A tiny window on a large input is the interesting case.
                     let comp = compress(data, level, wl, checksum);
-                    let one = decompress(&comp)
-                        .unwrap_or_else(|e| panic!("[{name} L{level} wl{wl:?} ck{checksum}] one-shot: {e}"));
-                    assert_eq!(&one, data, "[{name} L{level} wl{wl:?} ck{checksum}] one-shot mismatch");
+                    let one = decompress(&comp).unwrap_or_else(|e| {
+                        panic!("[{name} L{level} wl{wl:?} ck{checksum}] one-shot: {e}")
+                    });
+                    assert_eq!(
+                        &one, data,
+                        "[{name} L{level} wl{wl:?} ck{checksum}] one-shot mismatch"
+                    );
                     let streamed = stream_decode(&comp);
-                    assert_eq!(&streamed, data, "[{name} L{level} wl{wl:?} ck{checksum}] streaming mismatch");
+                    assert_eq!(
+                        &streamed, data,
+                        "[{name} L{level} wl{wl:?} ck{checksum}] streaming mismatch"
+                    );
                     cases += 1;
                 }
             }
@@ -163,11 +175,17 @@ fn dictionary_matrix() {
             // Structured.
             let mut c = zstd::bulk::Compressor::with_dictionary(level, &trained).unwrap();
             let comp = c.compress(s).unwrap();
-            assert_eq!(decompress_with_dict(&comp, &trained_dict, 1 << 22).unwrap(), *s);
+            assert_eq!(
+                decompress_with_dict(&comp, &trained_dict, 1 << 22).unwrap(),
+                *s
+            );
             // Raw.
             let mut c2 = zstd::bulk::Compressor::with_dictionary(level, &raw_bytes).unwrap();
             let comp2 = c2.compress(s).unwrap();
-            assert_eq!(decompress_with_dict(&comp2, &raw_dict, 1 << 22).unwrap(), *s);
+            assert_eq!(
+                decompress_with_dict(&comp2, &raw_dict, 1 << 22).unwrap(),
+                *s
+            );
         }
     }
 }
@@ -217,10 +235,15 @@ fn our_encoder_round_trips_through_libzstd_and_self() {
     for (name, data) in input_profiles() {
         for &checksum in &[false, true] {
             let frame = our_compress(&data, 3, checksum, true);
-            let by_libzstd = zstd::bulk::decompress(&frame, data.len() + 64)
-                .unwrap_or_else(|e| panic!("[{name} ck{checksum}] libzstd decode of our frame: {e}"));
+            let by_libzstd = zstd::bulk::decompress(&frame, data.len() + 64).unwrap_or_else(|e| {
+                panic!("[{name} ck{checksum}] libzstd decode of our frame: {e}")
+            });
             assert_eq!(by_libzstd, data, "[{name} ck{checksum}] libzstd mismatch");
-            assert_eq!(decompress(&frame).unwrap(), data, "[{name} ck{checksum}] self mismatch");
+            assert_eq!(
+                decompress(&frame).unwrap(),
+                data,
+                "[{name} ck{checksum}] self mismatch"
+            );
         }
     }
 
@@ -244,7 +267,11 @@ fn our_encoder_round_trips_through_libzstd_and_self() {
         let by_libzstd = zstd::bulk::decompress(&frame, payload.len() + 64)
             .unwrap_or_else(|e| panic!("libzstd decode of our frame (len {len}): {e}"));
         assert_eq!(by_libzstd, payload, "libzstd mismatch len {len}");
-        assert_eq!(decompress(&frame).unwrap(), payload, "self mismatch len {len}");
+        assert_eq!(
+            decompress(&frame).unwrap(),
+            payload,
+            "self mismatch len {len}"
+        );
     }
 }
 
@@ -256,7 +283,11 @@ fn our_frames_round_trip_through_the_streaming_decoder() {
     for (name, data) in input_profiles() {
         for &level in &[1i32, 9, 19] {
             let frame = our_compress(&data, level, level % 2 == 1, true);
-            assert_eq!(stream_decode(&frame), data, "[{name} L{level}] streaming decode of our compress");
+            assert_eq!(
+                stream_decode(&frame),
+                data,
+                "[{name} L{level}] streaming decode of our compress"
+            );
         }
     }
 
@@ -274,10 +305,20 @@ fn our_frames_round_trip_through_the_streaming_decoder() {
     for &checksum in &[false, true] {
         let frame = our_compress_long(&data, 1, checksum, true);
         let h = frame_header(&frame).unwrap();
-        assert!(h.window_size > (8 << 20), "compress_long should advertise a > 8 MiB window");
-        assert_eq!(stream_decode(&frame), data, "streaming decode of our LDM frame (ck{checksum})");
+        assert!(
+            h.window_size > (8 << 20),
+            "compress_long should advertise a > 8 MiB window"
+        );
+        assert_eq!(
+            stream_decode(&frame),
+            data,
+            "streaming decode of our LDM frame (ck{checksum})"
+        );
         // libzstd (default windowLogMax 27) agrees.
-        assert_eq!(zstd::bulk::decompress(&frame, data.len() + 64).unwrap(), data);
+        assert_eq!(
+            zstd::bulk::decompress(&frame, data.len() + 64).unwrap(),
+            data
+        );
     }
 }
 
@@ -303,7 +344,10 @@ fn oracle_on_random_payloads() {
         let got = decompress(&comp).expect("decode random payload");
         assert_eq!(got, payload, "oracle mismatch len {len} L{level}");
         // libzstd-decode must agree (catches any non-canonical encoder choice).
-        assert_eq!(zstd::bulk::decompress(&comp, payload.len() + 64).unwrap(), payload);
+        assert_eq!(
+            zstd::bulk::decompress(&comp, payload.len() + 64).unwrap(),
+            payload
+        );
     }
 }
 
@@ -316,7 +360,11 @@ fn decompression_bomb_is_refused_by_the_cap() {
     // tests.
     let bomb = vec![0u8; 8 << 20]; // 8 MiB of zeros -> a tiny frame
     let frame = zstd::bulk::compress(&bomb, 19).unwrap();
-    assert!(frame.len() < 4096, "expected a tiny bomb frame, got {}", frame.len());
+    assert!(
+        frame.len() < 4096,
+        "expected a tiny bomb frame, got {}",
+        frame.len()
+    );
     assert!(
         decompress_capped(&frame, 64 * 1024).is_err(),
         "an 8 MiB output under a 64 KiB cap must be refused"
@@ -339,9 +387,15 @@ fn malformed_frames_error_not_panic() {
     bad_magic[0] ^= 0xFF;
     assert!(decompress(&bad_magic).is_err(), "bad magic");
 
-    assert!(decompress(&good[..good.len() / 2]).is_err(), "truncated frame");
+    assert!(
+        decompress(&good[..good.len() / 2]).is_err(),
+        "truncated frame"
+    );
     assert!(decompress(&[0u8]).is_err(), "a single stray byte");
-    assert!(decompress(b"not a zstd frame at all").is_err(), "arbitrary bytes");
+    assert!(
+        decompress(b"not a zstd frame at all").is_err(),
+        "arbitrary bytes"
+    );
 
     // Reserved bit (Frame_Header_Descriptor bit 3) set must be rejected (§3.1.1.1.1).
     let mut reserved = good.clone();

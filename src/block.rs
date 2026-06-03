@@ -4,11 +4,11 @@
 //! `Block_Type`, bits 3-23 `Block_Size`. Raw and RLE blocks are trivial;
 //! compressed blocks are a literals section followed by a sequences section.
 
-#[allow(unused_imports)]
-use crate::alloc_prelude::*;
 use super::error::{Result, ZstdError};
 use super::huff::HuffTable;
 use super::{literals, sequences};
+#[allow(unused_imports)]
+use crate::alloc_prelude::*;
 
 /// Per-frame decode state shared across blocks (entropy-table reuse +
 /// repeat offsets), plus the growing output (which doubles as window history).

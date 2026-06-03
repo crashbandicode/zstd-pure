@@ -59,7 +59,11 @@ pub fn compress_seekable(data: &[u8], frame_size: usize, level: i32, checksum: b
     let mut entries: Vec<(u32, u32, u32)> = Vec::new();
     for chunk in data.chunks(frame_size) {
         let frame = compress(chunk, level, false, true);
-        let ck = if checksum { (xxh64(chunk, 0) & 0xFFFF_FFFF) as u32 } else { 0 };
+        let ck = if checksum {
+            (xxh64(chunk, 0) & 0xFFFF_FFFF) as u32
+        } else {
+            0
+        };
         entries.push((frame.len() as u32, chunk.len() as u32, ck));
         out.extend_from_slice(&frame);
     }
@@ -121,7 +125,10 @@ impl SeekTable {
             });
         }
         if read_u32(archive, end - 4) != SEEKABLE_MAGIC {
-            return Err(ZstdError::Invalid { what: "seekable magic", detail: "footer magic mismatch".into() });
+            return Err(ZstdError::Invalid {
+                what: "seekable magic",
+                detail: "footer magic mismatch".into(),
+            });
         }
         let has_checksum = archive[end - 5] & 0x80 != 0;
         let num_frames = read_u32(archive, end - 9) as usize;
@@ -129,17 +136,29 @@ impl SeekTable {
         let content = num_frames
             .checked_mul(entry_size)
             .and_then(|n| n.checked_add(FOOTER_SIZE))
-            .ok_or(ZstdError::Invalid { what: "seek table", detail: "frame count overflow".into() })?;
+            .ok_or(ZstdError::Invalid {
+                what: "seek table",
+                detail: "frame count overflow".into(),
+            })?;
         let frame_total = SKIPPABLE_HEADER + content;
         if frame_total > end {
-            return Err(ZstdError::Invalid { what: "seek table", detail: "table larger than archive".into() });
+            return Err(ZstdError::Invalid {
+                what: "seek table",
+                detail: "table larger than archive".into(),
+            });
         }
         let skip_start = end - frame_total;
         if read_u32(archive, skip_start) != SEEK_TABLE_SKIPPABLE_MAGIC {
-            return Err(ZstdError::Invalid { what: "seek table", detail: "skippable magic mismatch".into() });
+            return Err(ZstdError::Invalid {
+                what: "seek table",
+                detail: "skippable magic mismatch".into(),
+            });
         }
         if read_u32(archive, skip_start + 4) as usize != content {
-            return Err(ZstdError::Invalid { what: "seek table", detail: "skippable size mismatch".into() });
+            return Err(ZstdError::Invalid {
+                what: "seek table",
+                detail: "skippable size mismatch".into(),
+            });
         }
 
         let mut frames = Vec::with_capacity(num_frames);
@@ -149,7 +168,11 @@ impl SeekTable {
         for _ in 0..num_frames {
             let cs = read_u32(archive, p);
             let ds = read_u32(archive, p + 4);
-            let ck = if has_checksum { Some(read_u32(archive, p + 8)) } else { None };
+            let ck = if has_checksum {
+                Some(read_u32(archive, p + 8))
+            } else {
+                None
+            };
             p += entry_size;
             frames.push(SeekFrame {
                 compressed_offset: comp_off,
@@ -183,7 +206,9 @@ impl SeekTable {
 
     /// Total decompressed length of the archive.
     pub fn decompressed_size(&self) -> u64 {
-        self.frames.last().map_or(0, |f| f.decompressed_offset + f.decompressed_size as u64)
+        self.frames
+            .last()
+            .map_or(0, |f| f.decompressed_offset + f.decompressed_size as u64)
     }
 
     /// Index of the frame whose decompressed range contains `offset`, or `None`
@@ -203,7 +228,11 @@ impl SeekTable {
 /// random-access primitive (a reader maps an offset to a frame with
 /// [`SeekTable::frame_for_offset`], decodes just that frame, and takes the slice
 /// it needs). If the table stored a checksum for the frame, it is verified.
-pub fn decompress_seekable_frame(archive: &[u8], table: &SeekTable, index: usize) -> Result<Vec<u8>> {
+pub fn decompress_seekable_frame(
+    archive: &[u8],
+    table: &SeekTable,
+    index: usize,
+) -> Result<Vec<u8>> {
     let f = table.frames.get(index).ok_or(ZstdError::Invalid {
         what: "seek frame index",
         detail: "out of range".into(),
@@ -211,13 +240,19 @@ pub fn decompress_seekable_frame(archive: &[u8], table: &SeekTable, index: usize
     let start = f.compressed_offset as usize;
     let end = start + f.compressed_size as usize;
     if end > archive.len() {
-        return Err(ZstdError::Truncated { what: "seekable frame", needed: end - archive.len() });
+        return Err(ZstdError::Truncated {
+            what: "seekable frame",
+            needed: end - archive.len(),
+        });
     }
     let decoded = decode_one(&archive[start..end], true, f.decompressed_size as usize + 1)?;
     if let Some(expected) = f.checksum {
         let computed = (xxh64(&decoded.data, 0) & 0xFFFF_FFFF) as u32;
         if computed != expected {
-            return Err(ZstdError::ChecksumMismatch { stored: expected, computed });
+            return Err(ZstdError::ChecksumMismatch {
+                stored: expected,
+                computed,
+            });
         }
     }
     Ok(decoded.data)
@@ -230,7 +265,9 @@ mod tests {
 
     fn corpus() -> Vec<Vec<u8>> {
         let text = b"the quick brown fox jumps over the lazy dog. ".repeat(300);
-        let structured: Vec<u8> = (0..50_000u32).flat_map(|i| (i % 251).to_le_bytes()).collect();
+        let structured: Vec<u8> = (0..50_000u32)
+            .flat_map(|i| (i % 251).to_le_bytes())
+            .collect();
         vec![
             Vec::new(),
             b"x".to_vec(),
@@ -250,7 +287,11 @@ mod tests {
                 for &checksum in &[false, true] {
                     let archive = compress_seekable(&data, fs, 9, checksum);
                     // Whole-archive decode through our (multi-frame + skippable) decoder.
-                    assert_eq!(decompress(&archive).unwrap(), data, "self decode (fs={fs}, ck={checksum})");
+                    assert_eq!(
+                        decompress(&archive).unwrap(),
+                        data,
+                        "self decode (fs={fs}, ck={checksum})"
+                    );
 
                     let table = SeekTable::parse(&archive).expect("parse seek table");
                     assert_eq!(table.decompressed_size(), data.len() as u64);
@@ -276,7 +317,9 @@ mod tests {
     /// just that frame yields the right bytes — without touching the prefix.
     #[test]
     fn random_access_by_offset() {
-        let data: Vec<u8> = (0..40_000u32).flat_map(|i| (i.wrapping_mul(2654435761) >> 13).to_le_bytes()).collect();
+        let data: Vec<u8> = (0..40_000u32)
+            .flat_map(|i| (i.wrapping_mul(2654435761) >> 13).to_le_bytes())
+            .collect();
         let archive = compress_seekable(&data, 4096, 6, true);
         let table = SeekTable::parse(&archive).unwrap();
         assert!(table.num_frames() > 1, "expected multiple frames");
@@ -284,7 +327,10 @@ mod tests {
         for &off in &[0u64, 1, 4095, 4096, 10_000, (data.len() - 1) as u64] {
             let idx = table.frame_for_offset(off).expect("offset within range");
             let f = table.frames()[idx];
-            assert!(off >= f.decompressed_offset && off < f.decompressed_offset + f.decompressed_size as u64);
+            assert!(
+                off >= f.decompressed_offset
+                    && off < f.decompressed_offset + f.decompressed_size as u64
+            );
             let frame_data = decompress_seekable_frame(&archive, &table, idx).unwrap();
             let want = &data[f.decompressed_offset as usize
                 ..f.decompressed_offset as usize + f.decompressed_size as usize];
@@ -293,7 +339,11 @@ mod tests {
             let local = (off - f.decompressed_offset) as usize;
             assert_eq!(frame_data[local], data[off as usize]);
         }
-        assert_eq!(table.frame_for_offset(data.len() as u64), None, "past-the-end offset");
+        assert_eq!(
+            table.frame_for_offset(data.len() as u64),
+            None,
+            "past-the-end offset"
+        );
     }
 
     /// A stored checksum catches a corrupted frame on read.
@@ -307,7 +357,10 @@ mod tests {
         archive[f0.compressed_offset as usize + 6] ^= 0xFF;
         // Re-parse (the seek table is intact) and decode the tampered frame.
         let table = SeekTable::parse(&archive).unwrap();
-        assert!(decompress_seekable_frame(&archive, &table, 0).is_err(), "corruption must be detected");
+        assert!(
+            decompress_seekable_frame(&archive, &table, 0).is_err(),
+            "corruption must be detected"
+        );
     }
 
     /// A buffer without a valid footer is rejected, not mis-parsed.
