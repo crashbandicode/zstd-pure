@@ -146,16 +146,19 @@ pure-Rust peer (`ruzstd`), decoding a frame produced by our own encoder
 
 | decoder | throughput | notes |
 |---|---:|---|
-| `zstd_pure` | ~0.6 GiB/s | this crate, after the reverse-reader load fast-path |
-| `ruzstd` (pure Rust) | ~0.7 GiB/s | the pure-Rust peer |
-| libzstd (C, SIMD) | ~2.4 GiB/s | the C reference |
+| `zstd_pure` | ~0.65 GiB/s | this crate, after both decode hot-spot fixes |
+| `ruzstd` (pure Rust) | ~0.65 GiB/s | the pure-Rust peer |
+| libzstd (C, SIMD) | ~2.2 GiB/s | the C reference |
 
-Replacing the reverse `BIT_DStream` reader's per-reload byte-by-byte load with a
-single 8-byte load (`bits::read_u64_le`, the FSE/Huffman decode hot path) lifted
-our decode from ~0.43 to ~0.6 GiB/s, narrowing the gap to the pure-Rust peer
-`ruzstd` from ~1.4× to ~1.1×. libzstd's SIMD still leads by ~4×. The remaining
-pure-Rust headroom is the other named hot spot — **sequence decode** — left as
-the next lever. The comparison is wired into `benches/compression.rs`'s
+Both named decode hot spots were optimized: (1) the reverse `BIT_DStream`
+reader's per-reload load (`bits::read_u64_le`) became a single 8-byte load
+instead of a byte-by-byte OR loop, and (2) the LZ match copy
+(`sequences::decode`) now bulk-copies a **non-overlapping** back-reference with
+one `extend_from_within` (a memcpy), keeping the byte-by-byte loop only for
+genuinely overlapping copies (`offset < length`). Together these lifted decode
+from ~0.43 GiB/s to ~0.65 GiB/s, **closing the gap to the pure-Rust peer
+`ruzstd`** (we now match it, edging ahead on our own frames). libzstd's SIMD
+still leads by ~3–4×. The comparison is wired into `benches/compression.rs`'s
 `decompress` group: `cargo bench --bench compression -- decompress`.
 
 The encoder is slower than libzstd at low/mid levels (a simpler parse, no SIMD).

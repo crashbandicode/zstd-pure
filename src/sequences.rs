@@ -252,9 +252,19 @@ pub fn decode(
             });
         }
         let start = out.len() - actual_offset;
-        for k in 0..match_len {
-            let b = out[start + k];
-            out.push(b);
+        if actual_offset >= match_len {
+            // Non-overlapping back-reference: the whole match is already present,
+            // so copy it in one bulk move (a memcpy) instead of byte-by-byte.
+            out.extend_from_within(start..start + match_len);
+        } else {
+            // Overlapping back-reference (offset < length): each copied byte may
+            // feed a later one in the same match, so it must replicate one byte at
+            // a time. Reserve up front to avoid repeated growth checks.
+            out.reserve(match_len);
+            for k in 0..match_len {
+                let b = out[start + k];
+                out.push(b);
+            }
         }
 
         if i + 1 < nb_seq {
