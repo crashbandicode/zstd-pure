@@ -154,11 +154,19 @@ impl<'a> ReverseBitReader<'a> {
 }
 
 /// Read 8 bytes little-endian at `i`, zero-padding if the slice is short.
+///
+/// Called on every [`ReverseBitReader::reload`] — the FSE/Huffman decode hot
+/// path. The common case (a full 8-byte window in range) is a single unaligned
+/// load; the byte-by-byte zero-padding only runs for the short tail near the
+/// start of the stream. The two paths produce identical values when all 8 bytes
+/// are present.
 #[inline]
 fn read_u64_le(src: &[u8], i: usize) -> u64 {
+    if i + 8 <= src.len() {
+        return u64::from_le_bytes(src[i..i + 8].try_into().unwrap());
+    }
     let mut v = 0u64;
-    let end = (i + 8).min(src.len());
-    for (k, &b) in src[i..end].iter().enumerate() {
+    for (k, &b) in src[i..].iter().enumerate() {
         v |= (b as u64) << (8 * k);
     }
     v

@@ -141,19 +141,22 @@ shape matters, absolute numbers are machine-specific**:
 | compress L19 | ~2.4 MiB/s | ~3 MiB/s   |
 
 **Decode**, same corpus, comparing both the C reference (libzstd) and the
-pure-Rust peer (`ruzstd`), decoding a frame produced by our own encoder:
+pure-Rust peer (`ruzstd`), decoding a frame produced by our own encoder
+(same-run medians — this dev box is noisy, so treat these as ±20 %):
 
 | decoder | throughput | notes |
 |---|---:|---|
-| `zstd_pure` | ~0.43 GiB/s | this crate |
-| `ruzstd` (pure Rust) | ~0.59 GiB/s | ~1.4× faster — the pure-Rust peer |
-| libzstd (C, SIMD) | ~2.2 GiB/s | ~5× faster |
+| `zstd_pure` | ~0.6 GiB/s | this crate, after the reverse-reader load fast-path |
+| `ruzstd` (pure Rust) | ~0.7 GiB/s | the pure-Rust peer |
+| libzstd (C, SIMD) | ~2.4 GiB/s | the C reference |
 
-So we trail the pure-Rust peer `ruzstd` by ~1.4× on decode and the C reference by
-~5×. That gap is the **decode hot spots** — sequence decode + the reverse
-`BIT_DStream` bit reader — the next optimization lever (the comparison is wired
-into `benches/compression.rs`'s `decompress` group: `cargo bench --bench
-compression -- decompress`).
+Replacing the reverse `BIT_DStream` reader's per-reload byte-by-byte load with a
+single 8-byte load (`bits::read_u64_le`, the FSE/Huffman decode hot path) lifted
+our decode from ~0.43 to ~0.6 GiB/s, narrowing the gap to the pure-Rust peer
+`ruzstd` from ~1.4× to ~1.1×. libzstd's SIMD still leads by ~4×. The remaining
+pure-Rust headroom is the other named hot spot — **sequence decode** — left as
+the next lever. The comparison is wired into `benches/compression.rs`'s
+`decompress` group: `cargo bench --bench compression -- decompress`.
 
 The encoder is slower than libzstd at low/mid levels (a simpler parse, no SIMD).
 At L19 both run an optimal parse and land in the same ballpark (~2–3 MiB/s); ours
