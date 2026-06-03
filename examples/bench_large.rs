@@ -8,7 +8,7 @@
 //! vs libzstd; minutes on the medium-match profiles at L19).
 
 use std::time::Instant;
-use zstd_pure::compress;
+use zstd_pure::{compress, compress_long};
 
 /// Deterministic LCG (no wall-clock / RNG syscalls, so both runs see identical
 /// inputs).
@@ -89,33 +89,75 @@ fn binstruct() -> Vec<u8> {
     out
 }
 
+/// A distinctive ~1.5 MB block, ~10 MB of unrelated filler, then the same block
+/// again — its second copy sits > 8 MiB back, beyond the 8 MiB window plain
+/// `compress` is capped to. Only `compress_long` (whose LDM index + larger
+/// advertised window reach that far) can link the two copies; plain compression
+/// must re-compress the second from scratch. The block is templated text, so all
+/// three encoders compress each copy's *internal* redundancy — the LDM win is
+/// purely the cross-gap duplicate (the gap libzstd closes with its larger native
+/// window and our plain `compress` cannot).
+fn far_dup() -> Vec<u8> {
+    let mut r = Rng(0x0bad_f00d_1234_5678);
+    let mut block = Vec::new();
+    while block.len() < 1_500_000 {
+        block.extend_from_slice(
+            format!("rec={:08} val={} tag={}\n", block.len(), r.upto(1_000_000), r.upto(256)).as_bytes(),
+        );
+    }
+    let mut filler = Vec::new();
+    while filler.len() < 10_000_000 {
+        filler.extend_from_slice(
+            format!("fill {} {} {}\n", r.upto(1 << 30), r.upto(1 << 30), r.upto(1 << 30)).as_bytes(),
+        );
+    }
+    let mut out = Vec::with_capacity(block.len() * 2 + filler.len());
+    out.extend_from_slice(&block);
+    out.extend_from_slice(&filler);
+    out.extend_from_slice(&block);
+    out
+}
+
 fn main() {
     let profiles: Vec<(&str, Vec<u8>)> = vec![
         ("revisions", revisions()),
         ("logs", logs()),
         ("binstruct", binstruct()),
+        ("far_dup", far_dup()),
     ];
     for level in [13i32, 19] {
         println!("\n=== level {level} ===");
-        println!("{:<11} {:>10} {:>11} {:>8} {:>11} {:>9}", "profile", "raw", "zstd_pure", "ms", "libzstd", "ratio");
+        println!(
+            "{:<11} {:>10} {:>11} {:>11} {:>8} {:>11} {:>9}",
+            "profile", "raw", "pure", "pure+ldm", "ms", "libzstd", "ldm/lz"
+        );
         for (name, data) in &profiles {
-            let t = Instant::now();
             let ours = compress(data, level, false, true);
+            let t = Instant::now();
+            let long = compress_long(data, level, false, true);
             let ms = t.elapsed().as_millis();
             let lz = zstd::bulk::compress(data, level).unwrap().len();
+            // Both our encodings must decode through libzstd (proving the offsets,
+            // including LDM's large ones, stay within the advertised window).
             assert_eq!(
                 zstd::bulk::decompress(&ours, data.len() + 64).unwrap(),
                 *data,
-                "{name}: libzstd round-trip failed"
+                "{name}: compress round-trip failed"
+            );
+            assert_eq!(
+                zstd::bulk::decompress(&long, data.len() + 64).unwrap(),
+                *data,
+                "{name}: compress_long round-trip failed"
             );
             println!(
-                "{:<11} {:>10} {:>11} {:>8} {:>11} {:>8.3}x",
+                "{:<11} {:>10} {:>11} {:>11} {:>8} {:>11} {:>8.3}x",
                 name,
                 data.len(),
                 ours.len(),
+                long.len(),
                 ms,
                 lz,
-                ours.len() as f64 / lz as f64
+                long.len() as f64 / lz as f64
             );
         }
     }

@@ -79,6 +79,28 @@ real_corpus -- --ignored --nocapture`.
 
 [silesia]: https://github.com/MiloszKrajewski/SilesiaCorpus
 
+## Long-distance matching (`compress_long`)
+
+The opt-in `compress_long` adds matches *beyond* plain `compress`'s 8 MiB window
+(advertising a window up to log 27 — see Conformance in the README). It is purely
+**additive**: on inputs that fit the regular window it is byte-identical to
+`compress`, and it recovers far-apart duplicates the window-bounded finders
+can't. From `examples/bench_large` (`far_dup`: a 1.5 MB block, ~10 MB of filler,
+then the same block again — its copy sits ~11.5 MB back):
+
+| level | profile | raw | `compress` | `compress_long` | libzstd |
+|------:|---------|----------:|-----------:|----------------:|--------:|
+| 13 | far_dup | 13,000,077 | 5,342,352 | **4,903,173** | 5,190,835 |
+| 19 | far_dup | 13,000,077 | 4,973,271 | **4,614,404** | 4,562,735 |
+
+`compress` (8 MiB window) must re-compress the second copy from scratch;
+`compress_long` links it across the gap. At L13 that **beats libzstd** (0.945×):
+libzstd's own L13 window doesn't reach 11.5 MB either, but our LDM index does. At
+L19 libzstd's larger native window closes the gap and `compress_long` matches it
+(1.011×). The in-window profiles (`revisions`, `logs`, `binstruct`, all < 8 MiB)
+come out **byte-identical** to `compress`, confirming LDM never regresses data
+that already fits the regular window.
+
 ## Throughput (indicative)
 
 Criterion, 256 KiB mixed corpus, optimized build on one dev machine — **relative

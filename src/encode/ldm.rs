@@ -68,14 +68,20 @@ impl LdmState {
     }
 
     /// Find non-overlapping long matches for positions in `range`, updating the
-    /// index as it scans. Each returned match lies fully inside `range` (so it
-    /// never crosses the block boundary) and has an `offset <= window`; matches
-    /// are sorted by position. Sources may be in earlier blocks (the index
-    /// persists across the frame).
+    /// index as it scans. A match is emitted only when its `offset` is in
+    /// `(min_offset, window]` — LDM contributes *only* matches beyond the regular
+    /// finder's reach (`min_offset`), leaving nearer ones to it, so the two never
+    /// fight over a position (forcing a near LDM match where the regular parser
+    /// would do better can *hurt* ratio on periodic data). Each returned match
+    /// lies fully inside `range` (never crossing the block boundary); matches are
+    /// sorted by position. Sources may be in earlier blocks (the index persists
+    /// across the frame). The index is updated at every gate point regardless, so
+    /// a near hit still seeds the slot for a later, farther match.
     pub fn generate(
         &mut self,
         data: &[u8],
         range: core::ops::Range<usize>,
+        min_offset: usize,
         window: usize,
     ) -> Vec<LdmSeq> {
         let (start, end) = (range.start, range.end);
@@ -101,7 +107,7 @@ impl LdmState {
             if cand >= 0 {
                 let c = cand as usize;
                 let offset = p - c;
-                if offset >= 1 && offset <= window {
+                if offset > min_offset && offset <= window {
                     // Verify + forward-extend, bounded by the block end so the
                     // match never crosses into the next block.
                     let max_len = end - p;
@@ -140,7 +146,7 @@ mod tests {
         data.extend_from_slice(&block);
 
         let mut ldm = LdmState::new(24);
-        let matches = ldm.generate(&data, 0..data.len(), 1 << 24);
+        let matches = ldm.generate(&data, 0..data.len(), 0, 1 << 24);
 
         let m = matches
             .iter()
@@ -163,7 +169,7 @@ mod tests {
         let data: Vec<u8> = (0..300_000u32).map(|i| (i.wrapping_mul(2654435761) >> 9) as u8).collect();
         let window = 1usize << 24;
         let mut ldm = LdmState::new(24);
-        let matches = ldm.generate(&data, 0..data.len(), window);
+        let matches = ldm.generate(&data, 0..data.len(), 0, window);
         let mut prev_end = 0usize;
         for m in &matches {
             let (p, o, l) = (m.pos, m.offset as usize, m.len);

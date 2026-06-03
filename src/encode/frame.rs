@@ -188,6 +188,11 @@ pub fn compress_long(data: &[u8], level: i32, checksum: bool, expect_magic: bool
     let window_log = params.window_log;
     let max_offset = 1usize << window_log;
     let split_depth = split_depth_for(params.strategy);
+    // LDM contributes only matches *beyond* the regular finder's reach (the
+    // level's nominal, un-bumped window); nearer matches are left to the finder,
+    // which parses them better. This keeps LDM purely additive — it never forces
+    // a near match where the regular parse would do better.
+    let regular_reach = 1usize << super::params::params_for_level(level, data.len()).window_log;
 
     let mut out = Vec::with_capacity(data.len() / 2 + 64);
     if expect_magic {
@@ -214,7 +219,7 @@ pub fn compress_long(data: &[u8], level: i32, checksum: bool, expect_magic: bool
 
             // Generate this block's long matches (updating the index), then parse
             // the block with them injected and the gaps filled by the finder.
-            let matches = ldm.generate(data, start..end, max_offset);
+            let matches = ldm.generate(data, start..end, regular_reach, max_offset);
             let mut comp = Vec::new();
             match write_compressed_block_ldm(
                 &mut comp, last, data, start..end, &mut finder, max_offset, &state, split_depth,
