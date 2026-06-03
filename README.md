@@ -34,7 +34,7 @@ libzstd, which implements RFC 8878. Notable conformance points:
 - [x] Output ceiling (`decompress_capped`) against decompression bombs
 - [x] Frame inspection without decoding the body (`frame_header`) — **T1.4**
 - [x] Dictionary decode (raw-content + structured/tagged) — **T1.1**
-- [x] Streaming / bounded-memory sliding-window decode + `io::Read` — **T1.2** (`std` and `no_std`, via the crate's `io::Read` shim)
+- [x] Streaming / bounded-memory sliding-window decode + `io::Read` — **T1.2** (`std` and `no_std`, via the crate's `io::Read` shim); verified through `compress_long`'s large (≤ log 27) windows and that a frame *declaring* a 128 MiB window with tiny content stays bounded by its content (no over-allocation) — **T4.2**
 - [x] `no_std` + `alloc` (behind a default `std` feature) — **T1.3**
 - [x] Robustness harness (corpus matrix + randomized never-panic + oracle) — **T1.5**
 - [x] Seekable format (zstd `contrib/seekable_format`): `compress_seekable` (independent per-chunk frames + a seek-table skippable frame) and random access — `SeekTable::parse` + `decompress_seekable_frame`, with optional per-frame `XXH64`. The archive is a conformant multi-frame stream a standard decoder reads end-to-end

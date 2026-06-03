@@ -410,4 +410,86 @@ mod tests {
         let mut sink = Vec::new();
         assert!(bad.read_to_end(&mut sink).is_err());
     }
+
+    /// A deterministic PRNG producing incompressible bytes (so the only available
+    /// match is a deliberately-planted far duplicate).
+    fn prng(n: usize, mut s: u64) -> Vec<u8> {
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = s;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                (z ^ (z >> 31)) as u8
+            })
+            .collect()
+    }
+
+    /// `compress_long` advertises a window beyond 8 MiB and emits a back-reference
+    /// at a > 8 MiB offset; the streaming decoder must reconstruct it through its
+    /// sliding window at the large window log (the existing LDM tests only exercise
+    /// the one-shot decoder + libzstd). — HANDOFF §4.2a
+    #[test]
+    fn streaming_decode_of_compress_long_far_repeat() {
+        let chunk = prng(512 * 1024, 0x00C0_FFEE);
+        let filler = prng(9_000_000, 0x00F1_11E2);
+        let mut data = Vec::with_capacity(chunk.len() * 2 + filler.len());
+        data.extend_from_slice(&chunk);
+        data.extend_from_slice(&filler);
+        data.extend_from_slice(&chunk); // its copy sits ~9.5 MiB back (> 8 MiB)
+
+        // Level 1 keeps the parse cheap; the point is the decode path, not ratio.
+        let frame = crate::compress_long(&data, 1, true, true);
+        // The frame must advertise a window past 8 MiB (so the far offset is legal).
+        let h = crate::frame_header(&frame).unwrap();
+        assert!(h.window_size > (8 << 20), "expected a > 8 MiB window, got {}", h.window_size);
+
+        let mut dec = StreamingDecoder::new(&frame).unwrap();
+        assert_eq!(dec.window_size(), h.window_size as usize);
+        let mut got = Vec::new();
+        dec.read_to_end(&mut got).unwrap();
+        assert_eq!(got, data, "streaming decode of a large-window LDM frame");
+        // Cross-check the one-shot path agrees.
+        assert_eq!(decompress(&frame).unwrap(), data);
+    }
+
+    /// A frame that *declares* a 128 MiB (log 27) window but carries tiny content
+    /// must not force a 128 MiB allocation — the decoder grows its buffer to the
+    /// content, not the declared window. Hand-crafted because neither encoder
+    /// advertises a window so much larger than its content. — HANDOFF §4.2b
+    #[test]
+    fn streaming_decode_bounded_at_declared_128mib_window() {
+        let payload = b"tiny payload inside a frame that declares a 128 MiB window. ".repeat(20);
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&0xFD2F_B528u32.to_le_bytes()); // magic
+        // FHD: fcs_flag 0, single_segment 0, no checksum, no dict id.
+        frame.push(0x00);
+        // Window descriptor: exponent = window_log - 10 = 17 (→ log 27), mantissa 0.
+        frame.push((17u8) << 3);
+        // One raw, last block: Last_Block=1 (bit 0), Block_Type=Raw=0 (bits 1-2),
+        // Block_Size in bits 3+.
+        let bh = 1u32 | ((payload.len() as u32) << 3);
+        frame.extend_from_slice(&bh.to_le_bytes()[..3]);
+        frame.extend_from_slice(&payload);
+
+        // It declares the full 128 MiB window...
+        let h = crate::frame_header(&frame).unwrap();
+        assert_eq!(h.window_size, 1u64 << 27);
+
+        let mut dec = StreamingDecoder::new(&frame).unwrap();
+        assert_eq!(dec.window_size(), 1 << 27);
+        let mut got = Vec::new();
+        dec.read_to_end(&mut got).unwrap();
+        assert_eq!(got, payload);
+        // ...but the working buffer tracks the content, not the declared window.
+        assert!(
+            dec.buffered_len() <= payload.len() + 4096,
+            "decoder over-allocated: {} for {}-byte content",
+            dec.buffered_len(),
+            payload.len()
+        );
+        // libzstd (default windowLogMax 27) and our one-shot path also accept it.
+        assert_eq!(decompress(&frame).unwrap(), payload);
+        assert_eq!(zstd::bulk::decompress(&frame, payload.len() + 64).unwrap(), payload);
+    }
 }

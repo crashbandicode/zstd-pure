@@ -17,8 +17,8 @@
 use std::io::Read;
 
 use zstd_pure::{
-    compress as our_compress, decompress, decompress_capped, decompress_with_dict, Dictionary,
-    StreamingDecoder,
+    compress as our_compress, compress_long as our_compress_long, decompress, decompress_capped,
+    decompress_with_dict, frame_header, Dictionary, StreamingDecoder,
 };
 use zstd::zstd_safe::{CParameter, CCtx};
 
@@ -245,6 +245,39 @@ fn our_encoder_round_trips_through_libzstd_and_self() {
             .unwrap_or_else(|e| panic!("libzstd decode of our frame (len {len}): {e}"));
         assert_eq!(by_libzstd, payload, "libzstd mismatch len {len}");
         assert_eq!(decompress(&frame).unwrap(), payload, "self mismatch len {len}");
+    }
+}
+
+#[test]
+fn our_frames_round_trip_through_the_streaming_decoder() {
+    // (a) Regular `compress`: every profile must also decode through the streaming
+    //     (sliding-window) decoder, not only the one-shot path the encoder sweep
+    //     already covers.
+    for (name, data) in input_profiles() {
+        for &level in &[1i32, 9, 19] {
+            let frame = our_compress(&data, level, level % 2 == 1, true);
+            assert_eq!(stream_decode(&frame), data, "[{name} L{level}] streaming decode of our compress");
+        }
+    }
+
+    // (b) `compress_long`: a 512 KiB chunk, ~9 MiB of filler, then the same chunk
+    //     again — its copy sits ~9.5 MiB back (past the 8 MiB window). The frame
+    //     advertises a > 8 MiB window and emits a large-offset back-reference, so
+    //     the streaming decoder must slide correctly at that window log. — §4.2c
+    let mut rng = Rng::new(0x10D_C0DE);
+    let chunk: Vec<u8> = (0..512 * 1024).map(|_| rng.next_u32() as u8).collect();
+    let filler: Vec<u8> = (0..9_000_000).map(|_| rng.next_u32() as u8).collect();
+    let mut data = Vec::with_capacity(chunk.len() * 2 + filler.len());
+    data.extend_from_slice(&chunk);
+    data.extend_from_slice(&filler);
+    data.extend_from_slice(&chunk);
+    for &checksum in &[false, true] {
+        let frame = our_compress_long(&data, 1, checksum, true);
+        let h = frame_header(&frame).unwrap();
+        assert!(h.window_size > (8 << 20), "compress_long should advertise a > 8 MiB window");
+        assert_eq!(stream_decode(&frame), data, "streaming decode of our LDM frame (ck{checksum})");
+        // libzstd (default windowLogMax 27) agrees.
+        assert_eq!(zstd::bulk::decompress(&frame, data.len() + 64).unwrap(), data);
     }
 }
 
