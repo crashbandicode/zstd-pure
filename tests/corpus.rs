@@ -306,3 +306,45 @@ fn oracle_on_random_payloads() {
         assert_eq!(zstd::bulk::decompress(&comp, payload.len() + 64).unwrap(), payload);
     }
 }
+
+#[test]
+fn decompression_bomb_is_refused_by_the_cap() {
+    // A highly compressible run produces a tiny frame that regenerates far more
+    // than its size. `decompress_capped` with a ceiling below the output must
+    // refuse it (the decompression-bomb defense) and accept it once the ceiling is
+    // sufficient — the explicit, named complement to the streaming bounded-window
+    // tests.
+    let bomb = vec![0u8; 8 << 20]; // 8 MiB of zeros -> a tiny frame
+    let frame = zstd::bulk::compress(&bomb, 19).unwrap();
+    assert!(frame.len() < 4096, "expected a tiny bomb frame, got {}", frame.len());
+    assert!(
+        decompress_capped(&frame, 64 * 1024).is_err(),
+        "an 8 MiB output under a 64 KiB cap must be refused"
+    );
+    assert_eq!(
+        decompress_capped(&frame, (8 << 20) + 64).unwrap(),
+        bomb,
+        "a sufficient cap decodes the frame"
+    );
+}
+
+#[test]
+fn malformed_frames_error_not_panic() {
+    // Every malformed input must return Err from the public decode API (and, being
+    // a normal test, must not panic) — explicit, named cases complementing the
+    // randomized never-panic sweep above.
+    let good = zstd::bulk::compress(b"content worth corrupting in a few ways".as_ref(), 3).unwrap();
+
+    let mut bad_magic = good.clone();
+    bad_magic[0] ^= 0xFF;
+    assert!(decompress(&bad_magic).is_err(), "bad magic");
+
+    assert!(decompress(&good[..good.len() / 2]).is_err(), "truncated frame");
+    assert!(decompress(&[0u8]).is_err(), "a single stray byte");
+    assert!(decompress(b"not a zstd frame at all").is_err(), "arbitrary bytes");
+
+    // Reserved bit (Frame_Header_Descriptor bit 3) set must be rejected (§3.1.1.1.1).
+    let mut reserved = good.clone();
+    reserved[4] |= 0b0000_1000;
+    assert!(decompress(&reserved).is_err(), "reserved FHD bit set");
+}

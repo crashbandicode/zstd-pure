@@ -1,4 +1,8 @@
 #![cfg_attr(not(feature = "std"), no_std)]
+// The codec is 100% safe Rust; forbid `unsafe` so that stays a compiler-enforced,
+// CI-checkable guarantee (a decompression library handling hostile input is a
+// much easier thing to trust when it cannot contain UB).
+#![forbid(unsafe_code)]
 //! A pure-Rust Zstandard ([RFC 8878]) codec, implemented from the specification
 //! (no GPL / Switch-Toolbox code). It exists so the crate can decode Nintendo's
 //! **MeshCodec** mesh stream — a custom container that reuses zstd's block and
