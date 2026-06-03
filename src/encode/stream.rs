@@ -27,18 +27,28 @@
 //! consumed in block-sized steps internally, so a single huge [`push`] does not
 //! spike memory.
 //!
-//! Long-distance matching is not yet wired in (it needs a whole-input index), so a
-//! streamed frame uses the regular window-bounded finder only.
+//! Long-distance matching is available via [`with_options_long`]: a coarse
+//! content-defined index ([`super::ldm`]) contributes matches at offsets *beyond*
+//! the regular window, and the frame advertises a larger window to admit them —
+//! the streaming analogue of [`compress_long`](crate::compress_long). Because LDM
+//! matches reach back across the advertised window, the LDM encoder retains that
+//! much history (so a larger window costs proportionally more memory). (The LDM
+//! path currently retains *all* input; bounding it by sliding the index is a
+//! follow-up — the regular path is already bounded.)
 //!
 //! [`push`]: StreamingEncoder::push
 //! [`finish`]: StreamingEncoder::finish
+//! [`with_options_long`]: StreamingEncoder::with_options_long
 
 #[allow(unused_imports)]
 use crate::alloc_prelude::*;
 
 use super::super::frame::ZSTD_MAGIC;
 use super::super::xxhash::Xxh64;
-use super::block::{write_compressed_block, write_raw_block, write_store_block, EncState, BLOCK_SIZE_MAX};
+use super::block::{
+    write_compressed_block, write_compressed_block_ldm, write_raw_block, write_store_block, EncState,
+    BLOCK_SIZE_MAX,
+};
 use super::frame::{split_depth_for, write_frame_header_streaming};
 
 /// A block-by-block, incremental single-frame encoder mirroring
@@ -56,9 +66,18 @@ pub struct StreamingEncoder {
     checksum: bool,
     /// Level parameters, kept so the finder can be rebuilt after a slide.
     params: super::params::CParams,
-    /// Frame window (back-reference reach); fixed for the level so it never
-    /// depends on how much input eventually arrives.
+    /// Advertised frame window (max back-reference reach); fixed for the level so
+    /// it never depends on how much input eventually arrives. Equals
+    /// `regular_reach` without LDM; larger (the LDM window) with it.
     max_offset: usize,
+    /// The regular finder's search reach. Equals `max_offset` normally; with LDM
+    /// it is the smaller regular window — the finder fills the near gaps while the
+    /// LDM index supplies the far (`> regular_reach`) matches.
+    regular_reach: usize,
+    /// Coarse long-distance-matching index, when enabled (`with_options_long`).
+    /// Persists across blocks; contributes matches at offsets beyond
+    /// `regular_reach` up to `max_offset`.
+    ldm: Option<super::ldm::LdmState>,
     /// Block-splitter recursion depth for this level's strategy.
     split_depth: usize,
     /// Retained input: the bytes at absolute positions `[dropped, dropped +
@@ -116,6 +135,54 @@ impl StreamingEncoder {
             checksum,
             params,
             max_offset,
+            regular_reach: max_offset,
+            ldm: None,
+            split_depth,
+            input: Vec::new(),
+            dropped: 0,
+            emitted: 0,
+            out,
+            finder: super::lz::Finder::new(&params),
+            state: EncState { rep: [1, 4, 8], seq: super::sequences::SeqCTables::default(), lit: None },
+            hasher: Xxh64::new(0),
+        }
+    }
+
+    /// **Experimental.** Like [`with_options`](Self::with_options) but with
+    /// **long-distance matching** — the streaming analogue of
+    /// [`compress_long`](crate::compress_long). A coarse content-defined index
+    /// contributes matches at offsets *beyond* the regular window, and the frame
+    /// advertises a larger `window_log` (clamped to `[regular window ..= 27]`) to
+    /// admit them; the regular finder fills the near gaps. Decodes through our
+    /// one-shot decoder, our `StreamingDecoder`, and libzstd (default
+    /// `windowLogMax` 27).
+    ///
+    /// LDM matches reach back across the whole advertised window, so the encoder
+    /// **retains that much history** — a larger `window_log` costs proportionally
+    /// more memory. This is newer and less battle-tested than the core paths, so
+    /// the API is marked experimental.
+    pub fn with_options_long(level: i32, checksum: bool, expect_magic: bool, window_log: u32) -> Self {
+        let params = super::params::params_for_level(level, usize::MAX);
+        let regular_reach = 1usize << params.window_log;
+        // The advertised LDM window: at least the regular window (else LDM adds no
+        // reach), at most the portable LDM cap. Fixed up front (it goes in the
+        // header), so the frame stays independent of total size.
+        let window_log = window_log.clamp(params.window_log, super::params::LDM_MAX_WINDOW_LOG);
+        let max_offset = 1usize << window_log;
+        let split_depth = split_depth_for(params.strategy);
+
+        let mut out = Vec::new();
+        if expect_magic {
+            out.extend_from_slice(&ZSTD_MAGIC.to_le_bytes());
+        }
+        write_frame_header_streaming(&mut out, checksum, window_log);
+
+        StreamingEncoder {
+            checksum,
+            params,
+            max_offset,
+            regular_reach,
+            ldm: Some(super::ldm::LdmState::new(window_log)),
             split_depth,
             input: Vec::new(),
             dropped: 0,
@@ -166,6 +233,12 @@ impl StreamingEncoder {
     /// tables consistent with the slid buffer — correct for every strategy,
     /// including the binary tree, with no bespoke index-shifting.
     fn maybe_slide(&mut self) {
+        // LDM path: a slide must also rebase/rebuild the coarse index, which lands
+        // in a follow-up — for now the LDM encoder retains all input (its matches
+        // already respect the advertised window, so output is still correct).
+        if self.ldm.is_some() {
+            return;
+        }
         let history = self.emitted - self.dropped;
         if history <= 2 * self.max_offset {
             return;
@@ -214,8 +287,11 @@ impl StreamingEncoder {
         self.out.len()
     }
 
-    /// Bytes of input currently retained. Stays bounded as the stream advances
-    /// (~`2 * window` plus a couple of blocks), independent of the total input.
+    /// Bytes of input currently retained. For the regular encoder this stays
+    /// bounded as the stream advances (~`2 * window` plus a couple of blocks),
+    /// independent of the total input. The LDM encoder
+    /// ([`with_options_long`](Self::with_options_long)) currently retains all
+    /// input (bounded-memory LDM is a follow-up).
     pub fn buffered_input_len(&self) -> usize {
         self.input.len()
     }
@@ -240,16 +316,38 @@ impl StreamingEncoder {
         write_store_block(&mut store, last, &self.input[start_rel..end_rel]);
 
         let mut comp = Vec::new();
-        match write_compressed_block(
-            &mut comp,
-            last,
-            &self.input[..end_rel],
-            start_rel..end_rel,
-            &mut self.finder,
-            self.max_offset,
-            &self.state,
-            self.split_depth,
-        ) {
+        // With LDM: generate this block's long matches (updating the persistent
+        // index), then parse with them injected and the near gaps filled by the
+        // regular finder bounded to `regular_reach` (the LDM matches carry the
+        // far, `> regular_reach`, offsets the advertised window admits). Without
+        // LDM: the regular finder over the full window.
+        let result = if let Some(ldm) = self.ldm.as_mut() {
+            let matches =
+                ldm.generate(&self.input[..end_rel], start_rel..end_rel, self.regular_reach, self.max_offset);
+            write_compressed_block_ldm(
+                &mut comp,
+                last,
+                &self.input[..end_rel],
+                start_rel..end_rel,
+                &mut self.finder,
+                self.regular_reach,
+                &self.state,
+                self.split_depth,
+                &matches,
+            )
+        } else {
+            write_compressed_block(
+                &mut comp,
+                last,
+                &self.input[..end_rel],
+                start_rel..end_rel,
+                &mut self.finder,
+                self.max_offset,
+                &self.state,
+                self.split_depth,
+            )
+        };
+        match result {
             Ok(next) if comp.len() < store.len() => {
                 self.state = next;
                 self.out.extend_from_slice(&comp);
@@ -499,5 +597,88 @@ mod tests {
         assert!(enc2.buffered_input_len() <= bound, "single-push retained too much");
         let whole = enc2.finish();
         assert_eq!(chunked, whole, "sliding frame must be independent of push chunking");
+    }
+
+    /// Incompressible bytes, so the only available match is a deliberately planted
+    /// far duplicate.
+    fn prng(n: usize, mut s: u64) -> Vec<u8> {
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = s;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                (z ^ (z >> 31)) as u8
+            })
+            .collect()
+    }
+
+    /// A 512 KiB chunk, ~9 MiB of filler, then the same chunk — its copy sits
+    /// ~9.5 MiB back, past every regular window.
+    fn far_repeat() -> Vec<u8> {
+        let chunk = prng(512 * 1024, 0x00C0_FFEE);
+        let filler = prng(9_000_000, 0x00F1_11E2);
+        let mut data = Vec::with_capacity(chunk.len() * 2 + filler.len());
+        data.extend_from_slice(&chunk);
+        data.extend_from_slice(&filler);
+        data.extend_from_slice(&chunk);
+        data
+    }
+
+    /// Build a frame via the LDM streaming encoder, pushing in `chunk`-sized writes
+    /// (0 = one write).
+    fn stream_long(data: &[u8], level: i32, checksum: bool, window_log: u32, chunk: usize) -> Vec<u8> {
+        let mut enc = StreamingEncoder::with_options_long(level, checksum, true, window_log);
+        if chunk == 0 {
+            enc.push(data);
+        } else {
+            for part in data.chunks(chunk) {
+                enc.push(part);
+            }
+        }
+        enc.finish()
+    }
+
+    #[test]
+    fn streaming_long_round_trips_and_beats_regular_on_a_far_repeat() {
+        let data = far_repeat();
+        // window_log 24 (16 MiB) covers the ~9.5 MiB-back duplicate.
+        let frame = stream_long(&data, 1, true, 24, 0);
+        let h = crate::frame_header(&frame).unwrap();
+        assert!(h.window_size > (8 << 20), "expected a > 8 MiB window, got {}", h.window_size);
+        assert_round_trips_three_ways(&frame, &data);
+        // The far duplicate is recovered, so the LDM stream is clearly smaller than
+        // the regular stream (whose window can't reach it).
+        let regular = stream(&data, 1, true, 0);
+        assert!(
+            frame.len() + 256 * 1024 < regular.len(),
+            "LDM streaming should recover the far dup: long {} vs regular {}",
+            frame.len(),
+            regular.len()
+        );
+    }
+
+    #[test]
+    fn streaming_long_frame_independent_of_write_chunk_size() {
+        let data = far_repeat();
+        let reference = stream_long(&data, 1, true, 24, 0);
+        for &chunk in &[1usize, 1000, 65_536, BLOCK_SIZE_MAX, 777_777] {
+            assert_eq!(stream_long(&data, 1, true, 24, chunk), reference, "chunk={chunk}");
+        }
+        assert_round_trips_three_ways(&reference, &data);
+    }
+
+    #[test]
+    fn streaming_long_round_trips_ordinary_inputs() {
+        // On inputs that fit the regular window, LDM finds nothing extra, but the
+        // frame (with its larger advertised window) must still round-trip 3 ways.
+        for data in corpus() {
+            for &level in &[1i32, 9] {
+                for &checksum in &[false, true] {
+                    let frame = stream_long(&data, level, checksum, 24, 4096);
+                    assert_round_trips_three_ways(&frame, &data);
+                }
+            }
+        }
     }
 }
