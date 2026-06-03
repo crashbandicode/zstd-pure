@@ -170,6 +170,56 @@ mod tests {
     }
 
     #[test]
+    fn parallel_equals_serial_segmentation() {
+        // The core multithreading guarantee: compress_parallel is *exactly* a
+        // parallelization of "split at fixed byte offsets, compress each segment
+        // with `compress`, concatenate". Pinning it to the serial composition
+        // reduces this function's correctness to `compress`'s (already thoroughly
+        // tested + fuzzed) and proves the split is deterministic and that threading
+        // never perturbs any segment's bytes — independent of how the workers race
+        // or how many cores are present.
+        fn check(data: &[u8], n_jobs: usize, level: i32, checksum: bool) {
+            let jobs = effective_jobs(data.len(), n_jobs);
+            let len = data.len();
+            let mut reference = Vec::new();
+            for i in 0..jobs {
+                let (a, b) = (i * len / jobs, (i + 1) * len / jobs);
+                reference.extend_from_slice(&compress(&data[a..b], level, checksum, true));
+            }
+            assert_eq!(
+                compress_parallel(data, level, n_jobs, checksum, true),
+                reference,
+                "n_jobs={n_jobs} L{level} ck{checksum} len={len}"
+            );
+        }
+        let data = corpus(2 << 20);
+        for &n_jobs in &[2usize, 3, 5, 8] {
+            for &level in &[1i32, 9] {
+                for &checksum in &[false, true] {
+                    check(&data, n_jobs, level, checksum);
+                }
+            }
+        }
+        // The optimal parse (L19) on a smaller input that still splits, so the
+        // composition is exercised at a high level without the debug-build cost of
+        // L19 on the full 2 MiB.
+        check(&corpus(300 * 1024), 2, 19, true);
+    }
+
+    #[test]
+    fn many_segments_round_trip() {
+        // A large input with a high job count fans out into many independent
+        // frames; the concatenated multi-frame stream must still round-trip both
+        // ways (exercises the segmentation + multi-frame decode at scale).
+        let data = corpus(8 << 20); // 8 MiB
+        let jobs = effective_jobs(data.len(), 64);
+        assert!(jobs >= 32, "expected many segments, got {jobs}");
+        let frame = compress_parallel(&data, 1, 64, true, true);
+        assert_eq!(decompress(&frame).unwrap(), data, "self decode of {jobs}-frame stream");
+        assert_eq!(zstd::stream::decode_all(&frame[..]).unwrap(), data, "libzstd decode_all");
+    }
+
+    #[test]
     fn effective_jobs_clamps() {
         // Sub-threshold -> 1; large input honors n_jobs up to the size/cap bounds.
         assert_eq!(effective_jobs(1000, 8), 1);
