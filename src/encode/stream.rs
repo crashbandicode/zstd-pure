@@ -15,11 +15,20 @@
 //! against the input committed up to its boundary, so the finder, entropy-table
 //! threading, and checksum are all functions of the byte stream alone.
 //!
-//! This first cut **retains all input** (it is not yet memory-bounded — the
-//! finder's match tables hold absolute positions into the whole buffer); bounding
-//! memory by sliding the window and rebasing those tables is a later refinement.
-//! Long-distance matching is likewise not yet wired in (it needs a whole-input
-//! index), so a streamed frame uses the regular window-bounded finder only.
+//! Memory is **bounded** — independent of the total (possibly multi-gigabyte)
+//! input. The encoder retains only roughly two windows plus a couple of blocks of
+//! past input: once the retained history grows past `2 * window`, the dead prefix
+//! (older than one window before the last emitted block, so unreachable by any
+//! future back-reference) is dropped and the match finder is **rebuilt over the
+//! retained window** via the same priming path a dictionary uses — uniform across
+//! every strategy (including the binary tree) and reusing already-tested code, so
+//! it cannot reintroduce a position-aliasing bug. (A tighter, rebuild-free bound
+//! via an in-place index reduction is a possible later refinement.) Input is also
+//! consumed in block-sized steps internally, so a single huge [`push`] does not
+//! spike memory.
+//!
+//! Long-distance matching is not yet wired in (it needs a whole-input index), so a
+//! streamed frame uses the regular window-bounded finder only.
 //!
 //! [`push`]: StreamingEncoder::push
 //! [`finish`]: StreamingEncoder::finish
@@ -45,22 +54,32 @@ use super::frame::{split_depth_for, write_frame_header_streaming};
 pub struct StreamingEncoder {
     /// Whether a trailing XXH64 content checksum is written on `finish`.
     checksum: bool,
+    /// Level parameters, kept so the finder can be rebuilt after a slide.
+    params: super::params::CParams,
     /// Frame window (back-reference reach); fixed for the level so it never
     /// depends on how much input eventually arrives.
     max_offset: usize,
     /// Block-splitter recursion depth for this level's strategy.
     split_depth: usize,
-    /// All input written so far (this first cut is not memory-bounded).
+    /// Retained input: the bytes at absolute positions `[dropped, dropped +
+    /// input.len())`. The dead prefix is dropped as the stream advances, so this
+    /// stays bounded (~`2 * window` + a couple of blocks).
     input: Vec<u8>,
-    /// Bytes of `input` already emitted as blocks.
+    /// Absolute count of input bytes dropped off the front of `input` (the base
+    /// `input[0]` corresponds to). Positions handed to the finder are relative to
+    /// `input`, i.e. `absolute - dropped`.
+    dropped: usize,
+    /// Absolute count of input bytes already emitted as blocks.
     emitted: usize,
     /// Compressed output produced but not yet drained (header + emitted blocks,
     /// plus the checksum once `finish` runs).
     out: Vec<u8>,
-    /// Persistent match finder (spans block boundaries up to `max_offset`).
+    /// Persistent match finder (spans block boundaries up to `max_offset`);
+    /// rebuilt over the retained window on each slide.
     finder: super::lz::Finder,
     /// Cross-block encoder state: running repeat offsets + the previous
-    /// compressed block's entropy tables (Repeat / Treeless reuse).
+    /// compressed block's entropy tables (Repeat / Treeless reuse). Holds
+    /// distances, not positions, so it is unaffected by sliding.
     state: EncState,
     /// Streaming content hash for the trailing checksum.
     hasher: Xxh64,
@@ -95,15 +114,22 @@ impl StreamingEncoder {
 
         StreamingEncoder {
             checksum,
+            params,
             max_offset,
             split_depth,
             input: Vec::new(),
+            dropped: 0,
             emitted: 0,
             out,
             finder: super::lz::Finder::new(&params),
             state: EncState { rep: [1, 4, 8], seq: super::sequences::SeqCTables::default(), lit: None },
             hasher: Xxh64::new(0),
         }
+    }
+
+    /// Total input bytes seen so far (`dropped` + what is still retained).
+    fn total(&self) -> usize {
+        self.dropped + self.input.len()
     }
 
     /// Append `data` to the stream, emitting any 128 KiB blocks that are now
@@ -113,11 +139,43 @@ impl StreamingEncoder {
     /// the input was split across `push` calls.
     pub fn push(&mut self, data: &[u8]) {
         self.hasher.update(data);
-        self.input.extend_from_slice(data);
-        while self.input.len() - self.emitted > BLOCK_SIZE_MAX {
+        // Append in block-sized steps and drain after each, so even a single huge
+        // `push` never holds more than the bounded working set at once.
+        for part in data.chunks(BLOCK_SIZE_MAX) {
+            self.input.extend_from_slice(part);
+            self.drain_full_blocks();
+        }
+    }
+
+    /// Emit every block that is now complete, keeping at least one block's worth of
+    /// tail unemitted (so `finish` can flag the last block), and slide the retained
+    /// window afterward to keep memory bounded.
+    fn drain_full_blocks(&mut self) {
+        while self.total() - self.emitted > BLOCK_SIZE_MAX {
             let end = self.emitted + BLOCK_SIZE_MAX;
             self.emit_block(end, false);
+            self.maybe_slide();
         }
+    }
+
+    /// Drop the dead prefix and rebuild the finder once the retained, already-
+    /// emitted history exceeds `2 * window`. The dropped bytes are older than one
+    /// window before the last emitted block, so no future back-reference can reach
+    /// them; afterward exactly one window of history is retained. Rebuilding the
+    /// finder over that window (via the dictionary-priming path) keeps its position
+    /// tables consistent with the slid buffer — correct for every strategy,
+    /// including the binary tree, with no bespoke index-shifting.
+    fn maybe_slide(&mut self) {
+        let history = self.emitted - self.dropped;
+        if history <= 2 * self.max_offset {
+            return;
+        }
+        let drop = history - self.max_offset; // leave exactly one window of history
+        self.input.drain(..drop);
+        self.dropped += drop;
+        self.finder = super::lz::Finder::new(&self.params);
+        let retained_history = self.emitted - self.dropped; // == max_offset
+        self.finder.prime(&self.input, retained_history, self.max_offset);
     }
 
     /// Remove and return the compressed output produced so far (the frame header
@@ -133,17 +191,14 @@ impl StreamingEncoder {
     /// by [`take_output`](Self::take_output). If `take_output` was never called,
     /// the returned buffer is the complete frame.
     pub fn finish(mut self) -> Vec<u8> {
-        if self.input.is_empty() {
+        if self.total() == 0 {
             // A frame must contain at least one block; emit an empty last raw one.
             write_raw_block(&mut self.out, true, &[]);
         } else {
             // `push` already drains to at most one block of tail; this loop is
             // defensive (and a no-op in practice).
-            while self.input.len() - self.emitted > BLOCK_SIZE_MAX {
-                let end = self.emitted + BLOCK_SIZE_MAX;
-                self.emit_block(end, false);
-            }
-            let end = self.input.len();
+            self.drain_full_blocks();
+            let end = self.total();
             self.emit_block(end, true);
         }
         if self.checksum {
@@ -159,29 +214,37 @@ impl StreamingEncoder {
         self.out.len()
     }
 
-    /// Bytes of input currently retained. In this first cut that is the whole
-    /// stream (not yet memory-bounded); a future bounded-memory mode will hold
-    /// only roughly the window plus one block.
+    /// Bytes of input currently retained. Stays bounded as the stream advances
+    /// (~`2 * window` plus a couple of blocks), independent of the total input.
     pub fn buffered_input_len(&self) -> usize {
         self.input.len()
     }
 
-    /// Emit one block covering `input[emitted..end]`, choosing the smaller of a
-    /// compressed or a store block (and committing the compressed block's state
-    /// only when it wins — exactly as [`compress`](crate::compress) does). The
-    /// block is parsed against `input[..end]` so the finder cannot read past the
-    /// committed boundary, which is what makes the output chunk-independent.
+    /// The frame's window size (the back-reference reach / retained-history
+    /// target), mirroring [`StreamingDecoder::window_size`](crate::StreamingDecoder::window_size).
+    pub fn window_size(&self) -> usize {
+        self.max_offset
+    }
+
+    /// Emit one block covering the absolute input range `[emitted, end)`, choosing
+    /// the smaller of a compressed or a store block (and committing the compressed
+    /// block's state only when it wins — exactly as [`compress`](crate::compress)
+    /// does). Positions are translated to the retained buffer (`absolute -
+    /// dropped`); the block is parsed against `input[..end_rel]` so the finder
+    /// cannot read past the committed boundary, which is what makes the output
+    /// chunk-independent.
     fn emit_block(&mut self, end: usize, last: bool) {
-        let start = self.emitted;
+        let start_rel = self.emitted - self.dropped;
+        let end_rel = end - self.dropped;
         let mut store = Vec::new();
-        write_store_block(&mut store, last, &self.input[start..end]);
+        write_store_block(&mut store, last, &self.input[start_rel..end_rel]);
 
         let mut comp = Vec::new();
         match write_compressed_block(
             &mut comp,
             last,
-            &self.input[..end],
-            start..end,
+            &self.input[..end_rel],
+            start_rel..end_rel,
             &mut self.finder,
             self.max_offset,
             &self.state,
@@ -397,5 +460,44 @@ mod tests {
         std::io::copy(&mut src, &mut enc).unwrap();
         let frame = enc.finish();
         assert_round_trips_three_ways(&frame, &data);
+    }
+
+    #[test]
+    fn memory_stays_bounded_while_sliding() {
+        // L1 has the smallest window (512 KiB), so a few-MB input forces several
+        // slides cheaply. Mildly redundant (small alphabet) so real matches — not
+        // just store blocks — cross the slide boundaries. (Higher levels share the
+        // exact slide + finder-rebuild path; only the thresholds grow.)
+        let mut data = Vec::with_capacity(3 << 20);
+        let mut x = 0x9E37_79B9u32;
+        while data.len() < (3 << 20) {
+            x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+            data.push((x >> 27) as u8);
+        }
+
+        let push_chunk = 64 * 1024;
+        let mut enc = StreamingEncoder::with_options(1, true, true);
+        let window = enc.window_size();
+        let bound = 2 * window + 2 * BLOCK_SIZE_MAX;
+        assert!(bound < data.len(), "test input must exceed the memory bound to force a slide");
+
+        for part in data.chunks(push_chunk) {
+            enc.push(part);
+            assert!(
+                enc.buffered_input_len() <= bound,
+                "retained input {} exceeded bound {bound}",
+                enc.buffered_input_len()
+            );
+        }
+        let chunked = enc.finish();
+        assert_round_trips_three_ways(&chunked, &data);
+
+        // Sliding is deterministic, so a single big push (internally stepped) must
+        // produce the identical frame.
+        let mut enc2 = StreamingEncoder::with_options(1, true, true);
+        enc2.push(&data);
+        assert!(enc2.buffered_input_len() <= bound, "single-push retained too much");
+        let whole = enc2.finish();
+        assert_eq!(chunked, whole, "sliding frame must be independent of push chunking");
     }
 }
