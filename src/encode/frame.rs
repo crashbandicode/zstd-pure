@@ -44,7 +44,10 @@ pub(crate) fn split_depth_for(strategy: super::params::Strategy) -> usize {
 /// in the smallest field that holds it (1, 2, or 4 bytes), after the window
 /// descriptor and before the content size — the byte order the decoder's
 /// `parse_frame_header` reads.
-fn write_frame_header(
+///
+/// `pub(crate)` so the single-frame parallel encoder ([`super::parallel`]) can
+/// write the one shared frame header that fronts every worker's blocks.
+pub(crate) fn write_frame_header(
     out: &mut Vec<u8>,
     content_size: u64,
     checksum: bool,
