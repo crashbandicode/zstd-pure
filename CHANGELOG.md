@@ -28,7 +28,13 @@ encoder. `#![forbid(unsafe_code)]`, `no_std + alloc`, only `thiserror` at runtim
 ### Encoder
 - Levels 1–22: `fast`, `dfast`, greedy/lazy/lazy2, `btlazy2`, and the
   `btopt`/`btultra`/`btultra2` optimal parse (rep-aware DP, `btultra2` second
-  pass, block splitting, chain/binary-tree hybrid match finder).
+  pass, block splitting, chain/binary-tree hybrid match finder). The optimal
+  parse also offers repeat-offset matches as candidates (libzstd's
+  `ZSTD_BtGetAllMatches`), priced from persistent cross-block statistics
+  (libzstd's dynamic price model), behind a per-block guard that emits the
+  rep-free parse whenever it is smaller — so the candidates never enlarge a block.
+  Narrows the high-level ratio on rep-heavy data (within ~0.8 % of libzstd on
+  Silesia at L19; see BENCHMARKS.md).
 - Per-block entropy-table mode selection (predefined / RLE / FSE / repeat) and
   treeless literal reuse; cross-block matching + repeat-offset threading.
 - Dictionary encode (`compress_with_dict`) plus a pure-Rust dictionary trainer

@@ -37,7 +37,7 @@ block, two regimes whose entropy statistics differ: the block-splitter case),
 |  6 | 0.66× | **0.97×** | 1.05× | 0.93× | 1.69× | 0.97× | 1.07× |
 |  9 | 0.66× | **0.97×** | 1.05× | 1.09× | 2.49× | 1.15× | 1.06× |
 | 13 | 1.02× | **0.96×** | 1.02× | 1.32× | **0.49×** | 1.07× | 1.14× |
-| 19 | 1.02× | 1.12× | 1.02× | **0.80×** | 1.01× | **0.98×** | 1.02× |
+| 19 | 1.02× | 1.05× | 1.02× | **0.80×** | 1.01× | **0.98×** | 1.02× |
 
 Reading it: `level` scales ratio — `dfast` (double-hash) kicks in at L2–3, the
 chain/lazy finder at L4+, the `btlazy2` chain/tree hybrid at L13–15, and the
@@ -49,13 +49,19 @@ single 4-byte table misses), and at L13 the `btlazy2` tree drops it to 0.96×
 reaches. The `3x90k-chunk` collapses from 11.7 KB → 1.4 KB (L1 → L19), matching
 libzstd; dense `json` **beats** libzstd at L19 (0.80×); and
 `mixed` — two regimes in one block — **beats** libzstd at L19 (0.98×) once the
-splitter gives each half its own tables. The near-random `records` soft spot at
-the top levels fell from 1.32× to 1.12× over this work: the `btultra2` second
-pass (re-pricing the optimal parse from the first parse's actual statistics) took
-it to 1.26×, then block splitting to 1.12×. It still trails a little **at L19** —
-there the chain's depth (128) already reaches `records`'s matches, so the tree
-can't help (unlike at L13, where the shallow depth lets it); the remaining lever
-at the top is the cost model.
+splitter gives each half its own tables. The structured `records` soft spot at the
+top levels fell from 1.32× → 1.12× → **1.05×** over this work: the `btultra2`
+second pass took it to 1.26×, block splitting to 1.12×, then the optimal parse
+began **offering repeat-offset matches as candidates** (libzstd's
+`ZSTD_BtGetAllMatches`) priced from **persistent cross-block statistics**
+(libzstd's dynamic price model) — behind a per-block guard that emits the rep-free
+parse whenever it is smaller, so the candidates can never enlarge a block (no
+profile regressed at any level — verified against the pre-change matrix). The
+remaining ~5 % on `records` is finer period-offset long-match selection (its
+`v=i·k mod 251` body repeats every ~1 KB; libzstd links the period more tightly);
+on real data the high-level gap is much smaller — Silesia at L19 is **1.008×** of
+libzstd (see below). Cost: the optimal parse now runs the DP twice and emits up to
+two candidate blocks per 128 KB at L16+, a throughput trade for the ratio.
 
 ## Real-world corpus (Silesia, ours ÷ libzstd)
 
