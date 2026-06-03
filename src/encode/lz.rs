@@ -1024,12 +1024,6 @@ impl Prices {
         for &b in &block[p..] {
             lit_freq[b as usize] += 1; // trailing literal run
         }
-        let lit_sum: u32 = lit_freq.iter().map(|&f| f + 1).sum();
-        let log_lit = log2_fp(lit_sum);
-        let mut lit = [0u64; 256];
-        for (b, pr) in lit.iter_mut().enumerate() {
-            *pr = (log_lit.saturating_sub(log2_fp(lit_freq[b] + 1)) as u64).max(16);
-        }
 
         // LL/OF/ML code histograms over the emitted sequences.
         let mut ll_freq = [0u32; 36];
@@ -1040,14 +1034,105 @@ impl Prices {
             ml_freq[ml_code(s.match_len)] += 1;
             of_freq[of_code(s.offset_value).min(31)] += 1;
         }
-        let mut ll = [0u64; 36];
-        entropy_prices(&ll_freq, &mut ll, |c| LL_BITS[c]);
-        let mut ml = [0u64; 53];
-        entropy_prices(&ml_freq, &mut ml, |c| ML_BITS[c]);
-        let mut off = [0u64; 32];
-        entropy_prices(&of_freq, &mut off, |c| c as u32);
+        Self::from_freqs(&lit_freq, &ll_freq, &ml_freq, &of_freq)
+    }
 
+    /// Build the price tables from per-code frequency histograms (the literal-byte
+    /// histogram and the LL/OF/ML code histograms). The shared core of
+    /// [`Prices::from_stats`] (same-block statistics) and
+    /// [`Prices::from_opt_stats`] (persistent cross-block statistics) — each
+    /// frequency is `+1`-smoothed so every symbol keeps a finite price.
+    fn from_freqs(
+        lit_freq: &[u32; 256],
+        ll_freq: &[u32; 36],
+        ml_freq: &[u32; 53],
+        of_freq: &[u32; 32],
+    ) -> Self {
+        let lit_sum: u32 = lit_freq.iter().map(|&f| f + 1).sum();
+        let log_lit = log2_fp(lit_sum);
+        let mut lit = [0u64; 256];
+        for (b, pr) in lit.iter_mut().enumerate() {
+            *pr = (log_lit.saturating_sub(log2_fp(lit_freq[b] + 1)) as u64).max(16);
+        }
+        let mut ll = [0u64; 36];
+        entropy_prices(ll_freq, &mut ll, |c| LL_BITS[c]);
+        let mut ml = [0u64; 53];
+        entropy_prices(ml_freq, &mut ml, |c| ML_BITS[c]);
+        let mut off = [0u64; 32];
+        entropy_prices(of_freq, &mut off, |c| c as u32);
         Prices { lit, ll, ml, off }
+    }
+
+    /// Price tables from the finder's persistent cross-block statistics — libzstd's
+    /// `ZSTD_rescaleFreqs(zop_dynamic)`. Used to price a block's *rep-enabled*
+    /// parse from the *previous* blocks' realized code/byte distribution (which
+    /// already reflects repeat-offset usage), so reps are priced representatively
+    /// rather than from a same-block rep-free pass.
+    fn from_opt_stats(stats: &OptStats) -> Self {
+        Self::from_freqs(&stats.lit, &stats.ll, &stats.ml, &stats.of)
+    }
+}
+
+/// Persistent per-channel statistics the optimal parse accumulates **across a
+/// frame's blocks** (libzstd's `optState_t` frequencies). After each block its
+/// realized codes/bytes are folded in ([`OptStats::record`]); the next block
+/// prices its rep-enabled parse from these ([`Prices::from_opt_stats`]), so the
+/// repeat-offset codes are priced from data that already used them. Lives in
+/// [`Finder::Opt`] and so persists for the finder's lifetime (one frame, or one
+/// parallel worker's segment); a streaming slide rebuilds the finder and thus
+/// resets these (the next block simply re-bootstraps).
+pub(crate) struct OptStats {
+    lit: [u32; 256],
+    ll: [u32; 36],
+    ml: [u32; 53],
+    of: [u32; 32],
+    /// False until the first block has folded its statistics in — block 1 has no
+    /// prior stats, so it bootstraps with the same-block two-pass model instead.
+    seeded: bool,
+}
+
+impl OptStats {
+    fn new() -> Self {
+        OptStats {
+            lit: [0; 256],
+            ll: [0; 36],
+            ml: [0; 53],
+            of: [0; 32],
+            seeded: false,
+        }
+    }
+
+    /// Fold one block's realized sequences + literals into the running stats,
+    /// halving any channel that grows past `CAP` so recent blocks dominate and the
+    /// counts stay bounded (libzstd downscales similarly). Marks the stats seeded.
+    fn record(&mut self, data: &[u8], range: core::ops::Range<usize>, seqs: &[Seq]) {
+        const CAP: u32 = 1 << 16;
+        let (start, end) = (range.start, range.end);
+        let mut p = start;
+        for s in seqs {
+            for &b in &data[p..p + s.lit_len as usize] {
+                self.lit[b as usize] += 1;
+            }
+            p += s.lit_len as usize + s.match_len as usize;
+            self.ll[ll_code(s.lit_len)] += 1;
+            self.ml[ml_code(s.match_len)] += 1;
+            self.of[of_code(s.offset_value).min(31)] += 1;
+        }
+        for &b in &data[p..end] {
+            self.lit[b as usize] += 1;
+        }
+        let downscale = |a: &mut [u32]| {
+            if a.iter().copied().sum::<u32>() > CAP {
+                for x in a.iter_mut() {
+                    *x >>= 1;
+                }
+            }
+        };
+        downscale(&mut self.lit);
+        downscale(&mut self.ll);
+        downscale(&mut self.ml);
+        downscale(&mut self.of);
+        self.seeded = true;
     }
 }
 
@@ -1331,6 +1416,7 @@ pub fn opt_parse_block(
     depth: usize,
     sufficient_len: usize,
     two_pass: bool,
+    stats: &mut OptStats,
 ) -> Parsed {
     let (start, end) = (range.start, range.end);
     let n = end - start;
@@ -1462,11 +1548,39 @@ pub fn opt_parse_block(
     };
 
     // Primary = the rep-free baseline (its emitted size is the bar). Alternative =
-    // the same DP but offering repeat-offset candidates; the caller emits both and
-    // keeps the smaller, so reps can never enlarge a block past the baseline
-    // (the hard no-regression guard). Skip the alt when reps changed nothing.
+    // a parse offering repeat-offset candidates; the caller emits both and keeps
+    // the smaller, so reps can never enlarge a block past the baseline (the hard
+    // no-regression guard).
     let (base_seqs, base_rep) = run_two_pass(false);
-    let (rep_seqs, rep_rep) = run_two_pass(true);
+
+    // The rep-enabled parse. Once the finder's cross-block stats are seeded (every
+    // block after the first), price a single pass from them — libzstd's dynamic
+    // model: the previous blocks' realized distribution already reflects rep usage,
+    // so reps are priced representatively. Block 1 has no prior stats, so it
+    // bootstraps with the same-block two-pass.
+    let (rep_seqs, rep_rep) = if stats.seeded {
+        let prices = Prices::from_opt_stats(stats);
+        run_dp(
+            data,
+            start,
+            n,
+            &prices,
+            &match_starts,
+            &matches_flat,
+            &pos_long,
+            rep_in,
+            true,
+        )
+    } else {
+        run_two_pass(true)
+    };
+
+    // Fold this block's rep parse into the running stats for the next block. (Done
+    // unconditionally — these are an encoder-side pricing heuristic that never
+    // affects decode correctness, so they may evolve even if the guard ends up
+    // emitting the baseline parse for this block.)
+    stats.record(data, start..end, &rep_seqs);
+
     let alt = (rep_seqs != base_seqs).then(|| {
         let rep_literals = materialize_literals(data, start..end, &rep_seqs);
         Box::new(Parsed {
@@ -1490,6 +1604,12 @@ pub fn opt_parse_block(
 /// `Fast`/`Dfast` use the single-slot [`MatchState`]; `greedy`/`lazy`/`lazy2`
 /// (and `btlazy2`) use the hash-chain [`ChainState`]; `btopt`/`btultra`(2) run
 /// the optimal parse over the **hybrid** chain + binary-tree finder.
+///
+/// The `Opt` variant is larger than the others (it carries [`OptStats`], ~1.5 KiB
+/// of cross-block frequency counters), but a `Finder` is constructed once per
+/// frame / parallel segment, never in a hot or array-stored path, so the variant
+/// size is immaterial — not worth a `Box` indirection on every stats access.
+#[allow(clippy::large_enum_variant)]
 pub enum Finder {
     Fast(MatchState),
     DFast(DFastState),
@@ -1517,6 +1637,9 @@ pub enum Finder {
         /// `btultra2`: re-parse with a price model rebuilt from the first
         /// parse's actual statistics (see [`opt_parse_block`]).
         two_pass: bool,
+        /// Persistent cross-block statistics that price each block's rep-enabled
+        /// parse from the previous blocks' realized distribution.
+        stats: OptStats,
     },
 }
 
@@ -1537,6 +1660,7 @@ impl Finder {
                 depth: (1usize << params.search_log.min(7)).min(128),
                 sufficient_len: (params.target_length as usize).clamp(32, 256),
                 two_pass: matches!(params.strategy, Btultra2),
+                stats: OptStats::new(),
             },
             BtLazy2 => Finder::BtLazy {
                 state: ChainState::new(params.hash_log, params.chain_log),
@@ -1621,6 +1745,7 @@ impl Finder {
                 depth,
                 sufficient_len,
                 two_pass,
+                stats,
             } => opt_parse_block(
                 data,
                 range,
@@ -1631,6 +1756,7 @@ impl Finder {
                 *depth,
                 *sufficient_len,
                 *two_pass,
+                stats,
             ),
         }
     }
@@ -1864,6 +1990,7 @@ mod tests {
         for two_pass in [false, true] {
             let mut state = ChainState::new(18, 18);
             let mut tree = BtState::new(18, 20);
+            let mut stats = OptStats::new();
             let parsed = opt_parse_block(
                 &data,
                 0..data.len(),
@@ -1874,6 +2001,7 @@ mod tests {
                 64,
                 64,
                 two_pass,
+                &mut stats,
             );
             let (seqs, literals, rep) = (parsed.seqs, parsed.literals, parsed.rep);
 
