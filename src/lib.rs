@@ -57,13 +57,14 @@ pub mod sequences;
 /// is a straight re-export, so [`StreamingDecoder`] is a genuine `std::io::Read`.
 pub mod io {
     #[cfg(feature = "std")]
-    pub use std::io::{Error, ErrorKind, Read, Result};
+    pub use std::io::{Error, ErrorKind, Read, Result, Write};
 
     #[cfg(not(feature = "std"))]
-    pub use shim::{Error, ErrorKind, Read, Result};
+    pub use shim::{Error, ErrorKind, Read, Result, Write};
 
-    /// The `no_std` `Read` shim: just the `read` primitive plus a small owned
-    /// error type. Consumers without `std` loop on `read` until it returns 0.
+    /// The `no_std` `Read`/`Write` shim: the `read` and `write`/`flush`
+    /// primitives plus a small owned error type. Consumers without `std` loop on
+    /// `read` until it returns 0.
     #[cfg(not(feature = "std"))]
     mod shim {
         use crate::alloc_prelude::*;
@@ -72,6 +73,32 @@ pub mod io {
         pub trait Read {
             /// Read into `buf`, returning the number of bytes written (`0` at EOF).
             fn read(&mut self, buf: &mut [u8]) -> Result<usize>;
+        }
+
+        /// `no_std` analogue of `std::io::Write` — `write`/`flush` plus a
+        /// `write_all` convenience, mirroring the subset the streaming encoder
+        /// and its consumers need (so the same code compiles with or without
+        /// `std`).
+        pub trait Write {
+            /// Write some of `buf`, returning how many bytes were consumed.
+            fn write(&mut self, buf: &[u8]) -> Result<usize>;
+            /// Flush any buffered output (a no-op for purely in-memory sinks).
+            fn flush(&mut self) -> Result<()>;
+            /// Write all of `buf`, looping until it is fully consumed.
+            fn write_all(&mut self, mut buf: &[u8]) -> Result<()> {
+                while !buf.is_empty() {
+                    match self.write(buf)? {
+                        0 => {
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "write returned 0 before consuming the buffer",
+                            ))
+                        }
+                        n => buf = &buf[n..],
+                    }
+                }
+                Ok(())
+            }
         }
 
         /// Error categories the decoder distinguishes (the subset of

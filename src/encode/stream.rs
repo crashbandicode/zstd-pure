@@ -197,6 +197,25 @@ impl StreamingEncoder {
     }
 }
 
+/// Feed plaintext into the encoder as an [`io::Write`](crate::io::Write) sink:
+/// `write` is [`push`](StreamingEncoder::push) (it always consumes the whole
+/// buffer) and `flush` is a no-op — completed blocks are already buffered, so
+/// drain them with [`take_output`](StreamingEncoder::take_output) and emit the
+/// final block + checksum with [`finish`](StreamingEncoder::finish). This lets a
+/// `StreamingEncoder` stand in for any `Write` sink, e.g. `io::copy` or
+/// `write!`, symmetric to [`StreamingDecoder`](crate::StreamingDecoder)'s
+/// [`io::Read`](crate::io::Read).
+impl crate::io::Write for StreamingEncoder {
+    fn write(&mut self, buf: &[u8]) -> crate::io::Result<usize> {
+        self.push(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> crate::io::Result<()> {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,5 +368,34 @@ mod tests {
         let mut out = vec![0u8; data.len()];
         let n = dctx.decompress(&mut out, &frame).unwrap();
         assert_eq!(&out[..n], &data[..]);
+    }
+
+    #[test]
+    fn usable_as_an_io_write_sink() {
+        use crate::io::Write;
+        let mut data = b"io::Write sink for the streaming encoder. ".repeat(5000);
+        data.extend((0..60_000u32).map(|i| (i.wrapping_mul(2654435761) >> 12) as u8));
+
+        let mut enc = StreamingEncoder::with_options(9, true, true);
+        for part in data.chunks(5000) {
+            enc.write_all(part).unwrap();
+        }
+        enc.flush().unwrap();
+        let via_write = enc.finish();
+
+        // `write` delegates to `push`, so the frame matches the push-based path.
+        assert_eq!(via_write, stream(&data, 9, true, 5000));
+        assert_round_trips_three_ways(&via_write, &data);
+    }
+
+    #[test]
+    fn io_copy_into_encoder_round_trips() {
+        // The encoder stands in as a `std::io::Write` sink for `io::copy`.
+        let data = b"copied through std::io::copy into the encoder. ".repeat(3000);
+        let mut enc = StreamingEncoder::new(3);
+        let mut src: &[u8] = &data;
+        std::io::copy(&mut src, &mut enc).unwrap();
+        let frame = enc.finish();
+        assert_round_trips_three_ways(&frame, &data);
     }
 }
