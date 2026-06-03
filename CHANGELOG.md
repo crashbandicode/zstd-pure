@@ -31,15 +31,16 @@ encoder. `#![forbid(unsafe_code)]`, `no_std + alloc`, only `thiserror` at runtim
   pass, block splitting, chain/binary-tree hybrid match finder).
 - Per-block entropy-table mode selection (predefined / RLE / FSE / repeat) and
   treeless literal reuse; cross-block matching + repeat-offset threading.
-- Dictionary encode (`compress_with_dict`) and a pure-Rust dictionary trainer
-  (`train_dictionary`, `train_dictionary_structured`) — *experimental*.
+- Dictionary encode (`compress_with_dict`) plus a pure-Rust dictionary trainer
+  (`train_dictionary`, `train_dictionary_structured` — the trainer is
+  *experimental*: a simplified COVER whose output quality may change).
 - Opt-in long-distance matching (`compress_long`).
 - Incremental streaming encoder (`StreamingEncoder`, implements `io::Write`, with
-  bounded memory and optional long-distance matching) — *experimental*.
+  bounded memory and optional long-distance matching).
 - Independent-frame parallel compression (`compress_parallel`, `std` only).
 
 ### Other
-- Seekable format (`compress_seekable`, `SeekTable`, random access) — *experimental*.
+- Seekable format (`compress_seekable`, `SeekTable`, random access).
 - Validation: a deterministic corpus matrix, a `proptest` shrinking suite, three
   cargo-fuzz targets (`decode`, `decode_diff`, `encode_roundtrip`), a
   fixture-gated real-world corpus test, and a libzstd differential — every

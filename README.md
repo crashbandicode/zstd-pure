@@ -28,12 +28,15 @@ property tests, three cargo-fuzz targets, and a differential against libzstd. Th
 every encoder output is validated **both ways**
 (`libzstd.decompress(compress(x)) == x` *and* `decompress(compress(x)) == x`).
 
-A few newer APIs are flagged **experimental** in their rustdoc — their *output is
-standard and tested*; only the API/quality is provisional: `StreamingEncoder`,
-`train_dictionary` / `train_dictionary_structured`, and the seekable format. The
-rest of the surface (the whole decode side, `compress`, `compress_long`,
-`compress_with_dict` + `Dictionary`, and `compress_parallel`) is considered
-stable.
+The dictionary **trainers** (`train_dictionary` / `train_dictionary_structured`)
+are flagged **experimental** in their rustdoc — they produce correct,
+ratio-improving dictionaries, but the underlying COVER is simplified, so output
+*quality* is below libzstd's `ZDICT` and the produced bytes may change as it
+improves (a non-breaking change). Everything else is considered stable — the
+whole decode side, `compress` / `compress_long`, `compress_with_dict` +
+`Dictionary`, `compress_parallel`, `StreamingEncoder` (incl. `with_options_long`,
+fuzzed for arbitrary input × chunkings), and the seekable format (its parser is
+fuzzed against arbitrary bytes).
 
 > **Not yet published to crates.io.** Pin a git revision until a release is
 > tagged (see below).
@@ -180,7 +183,10 @@ See [`examples/safe_decompress.rs`](examples/safe_decompress.rs)
 - **Fuzzing** (`cargo +nightly fuzz run <target>`, in `fuzz/`): `decode` (never
   panic/OOM on arbitrary/malformed frames under a 64 MiB cap), `decode_diff` (a
   differential requiring our decoder and libzstd to agree on any frame *both*
-  accept), and `encode_roundtrip`. Seed `fuzz/corpus/<target>/` for depth.
+  accept), `encode_roundtrip`, `streaming_roundtrip` (`StreamingEncoder` over
+  arbitrary input × chunkings, plain + LDM), and `seekable_roundtrip` (the
+  seek-table parser never panics + archive round-trip). Seed
+  `fuzz/corpus/<target>/` for depth.
 - **Fixture-gated, off by default** (`#[ignore]`): `tests/real_corpus.rs` walks
   `$ZSTD_PURE_CORPUS` and round-trips every file both ways across levels, e.g.
   `ZSTD_PURE_CORPUS=~/fixtures/silesia/raw cargo test --release real_corpus -- --ignored --nocapture`

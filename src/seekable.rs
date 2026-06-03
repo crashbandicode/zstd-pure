@@ -1,10 +1,9 @@
 //! Seekable format — the zstd `contrib/seekable_format` extension.
 //!
-//! **Experimental.** This implements a zstd *contrib* extension (not the core
-//! RFC 8878 spec), and the seek-table parser ([`SeekTable::parse`]) is not yet in
-//! the fuzz corpus — its robustness on malformed/untrusted seekable archives is
-//! less proven than the core frame decoder. Round-trip + random-access
-//! correctness on well-formed archives is tested; the API is provisional.
+//! This implements a zstd *contrib* extension (not part of the core RFC 8878
+//! spec). The seek-table parser ([`SeekTable::parse`]) is fuzzed against arbitrary
+//! bytes (never panics) and round-trip + random-access correctness is tested, so
+//! it carries the same robustness bar as the core decoder.
 //!
 //! An archive is a sequence of **independent** standard zstd frames, each
 //! compressing up to `frame_size` decompressed bytes, followed by a **seek

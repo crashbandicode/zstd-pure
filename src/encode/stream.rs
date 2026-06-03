@@ -54,13 +54,6 @@ use super::frame::{split_depth_for, write_frame_header_streaming};
 /// A block-by-block, incremental single-frame encoder mirroring
 /// [`compress`](crate::compress)'s block loop but driven by [`push`] calls.
 ///
-/// **Experimental.** Incremental encoding is new — its stateful sliding-window
-/// finder/index rebuild is not yet exercised by the cargo-fuzz targets (which
-/// cover the one-shot paths) and has no production mileage. The *frames it
-/// produces* are standard and verified (they round-trip through our decoder, our
-/// [`StreamingDecoder`](crate::StreamingDecoder), and libzstd); it is the API that
-/// is provisional and may change.
-///
 /// Build it with [`new`](Self::new) (standard frame, no checksum) or
 /// [`with_options`](Self::with_options), feed bytes with [`push`](Self::push),
 /// optionally drain ready output with [`take_output`](Self::take_output), and
@@ -159,8 +152,8 @@ impl StreamingEncoder {
         }
     }
 
-    /// **Experimental.** Like [`with_options`](Self::with_options) but with
-    /// **long-distance matching** — the streaming analogue of
+    /// Like [`with_options`](Self::with_options) but with **long-distance
+    /// matching** — the streaming analogue of
     /// [`compress_long`](crate::compress_long). A coarse content-defined index
     /// contributes matches at offsets *beyond* the regular window, and the frame
     /// advertises a larger `window_log` (clamped to `[regular window ..= 27]`) to
@@ -170,8 +163,7 @@ impl StreamingEncoder {
     ///
     /// LDM matches reach back across the whole advertised window, so the encoder
     /// **retains that much history** — a larger `window_log` costs proportionally
-    /// more memory. This is newer and less battle-tested than the core paths, so
-    /// the API is marked experimental.
+    /// more memory.
     pub fn with_options_long(
         level: i32,
         checksum: bool,
