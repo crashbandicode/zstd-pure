@@ -170,23 +170,31 @@ extra per-position work at L16+.
 ## Parallel compression (`compress_parallel`)
 
 `compress_parallel(data, level, n_jobs, …)` splits the input into `n_jobs`
-independent frames compressed on `std::thread` workers, concatenated into a
-multi-frame stream (see the README). From `examples/bench_large`'s
+contiguous segments compressed on `std::thread` workers, but every worker emits
+its blocks into **one continuous frame** with a shared, cross-seam window
+(libzstd's ZSTDMT design — see the README). From `examples/bench_large`'s
 `parallel_speedup` (24 MiB of log-like text, L12, on an 8-core dev machine —
 **relative shape matters, absolute numbers are machine-specific**):
 
 | n_jobs | time | speedup | seam cost (size) |
 |-------:|-----:|--------:|-----------------:|
-| serial | 8046 ms | 1.00× | — |
-| 2 | 5326 ms | 1.51× | +0.16% |
-| 4 | 2747 ms | 2.93× | +0.48% |
-| 8 | 2216 ms | 3.63× | +1.12% |
+| serial | 6900 ms | 1.00× | — |
+| 2 | 4340 ms | 1.59× | +0.03% |
+| 4 | 2625 ms | 2.63× | +0.09% |
+| 8 | 2482 ms | 2.78× | +0.24% |
 
-Throughput scales with the job count (3.6× on 8 cores) while the ratio cost of
-severing cross-segment matches at the frame seams stays small (≤ ~1 % here, and
-shrinking with larger segments). The split is deterministic, so the bytes are
-reproducible for fixed arguments. Reproduce with
-`cargo run --release --example bench_large` (the parallel table prints first).
+Throughput scales with the job count while the ratio is now within a hair of
+serial `compress` (≤ ~0.2% here, versus the ~1.1% at 8 jobs the old
+independent-frame split cost): because each worker is primed with the previous
+segment's tail and emits into the same evolving window, matching spans the seams.
+The residual cost is the handful of sequences per seam that can't use the
+repeat-offset code or reuse the prior worker's entropy tables (the
+rep-invalidation each boundary needs), plus the per-worker priming, which is the
+parallel overhead — the overlap is a strategy-scaled fraction of the window
+(window/8 for the fast strategies up to a full window for `btultra2`, mirroring
+libzstd's ZSTDMT). The split is deterministic, so the bytes are reproducible for
+fixed arguments. Reproduce with `cargo run --release --example bench_large` (the
+parallel table prints first).
 
 ## Standing & next levers
 

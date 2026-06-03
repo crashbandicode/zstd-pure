@@ -23,11 +23,17 @@
 //! `ZSTD_PURE_CORPUS_MAX_MB` (skip files larger than this; default: no limit),
 //! and `ZSTD_PURE_CORPUS_LONG` (set to use `compress_long` — long-distance
 //! matching — for our encoder, to measure the LDM ratio on real data).
+//! `ZSTD_PURE_CORPUS_JOBS` (default `4`) sets the worker count for the parallel
+//! pass: every file is *also* round-tripped through `compress_parallel`
+//! (single-continuous-frame) both ways, so a corpus run validates the cross-seam
+//! parallel path on real data and reports its ratio against serial + libzstd.
 //! `--nocapture` surfaces the per-level ratio summary.
 
 use std::path::{Path, PathBuf};
 
-use zstd_pure::{compress as our_compress, compress_long as our_compress_long, decompress};
+use zstd_pure::{
+    compress as our_compress, compress_long as our_compress_long, compress_parallel, decompress,
+};
 
 /// Recursively collect every regular file under `root`, sorted for determinism.
 fn corpus_files(root: &Path) -> Vec<PathBuf> {
@@ -82,12 +88,18 @@ fn real_corpus_round_trips_both_ways() {
     );
     let max_bytes = env_max_bytes();
     let use_long = std::env::var("ZSTD_PURE_CORPUS_LONG").is_ok();
+    let jobs = std::env::var("ZSTD_PURE_CORPUS_JOBS")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(4)
+        .max(1);
 
     let files = corpus_files(Path::new(&root));
     assert!(!files.is_empty(), "no regular files under {root}");
 
     let mut ours_bytes = vec![0u64; levels.len()];
     let mut lib_bytes = vec![0u64; levels.len()];
+    let mut par_bytes = vec![0u64; levels.len()];
     let mut total_raw = 0u64;
     let (mut n_files, mut n_skipped) = (0usize, 0usize);
 
@@ -143,8 +155,37 @@ fn real_corpus_round_trips_both_ways() {
                 path.display()
             );
 
+            // The single-continuous-frame parallel path on the same real file:
+            // round-trip both ways. On files past ~256 KiB this actually splits,
+            // so it exercises the cross-seam rep self-heal + fresh-table emission
+            // on real data; on small files it falls back to one frame.
+            let par = compress_parallel(&data, level, jobs, false, true);
+            let par_self = decompress(&par).unwrap_or_else(|e| {
+                panic!(
+                    "{}: our decode of our parallel L{level} frame: {e}",
+                    path.display()
+                )
+            });
+            assert!(
+                par_self == data,
+                "{}: parallel encoder round-trip mismatch at L{level}",
+                path.display()
+            );
+            let par_lib = zstd::bulk::decompress(&par, data.len() + 64).unwrap_or_else(|e| {
+                panic!(
+                    "{}: libzstd decode of our parallel L{level} frame: {e}",
+                    path.display()
+                )
+            });
+            assert!(
+                par_lib == data,
+                "{}: libzstd decode of our parallel L{level} frame mismatch",
+                path.display()
+            );
+
             ours_bytes[i] += ours.len() as u64;
             lib_bytes[i] += lib.len() as u64;
+            par_bytes[i] += par.len() as u64;
         }
     }
 
@@ -156,11 +197,15 @@ fn real_corpus_round_trips_both_ways() {
     eprintln!(
         "real corpus {root} [{mode}]: {n_files} files ({total_raw} raw bytes), {n_skipped} skipped"
     );
+    eprintln!("  (parallel pass: {jobs} jobs, single continuous frame)");
     for (i, &level) in levels.iter().enumerate() {
         let ratio = ours_bytes[i] as f64 / lib_bytes[i].max(1) as f64;
+        // Parallel vs serial `compress`: how much the segment seams cost.
+        let seam = par_bytes[i] as f64 / ours_bytes[i].max(1) as f64;
         eprintln!(
-            "  L{level:>2}: ours {:>13} B   libzstd {:>13} B   ratio {ratio:.3}x",
-            ours_bytes[i], lib_bytes[i]
+            "  L{level:>2}: ours {:>13} B   libzstd {:>13} B   ratio {ratio:.3}x   \
+             parallel {:>13} B   seam {:.4}x",
+            ours_bytes[i], lib_bytes[i], par_bytes[i], seam
         );
     }
     assert!(n_files >= 1, "every file exceeded ZSTD_PURE_CORPUS_MAX_MB");

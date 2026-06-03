@@ -37,12 +37,16 @@ encoder. `#![forbid(unsafe_code)]`, `no_std + alloc`, only `thiserror` at runtim
 - Opt-in long-distance matching (`compress_long`).
 - Incremental streaming encoder (`StreamingEncoder`, implements `io::Write`, with
   bounded memory and optional long-distance matching).
-- Independent-frame parallel compression (`compress_parallel`, `std` only).
+- Single-continuous-frame parallel compression (`compress_parallel`, `std` only):
+  workers emit blocks into one shared frame with a cross-seam window (libzstd's
+  ZSTDMT design), so matching spans the segment seams and the ratio tracks serial
+  `compress`. Deterministic output; decodes as one ordinary frame.
 
 ### Other
 - Seekable format (`compress_seekable`, `SeekTable`, random access).
-- Validation: a deterministic corpus matrix, a `proptest` shrinking suite, three
-  cargo-fuzz targets (`decode`, `decode_diff`, `encode_roundtrip`), a
+- Validation: a deterministic corpus matrix, a `proptest` shrinking suite, six
+  cargo-fuzz targets (`decode`, `decode_diff`, `encode_roundtrip`,
+  `streaming_roundtrip`, `seekable_roundtrip`, `parallel_roundtrip`), a
   fixture-gated real-world corpus test, and a libzstd differential — every
   encoder output verified both ways.
 

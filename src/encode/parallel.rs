@@ -5,9 +5,10 @@
 //! compresses each on its own worker thread, but — unlike the older
 //! independent-frame split — every worker emits its blocks into **one shared
 //! frame** with a continuously evolving window. Worker `i` is primed with the
-//! tail of the preceding input (up to one window) as raw-content history, so its
-//! matches reach back **across the segment seam** into segment `i-1`'s bytes,
-//! exactly as a single-threaded [`compress`](crate::compress) would. The main
+//! tail of the preceding input (a strategy-scaled slice, up to one full window —
+//! see [`overlap_bytes`]) as raw-content history, so its matches reach back
+//! **across the segment seam** into segment `i-1`'s bytes, much as a
+//! single-threaded [`compress`](crate::compress) would. The main
 //! thread writes the one frame header, concatenates the workers' block bytes in
 //! segment order, flags only the very last block, and appends a single
 //! whole-input content checksum.
@@ -54,7 +55,7 @@ use super::super::xxhash::xxh64;
 use super::block::{write_compressed_block, write_store_block, EncState, BLOCK_SIZE_MAX};
 use super::frame::{split_depth_for, write_frame_header};
 use super::lz::Finder;
-use super::params::CParams;
+use super::params::{CParams, Strategy};
 use super::sequences::SeqCTables;
 
 /// Below this many bytes per job we don't bother splitting — the per-worker
@@ -65,6 +66,27 @@ const MIN_JOB_SIZE: usize = 128 * 1024;
 /// Hard ceiling on worker threads, so a pathologically large `n_jobs` cannot
 /// spawn an unbounded number of threads.
 const MAX_JOBS: usize = 256;
+
+/// Cross-seam overlap (primed-only history) a non-first worker carries —
+/// libzstd's ZSTDMT `ZSTDMT_computeOverlapSize`: a strategy-dependent fraction of
+/// the window, `window >> (9 - overlapLog)` for the per-strategy default
+/// `overlapLog`. Higher strategies, which prize ratio, overlap more (up to the
+/// full window for `btultra2`); the fast strategies use `window/8`, keeping the
+/// per-worker priming cost — and thus the parallel overhead — low. More overlap
+/// only buys longer cross-seam matches; it is never required for correctness
+/// (every match stays within the window, which the decoder fully retains), so
+/// this is purely a ratio/speed knob. The caller further caps it at the bytes
+/// actually available before the segment.
+fn overlap_bytes(strategy: Strategy, max_offset: usize) -> usize {
+    // zstd's default overlapLog per strategy (6..=9); overlapRLog = 9 - overlapLog.
+    let overlap_rlog = match strategy {
+        Strategy::Btultra2 => 0,                  // full window
+        Strategy::Btopt | Strategy::Btultra => 1, // window/2
+        Strategy::Lazy2 | Strategy::BtLazy2 => 2, // window/4
+        _ => 3,                                   // fast / dfast / greedy / lazy: window/8
+    };
+    max_offset >> overlap_rlog
+}
 
 /// One worker's slice of the job: where its view begins in `data`, how many
 /// leading bytes of that view are primed-only history (the cross-seam overlap),
@@ -123,15 +145,16 @@ pub fn compress_parallel(
 
     // Deterministic contiguous segments; integer division spreads the remainder
     // so segment sizes differ by at most one byte, and every segment is non-empty
-    // (jobs <= data.len() / MIN_JOB_SIZE). Each non-first job carries up to one
-    // window of the preceding bytes as primed-only history, so its matches reach
-    // back across the seam.
+    // (jobs <= data.len() / MIN_JOB_SIZE). Each non-first job carries a
+    // strategy-scaled slice of the preceding bytes as primed-only history, so its
+    // matches reach back across the seam.
     let len = data.len();
+    let seam_overlap = overlap_bytes(params.strategy, max_offset);
     let plan: Vec<Job> = (0..jobs)
         .map(|i| {
             let a = i * len / jobs;
             let b = (i + 1) * len / jobs;
-            let overlap = if i == 0 { 0 } else { a.min(max_offset) };
+            let overlap = if i == 0 { 0 } else { a.min(seam_overlap) };
             Job {
                 lo: a - overlap,
                 overlap,
@@ -457,6 +480,22 @@ mod tests {
             data,
             "libzstd single-frame decode"
         );
+    }
+
+    #[test]
+    fn overlap_scales_with_strategy() {
+        // zstd's ZSTDMT fractions: window/8 for the fast strategies, growing to a
+        // full window for btultra2 (where ratio matters most).
+        let w = 1usize << 20;
+        assert_eq!(overlap_bytes(Strategy::Fast, w), w / 8);
+        assert_eq!(overlap_bytes(Strategy::Dfast, w), w / 8);
+        assert_eq!(overlap_bytes(Strategy::Greedy, w), w / 8);
+        assert_eq!(overlap_bytes(Strategy::Lazy, w), w / 8);
+        assert_eq!(overlap_bytes(Strategy::Lazy2, w), w / 4);
+        assert_eq!(overlap_bytes(Strategy::BtLazy2, w), w / 4);
+        assert_eq!(overlap_bytes(Strategy::Btopt, w), w / 2);
+        assert_eq!(overlap_bytes(Strategy::Btultra, w), w / 2);
+        assert_eq!(overlap_bytes(Strategy::Btultra2, w), w);
     }
 
     #[test]

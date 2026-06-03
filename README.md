@@ -98,10 +98,11 @@ enc.push(part_b);
 let frame = enc.finish();
 ```
 
-Parallel, multi-frame (`std` only):
+Parallel, single continuous frame (`std` only):
 
 ```rust
-// compress_parallel(data, level, n_jobs, checksum, magic) -> a multi-frame stream
+// compress_parallel(data, level, n_jobs, checksum, magic) -> one continuous frame
+// (ZSTDMT-style: workers emit blocks into a shared, cross-seam window).
 let frame = zstd_pure::compress_parallel(&data, 9, 8, false, true);
 ```
 
@@ -133,7 +134,8 @@ streaming/bounded-memory decode; windows up to 128 MiB.
 btultra2); per-block entropy-table mode selection (predefined/RLE/FSE/repeat,
 treeless literals); cross-block matching + repeat-offset threading; block
 splitting; dictionaries (use + a pure-Rust trainer); opt-in long-distance
-matching; streaming; independent-frame parallel compression.
+matching; streaming; single-continuous-frame (ZSTDMT-style) parallel compression
+with cross-seam matching.
 
 **Out of scope / not supported:** legacy zstd formats (pre-v0.8 / the variants
 RFC 8478 obsoleted) — RFC 8878 only; windows beyond log 27; multi-threaded
@@ -148,8 +150,12 @@ Skippable frames are skipped on decode (their payload isn't surfaced).
 - **`compress_long` (v1):** forward-only match extension, per-block match
   generation (a match is clamped at the block boundary), and no LDM under
   `compress_with_dict`.
-- **`compress_parallel`:** the independent-frame model loses cross-segment
-  matching at the frame seams (a small ratio cost, like libzstd's job model).
+- **`compress_parallel`:** workers emit into one continuous frame with a
+  cross-seam window (ZSTDMT-style), so matching spans the segment seams and the
+  ratio tracks serial `compress`. The only residual cost is a few sequences per
+  seam that can't use the repeat-offset code or reuse the prior worker's entropy
+  tables (the rep-invalidation each segment boundary needs) — negligible in
+  practice. LDM is not combined with the parallel path.
 - **`StreamingEncoder` memory:** bounded at ~2× window (not 1×); a tighter
   rebuild-free bound is future work.
 - **Dictionary training:** a simplified single-pool greedy COVER — correct and

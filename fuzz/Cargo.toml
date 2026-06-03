@@ -61,3 +61,10 @@ path = "fuzz_targets/seekable_roundtrip.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "parallel_roundtrip"
+path = "fuzz_targets/parallel_roundtrip.rs"
+test = false
+doc = false
+bench = false

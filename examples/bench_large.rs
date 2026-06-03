@@ -158,7 +158,9 @@ fn far_dup() -> Vec<u8> {
 /// large input (HANDOFF §4.3). Wall-clock is load-sensitive — the *relative*
 /// shape (does it scale with jobs, and what does the seam cost the ratio?) is the
 /// point, not absolute numbers. Each parallel output is round-tripped through
-/// libzstd to prove the multi-frame stream is valid.
+/// libzstd to prove the single continuous frame is valid. With the ZSTDMT-style
+/// cross-seam window the seam cost is now near zero (it was ~1.1% at 8 jobs under
+/// the old independent-frame split).
 fn parallel_speedup() {
     let data = logs_sized(24 << 20, 0x5151_5151_2323_2323); // 24 MiB, distinct stream
     let level = 12;
