@@ -50,6 +50,12 @@ fn dmer_at(buf: &[u8], i: usize) -> u64 {
 /// using a greedy COVER. Returns the dictionary content (no structured magic);
 /// an empty `Vec` if there is nothing useful to extract (no samples, every
 /// sample shorter than the dmer length, or `max_size == 0`).
+///
+/// **Experimental.** This is a simplified single-pool greedy COVER (no epoch
+/// partitioning, no `(d, k)` parameter search), so dictionary *quality* is below
+/// libzstd's `ZDICT` and may change as the trainer improves. The dictionaries it
+/// produces are correct and improve ratio — verified through libzstd and our own
+/// decoder — so it's the training algorithm, not correctness, that's provisional.
 pub fn train_dictionary(samples: &[&[u8]], max_size: usize) -> Vec<u8> {
     if max_size == 0 {
         return Vec::new();
@@ -189,6 +195,9 @@ pub fn train_dictionary(samples: &[&[u8]], max_size: usize) -> Vec<u8> {
 /// (each compressed with the dictionary content primed, as it will be used).
 /// libzstd loads it (both compress and decompress sides) and a decoder warm-
 /// starts the first block from these tables.
+///
+/// **Experimental** for the same reason as [`train_dictionary`]: the underlying
+/// COVER content selection is simplified, so dictionary quality may change.
 ///
 /// Falls back to returning the raw COVER content (a valid raw-content
 /// dictionary) when the content is too small to finalize or the literals can't
