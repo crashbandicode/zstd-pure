@@ -68,11 +68,14 @@ both decoders at each level:
 |  9 | 62,515,463 B | 59,081,628 B | 1.058× |
 | 19 | 55,797,558 B | 52,891,946 B | 1.055× |
 
-Within ~2–6 % of libzstd across the range. The high-level gap partly reflects
-our 8 MiB window cap (`MAX_WINDOW_LOG` 23, for decoder interoperability) versus
-libzstd's larger window on the multi-MB files (e.g. `mozilla` 51 MB, `webster`
-41 MB), where matches farther than 8 MiB back are out of our reach — the
-long-distance-matching item (T2.4) targets exactly this.
+Within ~2–6 % of libzstd across the range. The high-level gap is **not** the
+8 MiB window cap, as first suspected: running the same corpus through
+`compress_long` (long-distance matching, window up to log 27) moves L19 only from
+55,797,558 to 55,780,501 B (< 0.1 %) — Silesia has few repeats beyond 8 MiB, so
+reaching farther buys almost nothing here. The gap is the parse and entropy
+coding (libzstd's optimal parse and offset/length modelling), not window reach.
+LDM's win is real but specific to data with genuine far-apart duplicates — see
+the `compress_long` section below.
 
 Reproduce: `ZSTD_PURE_CORPUS=~/fixtures/silesia/raw cargo test --release
 real_corpus -- --ignored --nocapture`.

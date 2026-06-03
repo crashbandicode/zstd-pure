@@ -19,13 +19,15 @@
 //!   ZSTD_PURE_CORPUS=~/fixtures/silesia \
 //!     cargo test --release real_corpus -- --ignored --nocapture
 //!
-//! Knobs: `ZSTD_PURE_CORPUS_LEVELS` (default `3,9,19`) and
-//! `ZSTD_PURE_CORPUS_MAX_MB` (skip files larger than this; default: no limit).
+//! Knobs: `ZSTD_PURE_CORPUS_LEVELS` (default `3,9,19`),
+//! `ZSTD_PURE_CORPUS_MAX_MB` (skip files larger than this; default: no limit),
+//! and `ZSTD_PURE_CORPUS_LONG` (set to use `compress_long` — long-distance
+//! matching — for our encoder, to measure the LDM ratio on real data).
 //! `--nocapture` surfaces the per-level ratio summary.
 
 use std::path::{Path, PathBuf};
 
-use zstd_pure::{compress as our_compress, decompress};
+use zstd_pure::{compress as our_compress, compress_long as our_compress_long, decompress};
 
 /// Recursively collect every regular file under `root`, sorted for determinism.
 fn corpus_files(root: &Path) -> Vec<PathBuf> {
@@ -76,6 +78,7 @@ fn real_corpus_round_trips_both_ways() {
     let levels = env_levels();
     assert!(!levels.is_empty(), "ZSTD_PURE_CORPUS_LEVELS parsed to no levels");
     let max_bytes = env_max_bytes();
+    let use_long = std::env::var("ZSTD_PURE_CORPUS_LONG").is_ok();
 
     let files = corpus_files(Path::new(&root));
     assert!(!files.is_empty(), "no regular files under {root}");
@@ -99,7 +102,11 @@ fn real_corpus_round_trips_both_ways() {
         for (i, &level) in levels.iter().enumerate() {
             // No content checksum, so the size is apples-to-apples with
             // libzstd's no-checksum default below.
-            let ours = our_compress(&data, level, false, true);
+            let ours = if use_long {
+                our_compress_long(&data, level, false, true)
+            } else {
+                our_compress(&data, level, false, true)
+            };
             let by_self = decompress(&ours).unwrap_or_else(|e| {
                 panic!("{}: our decode of our L{level} frame: {e}", path.display())
             });
@@ -132,7 +139,8 @@ fn real_corpus_round_trips_both_ways() {
         }
     }
 
-    eprintln!("real corpus {root}: {n_files} files ({total_raw} raw bytes), {n_skipped} skipped");
+    let mode = if use_long { "compress_long" } else { "compress" };
+    eprintln!("real corpus {root} [{mode}]: {n_files} files ({total_raw} raw bytes), {n_skipped} skipped");
     for (i, &level) in levels.iter().enumerate() {
         let ratio = ours_bytes[i] as f64 / lib_bytes[i].max(1) as f64;
         eprintln!(

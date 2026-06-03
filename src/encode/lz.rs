@@ -499,6 +499,17 @@ impl BtState {
         }
     }
 
+    /// Lowest position the tree can correctly reference from `pos`. The tree only
+    /// has `1 << bt_log` node slots (indexed by `pos & bt_mask`), so positions
+    /// farther back than that alias the live ones and corrupt the links; the
+    /// search window is therefore clamped to the tree's coverage even if the
+    /// caller's `max_offset` is larger (LDM supplies the farther matches, so the
+    /// tree never needs to reach past its own array).
+    #[inline]
+    fn window_low(&self, pos: usize, max_offset: usize) -> usize {
+        pos.saturating_sub(max_offset.min(self.bt_mask + 1))
+    }
+
     /// Insert `curr` into the tree **and** return its longest match `(len,
     /// offset)` (`len < MIN_MATCH` ⇒ none) — zstd's `ZSTD_insertBtAndGetAllMatches`
     /// reduced to the longest (the hybrid only needs the long-range reach; the
@@ -516,7 +527,7 @@ impl BtState {
         max_offset: usize,
         nb_compares: usize,
     ) -> (usize, usize) {
-        let window_low = curr.saturating_sub(max_offset);
+        let window_low = self.window_low(curr, max_offset);
         let h = hash4(read_u32(data, curr), self.hash_log);
         let mut match_index = self.hash[h];
         self.hash[h] = curr as i32;
@@ -570,7 +581,7 @@ impl BtState {
     /// inserts positions in order separately; this is the query half of the
     /// descent (same `commonLength`-bounded walk as the inserting variants).
     fn find_longest(&self, data: &[u8], ip: usize, end: usize, max_offset: usize, nb_compares: usize) -> (usize, usize) {
-        let window_low = ip.saturating_sub(max_offset);
+        let window_low = self.window_low(ip, max_offset);
         let h = hash4(read_u32(data, ip), self.hash_log);
         let mut match_index = self.hash[h];
         let mut common_smaller = 0usize;
@@ -610,7 +621,7 @@ impl BtState {
     /// [`Self::insert_and_get_longest`] but **caps** the extension at
     /// [`BT_INSERT_CAP`] to bound the per-position cost on periodic data.
     fn insert_bt1(&mut self, data: &[u8], curr: usize, end: usize, max_offset: usize, nb_compares: usize) {
-        let window_low = curr.saturating_sub(max_offset);
+        let window_low = self.window_low(curr, max_offset);
         let ext_end = (curr + BT_INSERT_CAP).min(end);
         let h = hash4(read_u32(data, curr), self.hash_log);
         let mut match_index = self.hash[h];
@@ -1441,6 +1452,42 @@ pub fn parse_with_ldm(
 mod tests {
     use super::*;
     use crate::sequences::{decode, SeqTables};
+
+    /// The binary tree references positions only within its array coverage
+    /// (`1 << bt_log`); a larger `max_offset` (as `compress_long` advertises)
+    /// must be clamped, or positions farther back alias live node slots and
+    /// corrupt the links — silently mis-encoding large inputs. Guards the clamp.
+    #[test]
+    fn bt_search_window_clamps_to_coverage() {
+        let bt_log = 10u32;
+        let coverage = 1usize << bt_log;
+        let tree = BtState::new(12, bt_log);
+        // A max_offset beyond coverage is clamped; within coverage it's unchanged.
+        assert_eq!(tree.window_low(5_000_000, 1 << 26), 5_000_000 - coverage);
+        assert_eq!(tree.window_low(5_000_000, 500), 5_000_000 - 500);
+        assert_eq!(tree.window_low(100, 1 << 26), 0);
+
+        // End-to-end: a token that recurs only *beyond* coverage must not be
+        // matched (it's out of the tree's reach) even with a huge max_offset, and
+        // any match returned must be byte-real. The token starts at position 1 so
+        // that, without the clamp, its far occurrence would (wrongly) be in range.
+        let token = b"ZQX7-tree-clamp-probe!";
+        let mut data = vec![b'#'];
+        data.extend_from_slice(token); // token at [1, ..)
+        data.extend(core::iter::repeat(b'.').take(2 * coverage));
+        let probe = data.len();
+        data.extend_from_slice(token);
+        let mut tree = BtState::new(14, bt_log);
+        for p in 0..probe {
+            tree.insert_bt1(&data, p, data.len(), 1 << 26, 16);
+        }
+        let (ml, mpos) = tree.find_longest(&data, probe, data.len(), 1 << 26, 16);
+        if ml >= MIN_MATCH {
+            let off = probe - mpos;
+            assert!(off <= coverage, "tree returned an out-of-coverage offset {off}");
+            assert_eq!(&data[mpos..mpos + ml], &data[probe..probe + ml], "tree match not real");
+        }
+    }
 
     /// A fixed-stride recurring token with varying interstitial literals forces
     /// the parser to re-match at the same offset repeatedly — exactly the case

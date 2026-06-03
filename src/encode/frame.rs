@@ -221,8 +221,14 @@ pub fn compress_long(data: &[u8], level: i32, checksum: bool, expect_magic: bool
             // the block with them injected and the gaps filled by the finder.
             let matches = ldm.generate(data, start..end, regular_reach, max_offset);
             let mut comp = Vec::new();
+            // The regular finder searches only the regular window (`regular_reach`);
+            // matches beyond it come from the LDM index above. Passing the full LDM
+            // window would exceed the binary tree's array size (sized to the regular
+            // window) and alias its node links, corrupting it — so the finder is
+            // bounded to its tables' reach, while the LDM matches carry the large
+            // offsets the frame's advertised window admits.
             match write_compressed_block_ldm(
-                &mut comp, last, data, start..end, &mut finder, max_offset, &state, split_depth,
+                &mut comp, last, data, start..end, &mut finder, regular_reach, &state, split_depth,
                 &matches,
             ) {
                 Ok(next) if comp.len() < store.len() => {
