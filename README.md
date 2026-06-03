@@ -143,6 +143,13 @@ Ratio + throughput vs libzstd are tracked in [`BENCHMARKS.md`](BENCHMARKS.md).
 
 ## Handoff — remaining work (notes for the next agent)
 
+> **The current task list and execution model live in [`HANDOFF.md`](HANDOFF.md)**
+> (overnight autonomous run: streaming encoder, LDM decode-side, multithreading, an
+> enwik8/enwik9 corpus, then the `records` cost-model lever and a `ruzstd` perf
+> comparison). Production-grade testing (proptest + cargo-fuzz + a fixture-gated
+> real-world corpus) and T2.4 long-distance matching (`compress_long`) are **done**.
+> The notes below are background on how the decoder/encoder got here.
+
 State at this point: the **decoder** is at ecosystem parity (multi-frame,
 magicless, dictionaries [raw + tagged], streaming/bounded-memory, frame
 inspection) and hardened by a randomized never-panic + libzstd-oracle harness.
