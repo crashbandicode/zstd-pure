@@ -8,7 +8,7 @@
 //! vs libzstd; minutes on the medium-match profiles at L19).
 
 use std::time::Instant;
-use zstd_pure::{compress, compress_long};
+use zstd_pure::{compress, compress_long, compress_parallel};
 
 /// Deterministic LCG (no wall-clock / RNG syscalls, so both runs see identical
 /// inputs).
@@ -50,14 +50,15 @@ fn revisions() -> Vec<u8> {
     out
 }
 
-/// ~2 MB of log lines from a small template + field pool — long-range template
-/// repeats spread across the whole file.
-fn logs() -> Vec<u8> {
-    let mut r = Rng(0x9e37_79b9_7f4a_7c15);
+/// `target` bytes of log lines from a small template + field pool — long-range
+/// template repeats spread across the whole file. `seed` lets callers generate
+/// distinct streams of the same shape.
+fn logs_sized(target: usize, seed: u64) -> Vec<u8> {
+    let mut r = Rng(seed);
     let lvl = ["INFO ", "WARN ", "ERROR", "DEBUG"];
     let op = ["connect", "timeout", "retry", "flush", "commit", "rollback", "evict", "accept"];
-    let mut out = Vec::new();
-    while out.len() < 2_000_000 {
+    let mut out = Vec::with_capacity(target + 64);
+    while out.len() < target {
         out.extend_from_slice(
             format!(
                 "{} t={} id={} op={} dur={}ms\n",
@@ -71,6 +72,11 @@ fn logs() -> Vec<u8> {
         );
     }
     out
+}
+
+/// ~2 MB of log lines (the small-corpus profile).
+fn logs() -> Vec<u8> {
+    logs_sized(2_000_000, 0x9e37_79b9_7f4a_7c15)
 }
 
 /// ~2 MB of fixed-size binary records (a shared 8-byte header + a mostly-palette
@@ -118,7 +124,50 @@ fn far_dup() -> Vec<u8> {
     out
 }
 
+/// Demonstrate `compress_parallel`'s wall-clock speedup vs serial `compress` on a
+/// large input (HANDOFF §4.3). Wall-clock is load-sensitive — the *relative*
+/// shape (does it scale with jobs, and what does the seam cost the ratio?) is the
+/// point, not absolute numbers. Each parallel output is round-tripped through
+/// libzstd to prove the multi-frame stream is valid.
+fn parallel_speedup() {
+    let data = logs_sized(24 << 20, 0x5151_5151_2323_2323); // 24 MiB, distinct stream
+    let level = 12;
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    println!(
+        "\n=== compress_parallel vs serial (L{level}, {} MiB, available_parallelism={cores}) ===",
+        data.len() >> 20
+    );
+    println!("{:<8} {:>8} {:>11} {:>9} {:>10}", "n_jobs", "ms", "bytes", "speedup", "seam cost");
+
+    let t = Instant::now();
+    let serial = compress(&data, level, false, true);
+    let serial_ms = t.elapsed().as_millis().max(1);
+    println!("{:<8} {:>8} {:>11} {:>9} {:>10}", "serial", serial_ms, serial.len(), "1.00x", "-");
+
+    for &n_jobs in &[2usize, 4, 8] {
+        let t = Instant::now();
+        let par = compress_parallel(&data, level, n_jobs, false, true);
+        let ms = t.elapsed().as_millis().max(1);
+        // The multi-frame parallel output must decode back through libzstd.
+        assert_eq!(
+            zstd::stream::decode_all(&par[..]).unwrap(),
+            data,
+            "parallel n_jobs={n_jobs} round-trip failed"
+        );
+        println!(
+            "{:<8} {:>8} {:>11} {:>8.2}x {:>9.2}%",
+            n_jobs,
+            ms,
+            par.len(),
+            serial_ms as f64 / ms as f64,
+            (par.len() as f64 / serial.len() as f64 - 1.0) * 100.0
+        );
+    }
+}
+
 fn main() {
+    parallel_speedup();
+
     let profiles: Vec<(&str, Vec<u8>)> = vec![
         ("revisions", revisions()),
         ("logs", logs()),

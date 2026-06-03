@@ -122,6 +122,27 @@ is a hash-chain DP augmented with a binary tree (the hybrid below), which adds t
 long-range matches a pure chain misses on big many-candidate inputs at the cost of
 extra per-position work at L16+.
 
+## Parallel compression (`compress_parallel`)
+
+`compress_parallel(data, level, n_jobs, …)` splits the input into `n_jobs`
+independent frames compressed on `std::thread` workers, concatenated into a
+multi-frame stream (see the README). From `examples/bench_large`'s
+`parallel_speedup` (24 MiB of log-like text, L12, on an 8-core dev machine —
+**relative shape matters, absolute numbers are machine-specific**):
+
+| n_jobs | time | speedup | seam cost (size) |
+|-------:|-----:|--------:|-----------------:|
+| serial | 8046 ms | 1.00× | — |
+| 2 | 5326 ms | 1.51× | +0.16% |
+| 4 | 2747 ms | 2.93× | +0.48% |
+| 8 | 2216 ms | 3.63× | +1.12% |
+
+Throughput scales with the job count (3.6× on 8 cores) while the ratio cost of
+severing cross-segment matches at the frame seams stays small (≤ ~1 % here, and
+shrinking with larger segments). The split is deterministic, so the bytes are
+reproducible for fixed arguments. Reproduce with
+`cargo run --release --example bench_large` (the parallel table prints first).
+
 ## Standing & next levers
 
 - **Strong:** redundant / repeating / cross-block data (often ≤ libzstd); dense
