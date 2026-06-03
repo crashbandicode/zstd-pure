@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: ['**'] # every branch (so a ci-test branch can be validated before promoting to main)
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: fmt + clippy + docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: rustfmt
+        run: cargo fmt --all --check
+      - name: clippy (std, all targets)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: clippy (no_std + alloc)
+        run: cargo clippy --no-default-features --features alloc -- -D warnings
+      - name: docs (deny warnings)
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  test:
+    name: test + no_std build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: test (std, default features)
+        run: cargo test --all-features
+      - name: build (no_std + alloc)
+        run: cargo build --no-default-features --features alloc
+
+  msrv:
+    name: MSRV (1.81) builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.81.0
+      # The MSRV applies to the library + its single runtime dep (thiserror); dev
+      # dependencies may need a newer toolchain, so this checks builds only, not
+      # the test suite.
+      - name: build (std)
+        run: cargo build --all-features
+      - name: build (no_std + alloc)
+        run: cargo build --no-default-features --features alloc
+
+  no-std-target:
+    name: bare-metal target (thumbv7em-none-eabi)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabi
+      - name: build no_std for a real bare-metal target
+        run: cargo build --no-default-features --features alloc --target thumbv7em-none-eabi
+
+  fuzz:
+    name: fuzz targets build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: install cargo-fuzz
+        run: cargo install cargo-fuzz
+      - name: build fuzz targets
+        run: cargo fuzz build
