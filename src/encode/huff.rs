@@ -44,11 +44,14 @@ pub struct CodeTable {
 }
 
 impl CodeTable {
-    /// Whether this table can encode every byte in `lits` — the validity gate
-    /// for reusing it in a Treeless literals block. A byte with no code (zero
-    /// bit length) isn't in the table and can't be emitted.
-    pub fn can_encode(&self, lits: &[u8]) -> bool {
-        lits.iter().all(|&b| self.nbits[b as usize] > 0)
+    /// Whether this table can encode every byte present in a literals block (a
+    /// byte with no code — zero bit length — isn't in the table and can't be
+    /// emitted) — the validity gate for reusing it in a Treeless block. Takes a
+    /// precomputed byte histogram (a byte is present iff `freq[b] > 0`) so the
+    /// check is O(256), not O(n) over the (large) literals the planner already
+    /// histogrammed.
+    pub fn can_encode_hist(&self, freq: &[u32; 256]) -> bool {
+        (0..256).all(|b| freq[b] == 0 || self.nbits[b] > 0)
     }
 }
 
@@ -351,25 +354,91 @@ fn build_compressed_section(literals: &[u8]) -> Result<(Vec<u8>, CodeTable)> {
     for &b in literals {
         freq[b as usize] += 1;
     }
+    let (table, weight_header) = build_fresh_table(&freq).ok_or(ZstdError::Invalid {
+        what: "huffman literals",
+        detail: "need >= 2 distinct symbols / unbuildable table".into(),
+    })?;
+    let section = assemble_compressed_section(&table, &weight_header, literals)?;
+    Ok((section, table))
+}
+
+/// Build the fresh Huffman table for `freq` plus its weight-header bytes, or
+/// `None` when the literals can't be Huffman-coded (fewer than 2 distinct
+/// symbols, an unbuildable table, or weights that don't fit a header). Cheap
+/// (O(alphabet)); the expensive per-byte stream encoding is deferred to
+/// [`assemble_compressed_section`] so the caller can *size* candidates first.
+fn build_fresh_table(freq: &[u32; 256]) -> Option<(CodeTable, Vec<u8>)> {
     if freq.iter().filter(|&&c| c > 0).count() < 2 {
-        return Err(ZstdError::Invalid {
-            what: "huffman literals",
-            detail: "need >= 2 distinct symbols".into(),
-        });
+        return None;
     }
+    let lengths = code_lengths(freq);
+    let table = build_code_table(&lengths).ok()?;
+    let mut weight_header = Vec::new();
+    write_weight_header(&mut weight_header, &table).ok()?;
+    Some((table, weight_header))
+}
 
-    let lengths = code_lengths(&freq);
-    let table = build_code_table(&lengths)?;
-
-    let mut payload = Vec::new();
-    write_weight_header(&mut payload, &table)?;
-    let (four, streams) = encode_lit_streams(&table, literals)?;
+/// Assemble a Compressed (block_type 2) section from a prebuilt table + its
+/// weight header, encoding the streams now. Split from [`build_fresh_table`] so
+/// [`write_literals_auto`] can compare candidate sizes (via [`streams_byte_len`])
+/// before committing to the one expensive stream encode.
+fn assemble_compressed_section(
+    table: &CodeTable,
+    weight_header: &[u8],
+    lits: &[u8],
+) -> Result<Vec<u8>> {
+    let (four, streams) = encode_lit_streams(table, lits)?;
+    let mut payload = Vec::with_capacity(weight_header.len() + streams.len());
+    payload.extend_from_slice(weight_header);
     payload.extend_from_slice(&streams);
-
     let mut out = Vec::new();
-    write_compressed_lit_header(&mut out, 2, four, literals.len(), payload.len())?;
+    write_compressed_lit_header(&mut out, 2, four, lits.len(), payload.len())?;
     out.extend_from_slice(&payload);
-    Ok((out, table))
+    Ok(out)
+}
+
+/// Exact byte length of the Huffman stream payload (`encode_lit_streams` output,
+/// no section header) for `table` over `lits`, and whether the 4-stream form is
+/// used — computed without the bit packing. Each stream is
+/// `ceil((Σ code_len + 1 sentinel) / 8)` bytes (see [`encode_stream`]); the
+/// 4-stream form adds a 6-byte jump table. `None` when a 4-stream substream would
+/// overflow the u16 jump-table field (the real [`encode_4stream`] errors there).
+fn streams_byte_len(table: &CodeTable, lits: &[u8]) -> Option<(bool, usize)> {
+    let n = lits.len();
+    let four = n >= 256 && n.div_ceil(4) * 3 <= n;
+    let stream_len = |seg: &[u8]| -> usize {
+        let bits: u64 = seg.iter().map(|&b| table.nbits[b as usize] as u64).sum();
+        ((bits + 1 + 7) / 8) as usize
+    };
+    if four {
+        let seg = n.div_ceil(4);
+        let s1 = stream_len(&lits[0..seg]);
+        let s2 = stream_len(&lits[seg..2 * seg]);
+        let s3 = stream_len(&lits[2 * seg..3 * seg]);
+        let s4 = stream_len(&lits[3 * seg..]);
+        if s1 > u16::MAX as usize || s2 > u16::MAX as usize || s3 > u16::MAX as usize {
+            return None; // jump-table field can't hold the length -> encoder errors
+        }
+        Some((true, 6 + s1 + s2 + s3 + s4))
+    } else {
+        Some((false, stream_len(lits)))
+    }
+}
+
+/// Byte length of [`write_compressed_lit_header`] for the given form / sizes, or
+/// `None` if `regen`/`comp` exceed the largest `Size_Format` (the writer errors).
+fn compressed_header_len(four: bool, regen: usize, comp: usize) -> Option<usize> {
+    if !four {
+        (regen <= 0x3FF && comp <= 0x3FF).then_some(3)
+    } else if regen <= 0x3FF && comp <= 0x3FF {
+        Some(3)
+    } else if regen <= 0x3FFF && comp <= 0x3FFF {
+        Some(4)
+    } else if regen <= 0x3FFFF && comp <= 0x3FFFF {
+        Some(5)
+    } else {
+        None
+    }
 }
 
 /// Build a **Treeless** (block_type 3) literals section — the streams only,
@@ -425,40 +494,81 @@ pub fn write_literals_auto(
     lits: &[u8],
     prev: Option<&CodeTable>,
 ) -> Option<CodeTable> {
-    // The raw candidate's size is known without building it (`raw_header_len` +
-    // the bytes verbatim), so only the *compressing* candidates are materialized;
-    // raw is written straight into `out` if it wins, avoiding a full copy of the
-    // (often large) literals when compression is chosen. Each candidate carries
-    // the table that becomes current if it's chosen.
-    let mut best: Option<(Vec<u8>, Option<CodeTable>)> = None;
-    let mut consider = |bytes: Vec<u8>, table: Option<CodeTable>| {
-        // `<` (strict) keeps the first-inserted on ties — compressed before
-        // treeless — matching the old `min_by_key` (first minimum wins).
-        // (`map_or`, not `is_none_or`, to stay within the 1.81 MSRV.)
-        if best.as_ref().map_or(true, |(b, _)| bytes.len() < b.len()) {
-            best = Some((bytes, table));
-        }
-    };
-    if let Ok((bytes, table)) = build_compressed_section(lits) {
-        consider(bytes, Some(table));
+    // Pick the smallest candidate by its *exact* size, computed without encoding
+    // any streams, then build only the winner. This avoids the old "encode all
+    // three, keep smallest" (up to two full Huffman encodes + a raw copy per
+    // block). A wrong size estimate could only pick a sub-optimal candidate (a
+    // ratio change, caught by tests/corpus) — never an invalid section, since the
+    // chosen candidate is still built in full.
+    let mut freq = [0u32; 256];
+    for &b in lits {
+        freq[b as usize] += 1;
     }
-    if let Some(t) = prev {
-        if t.can_encode(lits) {
-            if let Ok(bytes) = build_treeless_section(lits, t) {
-                consider(bytes, prev.cloned());
-            }
+    let fresh = build_fresh_table(&freq);
+
+    let n = lits.len();
+    let compressed_size = fresh.as_ref().and_then(|(t, wh)| {
+        let (four, slen) = streams_byte_len(t, lits)?;
+        let payload = wh.len() + slen;
+        Some(compressed_header_len(four, n, payload)? + payload)
+    });
+    let treeless_size = prev.and_then(|t| {
+        if !t.can_encode_hist(&freq) {
+            return None;
+        }
+        let (four, slen) = streams_byte_len(t, lits)?;
+        Some(compressed_header_len(four, n, slen)? + slen)
+    });
+    let raw_size = n + raw_header_len(n);
+
+    // Raw wins ties (it was first in the old `min_by_key`), so a compressing
+    // candidate must be *strictly* smaller; compressed is tried before treeless,
+    // so it wins their ties too.
+    enum Choice {
+        Raw,
+        Compressed,
+        Treeless,
+    }
+    let mut choice = Choice::Raw;
+    let mut best = raw_size;
+    if let Some(c) = compressed_size {
+        if c < best {
+            best = c;
+            choice = Choice::Compressed;
+        }
+    }
+    if let Some(t) = treeless_size {
+        if t < best {
+            choice = Choice::Treeless;
         }
     }
 
-    // Raw wins ties (it was the first candidate in the old `min_by_key`), so the
-    // compressing best must be *strictly* smaller to be chosen.
-    let raw_size = lits.len() + raw_header_len(lits.len());
-    match best {
-        Some((bytes, table)) if bytes.len() < raw_size => {
-            out.extend_from_slice(&bytes);
-            table
+    match choice {
+        // `fresh`/`prev` are guaranteed `Some` here: the size was `Some`.
+        Choice::Compressed => {
+            let (table, weight_header) = fresh.unwrap();
+            match assemble_compressed_section(&table, &weight_header, lits) {
+                Ok(bytes) => {
+                    out.extend_from_slice(&bytes);
+                    Some(table)
+                }
+                Err(_) => {
+                    write_raw_literals(out, lits);
+                    prev.cloned()
+                }
+            }
         }
-        _ => {
+        Choice::Treeless => match build_treeless_section(lits, prev.unwrap()) {
+            Ok(bytes) => {
+                out.extend_from_slice(&bytes);
+                prev.cloned()
+            }
+            Err(_) => {
+                write_raw_literals(out, lits);
+                prev.cloned()
+            }
+        },
+        Choice::Raw => {
             write_raw_literals(out, lits);
             prev.cloned()
         }
@@ -530,6 +640,52 @@ mod tests {
                 ((u * u) / alphabet) as u8
             })
             .collect()
+    }
+
+    /// The analytic candidate sizes `write_literals_auto` chooses by must equal
+    /// the byte length of the section actually built — otherwise it could pick a
+    /// sub-optimal candidate (a silent ratio regression). Cover both the direct
+    /// (small alphabet) and FSE (alphabet > 128) weight headers, the 1-stream
+    /// (n < 256) and 4-stream forms, and the size-format boundaries.
+    #[test]
+    fn analytic_section_sizes_match_built_sections() {
+        for &alphabet in &[6u32, 60, 200] {
+            for &n in &[2usize, 5, 64, 255, 256, 257, 1024, 4096, 16384, 70000] {
+                let lits = skewed_bytes(n, alphabet, 0xABCD_1234 ^ n as u64);
+                let mut freq = [0u32; 256];
+                for &b in &lits {
+                    freq[b as usize] += 1;
+                }
+                let Some((table, wh)) = build_fresh_table(&freq) else {
+                    continue;
+                };
+
+                // Compressed (block_type 2): header + weight header + streams.
+                if let Ok(section) = assemble_compressed_section(&table, &wh, &lits) {
+                    let (four, slen) = streams_byte_len(&table, &lits).unwrap();
+                    let payload = wh.len() + slen;
+                    let hlen = compressed_header_len(four, n, payload).unwrap();
+                    assert_eq!(
+                        section.len(),
+                        hlen + payload,
+                        "compressed size mismatch (alphabet {alphabet}, n {n})"
+                    );
+                }
+
+                // Treeless (block_type 3): header + streams, reusing the table.
+                if table.can_encode_hist(&freq) {
+                    if let Ok(section) = build_treeless_section(&lits, &table) {
+                        let (four, slen) = streams_byte_len(&table, &lits).unwrap();
+                        let hlen = compressed_header_len(four, n, slen).unwrap();
+                        assert_eq!(
+                            section.len(),
+                            hlen + slen,
+                            "treeless size mismatch (alphabet {alphabet}, n {n})"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
