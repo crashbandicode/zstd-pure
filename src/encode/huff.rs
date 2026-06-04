@@ -408,7 +408,8 @@ fn streams_byte_len(table: &CodeTable, lits: &[u8]) -> Option<(bool, usize)> {
     let four = n >= 256 && n.div_ceil(4) * 3 <= n;
     let stream_len = |seg: &[u8]| -> usize {
         let bits: u64 = seg.iter().map(|&b| table.nbits[b as usize] as u64).sum();
-        ((bits + 1 + 7) / 8) as usize
+        // +1 for the sentinel bit, rounded up to whole bytes (see `encode_stream`).
+        (bits + 1).div_ceil(8) as usize
     };
     if four {
         let seg = n.div_ceil(4);
