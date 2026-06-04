@@ -991,15 +991,17 @@ pub fn lazy_parse_block(
     (seqs, literals)
 }
 
-/// The match [`bt_lazy_parse_block`] uses at `ip`: the hash chain's most-recent
-/// (small-offset) match, but substituting the binary tree's longest match when
-/// it's both a **long** match (`≥ target`) and **longer** than the chain's reach.
-/// The chain's depth bound can miss the longest match on far-apart repeats; the
-/// tree finds it regardless of recency. Restricting the substitution to long
-/// matches that the chain didn't already reach keeps it net-positive (the length
-/// gain covers the tree's possibly-larger offset), and on data whose matches sit
-/// within the chain's depth the tree finds nothing longer, so it's a no-op there.
-/// `(match_len, match_pos)`, `(0, 0)` if none.
+/// The match [`bt_lazy_parse_block`] uses at `ip`: the better — *by gain*
+/// (`len*4 - offset_bits`, the metric the lazy look-ahead uses) — of the hash
+/// chain's most-recent (small-offset) match and the binary tree's longest
+/// (recency-independent) match. The chain's depth bound can miss the longest match
+/// on far-apart repeats; the tree finds it regardless of recency. Choosing by gain
+/// (rather than a fixed length cutoff) lets a longer tree match win only when its
+/// extra length outweighs its larger offset, and keeps the chain's cheaper match
+/// otherwise — which closes most of the mid-level (btlazy2) gap to libzstd on
+/// structured data (json/wiki/mixed) without the large-offset mispricing a naive
+/// "always take the longer match" would cause. `(match_len, match_pos)`, `(0, 0)`
+/// if none.
 #[allow(clippy::too_many_arguments)]
 fn bt_lazy_best(
     chain: &ChainState,
@@ -1009,12 +1011,14 @@ fn bt_lazy_best(
     end: usize,
     max_offset: usize,
     depth: usize,
-    target: usize,
+    rep: &[u32; 3],
+    ll0: bool,
 ) -> (usize, usize) {
     let (cml, cpos) = chain.find(data, ip, end, max_offset, depth);
     let (tml, tpos) = tree.find_longest(data, ip, end, max_offset, depth);
-    if tml >= target && tml > cml {
-        (tml, tpos) // a longer long match than the chain's depth bound reached
+    let gain = |ml: usize, pos: usize| (ml as i64) * 4 - offset_bits(rep, ip - pos, ll0) as i64;
+    if tml >= MIN_MATCH && (cml < MIN_MATCH || gain(tml, tpos) > gain(cml, cpos)) {
+        (tml, tpos)
     } else {
         (cml, cpos)
     }
@@ -1035,11 +1039,10 @@ fn bt_best_match(
     end: usize,
     max_offset: usize,
     depth: usize,
-    target: usize,
     rep: &[u32; 3],
     ll0: bool,
 ) -> (usize, usize) {
-    let (fml, fpos) = bt_lazy_best(chain, tree, data, ip, end, max_offset, depth, target);
+    let (fml, fpos) = bt_lazy_best(chain, tree, data, ip, end, max_offset, depth, rep, ll0);
     let (rml, roff) = rep_match_at(data, ip, end, rep, ll0);
     if rml >= MIN_MATCH && rml >= fml {
         (rml, roff)
@@ -1064,7 +1067,6 @@ pub fn bt_lazy_parse_block(
     max_offset: usize,
     rep: &mut [u32; 3],
     depth: usize,
-    target: usize,
 ) -> (Vec<Seq>, Vec<u8>) {
     let (start, end) = (range.start, range.end);
     let mut seqs = Vec::new();
@@ -1094,7 +1096,6 @@ pub fn bt_lazy_parse_block(
             end,
             max_offset,
             depth,
-            target,
             rep,
             ip == anchor,
         );
@@ -1121,7 +1122,6 @@ pub fn bt_lazy_parse_block(
                 end,
                 max_offset,
                 depth,
-                target,
                 rep,
                 false,
             );
@@ -1939,9 +1939,6 @@ pub enum Finder {
         state: ChainState,
         tree: BtState,
         depth: usize,
-        /// Match length at/above which the chain's match is kept as-is; below it,
-        /// the tree's longest match may be substituted (see [`bt_lazy_best`]).
-        target: usize,
     },
     Opt {
         /// Hash chain — the small-offset Pareto match set.
@@ -1982,7 +1979,6 @@ impl Finder {
                 state: ChainState::new(params.hash_log, params.chain_log, params.min_match),
                 tree: BtState::new(params.hash_log, params.window_log),
                 depth: 1usize << params.search_log.min(10),
-                target: (params.target_length as usize).max(MIN_MATCH),
             },
             strat => {
                 // Greedy / Lazy / Lazy2 (the chain-only lazy parser).
@@ -2078,15 +2074,9 @@ impl Finder {
                 );
                 plain(s, l, rep)
             }
-            Finder::BtLazy {
-                state,
-                tree,
-                depth,
-                target,
-            } => {
-                let (s, l) = bt_lazy_parse_block(
-                    data, range, state, tree, max_offset, &mut rep, *depth, *target,
-                );
+            Finder::BtLazy { state, tree, depth } => {
+                let (s, l) =
+                    bt_lazy_parse_block(data, range, state, tree, max_offset, &mut rep, *depth);
                 plain(s, l, rep)
             }
             Finder::Opt {
@@ -2143,9 +2133,7 @@ impl Finder {
                     p += 1;
                 }
             }
-            Finder::BtLazy {
-                state, tree, depth, ..
-            }
+            Finder::BtLazy { state, tree, depth }
             | Finder::Opt {
                 state, tree, depth, ..
             } => {
