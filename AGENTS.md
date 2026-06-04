@@ -36,6 +36,11 @@ encoder/decoder change, ALL of these must pass (this mirrors CI):
   (`-- -max_total_time=80`) — clean (no crash/SUMMARY/panic).
 - `cargo fmt --check`; `cargo clippy --all-targets` (CI denies warnings);
   `cargo build --no-default-features` (no_std); docs build with warnings denied.
+- Informational coverage uses `cargo-llvm-cov`:
+  `cargo llvm-cov --release --summary-only --all-features -- --skip compress_roundtrips_across_levels --skip round_trips_three_ways_across_levels --skip frame_is_independent_of_write_chunk_size --skip multi_block_stream_compresses_and_round_trips --skip our_frames_round_trip_through_the_streaming_decoder`.
+  The skipped matrix tests are still covered by normal CI; the coverage job keeps
+  them out only so the report is bounded. Use `--html` instead of
+  `--summary-only` when hunting uncovered surfaces.
 - **Ratio/speed, gated hard:**
   - `ZSTD_PURE_CORPUS=~/fixtures/silesia cargo run --release --example throughput`
     — size-vs-libzstd (`sizeΔ`, deterministic) + encode/decode MB/s.

@@ -3,6 +3,7 @@
 ![MSRV](https://img.shields.io/badge/MSRV-1.81-blue)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![unsafe](https://img.shields.io/badge/unsafe-forbidden-success)
+[![Coverage](https://codecov.io/gh/crashbandicode/zstd-pure/branch/main/graph/badge.svg)](https://codecov.io/gh/crashbandicode/zstd-pure)
 
 A from-scratch [Zstandard][zstd] ([RFC 8878]) **decoder and encoder**, written
 entirely in safe Rust from the specification — no GPL code, and **no libzstd at
@@ -197,6 +198,7 @@ See [`examples/safe_decompress.rs`](examples/safe_decompress.rs)
   `$ZSTD_PURE_CORPUS` and round-trips every file both ways across levels, e.g.
   `ZSTD_PURE_CORPUS=~/fixtures/silesia/raw cargo test --release real_corpus -- --ignored --nocapture`
   (knobs: `ZSTD_PURE_CORPUS_LEVELS`, `ZSTD_PURE_CORPUS_MAX_MB`, `ZSTD_PURE_CORPUS_LONG`).
+- **Coverage** (`cargo-llvm-cov`, informational): `cargo llvm-cov --release --summary-only --all-features -- --skip compress_roundtrips_across_levels --skip round_trips_three_ways_across_levels --skip frame_is_independent_of_write_chunk_size --skip multi_block_stream_compresses_and_round_trips --skip our_frames_round_trip_through_the_streaming_decoder`. The skipped matrix tests are still run by normal CI; coverage keeps them out only to keep the report bounded. Use `--html` instead of `--summary-only` when hunting uncovered surfaces.
 
 ## Benchmarks
 

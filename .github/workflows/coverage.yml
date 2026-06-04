@@ -1,0 +1,46 @@
+name: Coverage
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  coverage:
+    name: cargo-llvm-cov
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: collect coverage
+        run: |
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov test --release --all-features -- \
+            --skip compress_roundtrips_across_levels \
+            --skip round_trips_three_ways_across_levels \
+            --skip frame_is_independent_of_write_chunk_size \
+            --skip multi_block_stream_compresses_and_round_trips \
+            --skip our_frames_round_trip_through_the_streaming_decoder
+          cargo llvm-cov report --summary-only | tee coverage-summary.txt
+          cargo llvm-cov report --lcov --output-path lcov.info
+      - name: upload to Codecov
+        uses: codecov/codecov-action@v5
+        continue-on-error: true
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+      - name: upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            coverage-summary.txt
+            lcov.info
