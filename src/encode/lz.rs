@@ -958,6 +958,36 @@ fn bt_lazy_best(
     }
 }
 
+/// [`bt_lazy_best`] made repeat-offset-aware: the hybrid finder's best match,
+/// replaced by a [`rep_match_at`] repeat match when that ties or beats it on
+/// length (a repeat codes ~free, so it wins on cost). Returns `(len,
+/// back_distance)` — the back-distance, not the position — so the caller emits it
+/// through the usual `encode_offset` path (correctness is independent of the
+/// choice). `(0, 0)` if neither reaches [`MIN_MATCH`]. Mirrors [`best_match_at`].
+#[allow(clippy::too_many_arguments)]
+fn bt_best_match(
+    chain: &ChainState,
+    tree: &BtState,
+    data: &[u8],
+    ip: usize,
+    end: usize,
+    max_offset: usize,
+    depth: usize,
+    target: usize,
+    rep: &[u32; 3],
+    ll0: bool,
+) -> (usize, usize) {
+    let (fml, fpos) = bt_lazy_best(chain, tree, data, ip, end, max_offset, depth, target);
+    let (rml, roff) = rep_match_at(data, ip, end, rep, ll0);
+    if rml >= MIN_MATCH && rml >= fml {
+        (rml, roff)
+    } else if fml >= MIN_MATCH {
+        (fml, ip - fpos)
+    } else {
+        (0, 0)
+    }
+}
+
 /// `btlazy2` (L13–15): a lazy2 parse (greedy with two-step look-ahead) over a
 /// **hybrid** finder — the hash chain for the recent small-offset matches that
 /// dominate, plus the binary `tree` for the occasional long match the chain's
@@ -992,13 +1022,28 @@ pub fn bt_lazy_parse_block(
             tree.insert_bt1(data, inserted, end, max_offset, depth);
             inserted += 1;
         }
-        let (mut ml, mut mpos) =
-            bt_lazy_best(chain, tree, data, ip, end, max_offset, depth, target);
+        // Repeat-offset-aware best match (a cheap rep beats an equal-length finder
+        // match), `ll0` = whether a match here opens with no preceding literals.
+        let (mut ml, mut moff) = bt_best_match(
+            chain,
+            tree,
+            data,
+            ip,
+            end,
+            max_offset,
+            depth,
+            target,
+            rep,
+            ip == anchor,
+        );
         if ml < MIN_MATCH {
             ip += 1;
             continue;
         }
-        // lazy2: defer to a strictly-longer match up to two bytes later.
+        // lazy2: defer up to two bytes later, but on *gain* (`ml*4 - offset_bits`,
+        // +4 bias to the earlier match) not raw length — so a cheaper-offset match
+        // can win without being longer. Mirrors `lazy_parse_block`.
+        let mut cur_obits = offset_bits(rep, moff, ip == anchor);
         let mut steps = 2u32;
         while steps > 0 && ip < ilimit {
             while inserted <= ip {
@@ -1006,11 +1051,25 @@ pub fn bt_lazy_parse_block(
                 tree.insert_bt1(data, inserted, end, max_offset, depth);
                 inserted += 1;
             }
-            let (ml1, mpos1) =
-                bt_lazy_best(chain, tree, data, ip + 1, end, max_offset, depth, target);
-            if ml1 > ml {
+            let (ml1, moff1) = bt_best_match(
+                chain,
+                tree,
+                data,
+                ip + 1,
+                end,
+                max_offset,
+                depth,
+                target,
+                rep,
+                false,
+            );
+            let la_obits = offset_bits(rep, moff1, false);
+            let gain_cur = (ml as i64) * 4 - cur_obits as i64 + 4;
+            let gain_la = (ml1 as i64) * 4 - la_obits as i64;
+            if ml1 >= MIN_MATCH && gain_la > gain_cur {
                 ml = ml1;
-                mpos = mpos1;
+                moff = moff1;
+                cur_obits = la_obits;
                 ip += 1;
                 steps -= 1;
             } else {
@@ -1020,7 +1079,7 @@ pub fn bt_lazy_parse_block(
 
         let lit_len = ip - anchor;
         literals.extend_from_slice(&data[anchor..ip]);
-        let offset = ip - mpos;
+        let offset = moff;
         let ll0 = lit_len == 0;
         let offset_value = encode_offset(rep, offset as u32, ll0);
         resolve_offset(rep, offset_value, ll0);
