@@ -1290,6 +1290,9 @@ fn run_dp(
             let mut new_rep = opt[i].rep;
             resolve_offset(&mut new_rep, offval, ll0);
             let hi = ml.min(MAX_SUBLEN);
+            // `l` is also the match length (`j = i + l`, `mlen: l`), so a range
+            // loop reads more clearly than iterating `ml_price` with an offset.
+            #[allow(clippy::needless_range_loop)]
             for l in MIN_MATCH..=hi {
                 let j = i + l;
                 let price = base + ll_owed + ocost + ml_price[l];
@@ -1330,6 +1333,8 @@ fn run_dp(
             let mut new_rep = opt[i].rep;
             resolve_offset(&mut new_rep, offval, ll0);
             let hi = len_k.min(MAX_SUBLEN);
+            // See the rep loop above: `l` is the match length, not just an index.
+            #[allow(clippy::needless_range_loop)]
             for l in (prev_len + 1).max(MIN_MATCH)..=hi {
                 let j = i + l;
                 let price = base + ll_owed + ocost + ml_price[l];
