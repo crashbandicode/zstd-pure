@@ -217,6 +217,26 @@ fn offset_bits(rep: &[u32; 3], moff: usize, ll0: bool) -> u32 {
     of_code(encode_offset(rep, moff as u32, ll0)) as u32
 }
 
+#[inline]
+fn reduce_index_entry(entry: &mut i32, drop: usize) {
+    if *entry < 0 {
+        return;
+    }
+    let pos = *entry as usize;
+    if pos >= drop {
+        *entry = (pos - drop) as i32;
+    } else {
+        *entry = -1;
+    }
+}
+
+#[inline]
+fn reduce_index_table(table: &mut [i32], drop: usize) {
+    for entry in table {
+        reduce_index_entry(entry, drop);
+    }
+}
+
 /// Persistent match-finder state across a frame's blocks: one slot per 4-byte
 /// hash holding the most recent **absolute** position, so a match in any block
 /// can reference earlier blocks (subject to the window). Carrying it across
@@ -235,6 +255,10 @@ impl MatchState {
             table: vec![-1i32; 1usize << hash_log],
             hash_log,
         }
+    }
+
+    fn reduce_index(&mut self, drop: usize) {
+        reduce_index_table(&mut self.table, drop);
     }
 }
 
@@ -371,6 +395,11 @@ impl DFastState {
             self.short[hash4(read_u32(data, pos), self.short_log)] = pos as i32;
         }
     }
+
+    fn reduce_index(&mut self, drop: usize) {
+        reduce_index_table(&mut self.long, drop);
+        reduce_index_table(&mut self.short, drop);
+    }
 }
 
 /// Greedy `dfast` parse: at each position take the longer of the matches the
@@ -503,6 +532,20 @@ impl ChainState {
         let h = hash_pos(data, pos, self.hash_log, self.mls);
         self.chain[pos & self.chain_mask] = self.head[h];
         self.head[h] = pos as i32;
+    }
+
+    fn slide_period(&self) -> usize {
+        self.chain_mask + 1
+    }
+
+    fn reduce_index(&mut self, drop: usize) {
+        debug_assert_eq!(
+            drop % self.slide_period(),
+            0,
+            "chain ring slots require aligned slides"
+        );
+        reduce_index_table(&mut self.head, drop);
+        reduce_index_table(&mut self.chain, drop);
     }
 
     /// Longest match for `ip` among up to `depth` chained candidates within the
@@ -659,6 +702,20 @@ impl BtState {
     #[inline]
     fn window_low(&self, pos: usize, max_offset: usize) -> usize {
         pos.saturating_sub(max_offset.min(self.bt_mask + 1))
+    }
+
+    fn slide_period(&self) -> usize {
+        self.bt_mask + 1
+    }
+
+    fn reduce_index(&mut self, drop: usize) {
+        debug_assert_eq!(
+            drop % self.slide_period(),
+            0,
+            "binary-tree ring slots require aligned slides"
+        );
+        reduce_index_table(&mut self.hash, drop);
+        reduce_index_table(&mut self.bt, drop);
     }
 
     /// Insert `curr` into the tree **and** return its longest match `(len,
@@ -1266,8 +1323,9 @@ impl Prices {
 /// prices its rep-enabled parse from these ([`Prices::from_opt_stats`]), so the
 /// repeat-offset codes are priced from data that already used them. Lives in
 /// [`Finder::Opt`] and so persists for the finder's lifetime (one frame, or one
-/// parallel worker's segment); a streaming slide rebuilds the finder and thus
-/// resets these (the next block simply re-bootstraps).
+/// parallel worker's segment). Streaming slides reduce indexed positions in
+/// place; the frequency stats remain valid because they describe emitted symbols,
+/// not input positions.
 pub(crate) struct OptStats {
     lit: [u32; 256],
     ll: [u32; 36],
@@ -1885,6 +1943,40 @@ impl Finder {
         }
     }
 
+    /// Alignment required for rebuild-free index slides. Content-keyed tables can
+    /// slide by any amount, but position-indexed rings (`chain`/`bt`) keep their
+    /// slots valid only when `drop` is a multiple of their period.
+    pub(crate) fn slide_period(&self) -> usize {
+        match self {
+            Finder::Fast(_) | Finder::DFast(_) => 1,
+            Finder::Chain { state, .. } => state.slide_period(),
+            Finder::BtLazy { state, tree, .. } | Finder::Opt { state, tree, .. } => {
+                state.slide_period().max(tree.slide_period())
+            }
+        }
+    }
+
+    /// Shift every stored position down by `drop`, discarding entries that point
+    /// into the dropped prefix. The caller must align `drop` to
+    /// [`Self::slide_period`] so position-indexed ring slots still correspond to
+    /// the same logical positions after the retained buffer moves to zero.
+    pub(crate) fn reduce_index(&mut self, drop: usize) {
+        debug_assert_eq!(
+            drop % self.slide_period(),
+            0,
+            "finder slide must be aligned to its largest ring period"
+        );
+        match self {
+            Finder::Fast(state) => state.reduce_index(drop),
+            Finder::DFast(state) => state.reduce_index(drop),
+            Finder::Chain { state, .. } => state.reduce_index(drop),
+            Finder::BtLazy { state, tree, .. } | Finder::Opt { state, tree, .. } => {
+                state.reduce_index(drop);
+                tree.reduce_index(drop);
+            }
+        }
+    }
+
     /// Parse one block's `range`, dispatching to the chosen finder. Returns a
     /// [`Parsed`] (the post-block `rep` is in the result, not threaded by `&mut`);
     /// only the optimal parse populates `alt`.
@@ -2155,6 +2247,54 @@ mod tests {
             rep_codes > 0,
             "expected dfast repeat-offset codes, got none of {} sequences",
             seqs.len()
+        );
+    }
+
+    fn slide_probe_input() -> Vec<u8> {
+        let mut data: Vec<u8> = (0..256u32)
+            .map(|i| (i.wrapping_mul(40503) >> 8) as u8)
+            .collect();
+        let token = b"slide-index-token";
+        data[70..70 + token.len()].copy_from_slice(token);
+        data[128..128 + token.len()].copy_from_slice(token);
+        data
+    }
+
+    #[test]
+    fn reduce_index_keeps_chain_match_reachable_after_slide() {
+        let data = slide_probe_input();
+        let mut state = ChainState::new(10, 6, 4);
+        state.insert(&data, 70);
+
+        let drop = state.slide_period();
+        state.reduce_index(drop);
+        let drained = &data[drop..];
+        let probe = 128 - drop;
+        let (ml, pos) = state.find(drained, probe, drained.len(), 128, 4);
+
+        assert_eq!(pos, 70 - drop);
+        assert!(
+            ml >= b"slide-index-token".len(),
+            "reduced chain match too short: {ml}"
+        );
+    }
+
+    #[test]
+    fn reduce_index_keeps_bt_match_reachable_after_slide() {
+        let data = slide_probe_input();
+        let mut tree = BtState::new(10, 6);
+        tree.insert_bt1(&data, 70, data.len(), 128, 8);
+
+        let drop = tree.slide_period();
+        tree.reduce_index(drop);
+        let drained = &data[drop..];
+        let probe = 128 - drop;
+        let (ml, pos) = tree.find_longest(drained, probe, drained.len(), 128, 8);
+
+        assert_eq!(pos, 70 - drop);
+        assert!(
+            ml >= b"slide-index-token".len(),
+            "reduced bt match too short: {ml}"
         );
     }
 

@@ -73,6 +73,23 @@ impl LdmState {
         }
     }
 
+    /// Shift every stored position after a streaming slide, discarding entries
+    /// that pointed into the dropped prefix. LDM's table is content-keyed, so no
+    /// ring-slot alignment is required.
+    pub(crate) fn reduce_index(&mut self, drop: usize) {
+        for entry in &mut self.table {
+            if *entry < 0 {
+                continue;
+            }
+            let pos = *entry as usize;
+            if pos >= drop {
+                *entry = (pos - drop) as i32;
+            } else {
+                *entry = -1;
+            }
+        }
+    }
+
     /// Find non-overlapping long matches for positions in `range`, updating the
     /// index as it scans. A match is emitted only when its `offset` is in
     /// `(min_offset, window]` — LDM contributes *only* matches beyond the regular
@@ -208,5 +225,19 @@ mod tests {
             assert!(p >= prev_end, "matches overlap or are out of order");
             prev_end = p + l;
         }
+    }
+
+    #[test]
+    fn reduce_index_shifts_and_drops_table_positions() {
+        let mut ldm = LdmState::new(20);
+        ldm.table[0] = 12;
+        ldm.table[1] = 4;
+        ldm.table[2] = -1;
+
+        ldm.reduce_index(8);
+
+        assert_eq!(ldm.table[0], 4);
+        assert_eq!(ldm.table[1], -1);
+        assert_eq!(ldm.table[2], -1);
     }
 }

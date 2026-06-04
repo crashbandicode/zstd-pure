@@ -30,6 +30,10 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
 - This branch: dfast rep-offset awareness for L3/L4. Silesia sizeDelta improved
   L3 `+1.6% -> +1.1%`, L4 `+1.5% -> +0.9%`; synthetic ratio profiles improved
   or held.
+- This branch: streaming encoder slides now use rebuild-free index reduction.
+  Finder/LDM positions shift in place; chain and binary-tree drops are aligned to
+  their ring periods. Streaming slide tests, fuzz, Silesia throughput, and ratio
+  gates are clean.
 
 ## Tried & rejected (don't redo without a new angle — see PERF_NOTES)
 - `unsafe`/`get_unchecked` (≈0% after the safe elision) — discarded.
@@ -39,8 +43,7 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
 - Block-split estimator "C" for L7–12 — couldn't make it free; cost is inherent.
 
 ## In flight / next
-- See `HANDOFF.md` for the remaining ready task: `reduceIndex` (rebuild-free
-  streaming slides).
+- The two `HANDOFF.md` encoder tasks are complete on `codex/encoder-handoff`.
 - Owner-directed next: advanced-parameter API, then a full COVER dictionary
   trainer.
 - Deferred: v0.1.0 release (CHANGELOG needs refreshing to current `main` first).
