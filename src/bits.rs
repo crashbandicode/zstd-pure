@@ -97,8 +97,8 @@ impl<'a> ReverseBitReader<'a> {
         if n == 0 {
             return 0;
         }
-        let shifted = self.container << (self.bits_consumed & 63);
-        ((shifted >> 1) >> (63 - n)) as u32
+        // `n` is 1..=32, so `64 - n` is 32..=63 — a valid shift (no `>> 64`).
+        ((self.container << (self.bits_consumed & 63)) >> (64 - n)) as u32
     }
 
     /// Consume `n` bits previously observed with [`ReverseBitReader::peek`].

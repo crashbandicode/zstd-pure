@@ -297,16 +297,19 @@ pub fn dfast_parse_block(
     let limit = end - MIN_MATCH;
 
     while p <= limit {
-        // Read both candidates, then index `p` in both tables.
-        let cand_long = if p + 8 <= end {
-            let h = hash8(read_u64(data, p), state.long_log);
+        // Read both candidates, then index `p` in both tables. When 8 bytes are
+        // available, one `read_u64` serves the long hash and (as its low 32 bits)
+        // the short hash too — avoiding a second overlapping load per position.
+        let (cand_long, v32) = if p + 8 <= end {
+            let v64 = read_u64(data, p);
+            let h = hash8(v64, state.long_log);
             let c = state.long[h];
             state.long[h] = p as i32;
-            c
+            (c, v64 as u32)
         } else {
-            -1
+            (-1, read_u32(data, p))
         };
-        let hs = hash4(read_u32(data, p), state.short_log);
+        let hs = hash4(v32, state.short_log);
         let cand_short = state.short[hs];
         state.short[hs] = p as i32;
 
