@@ -25,12 +25,22 @@ const STORE_WINDOW_LOG: u32 = 17;
 /// dominates the splitter's trial-encode cost. 0 elsewhere (no splitting).
 const BLOCK_SPLIT_DEPTH: usize = 4;
 
-/// The split depth for a level's strategy: the splitter runs only for the
-/// optimal-parse strategies, leaving the fast/lazy levels byte-identical and
-/// their throughput untouched.
+/// The split depth for a level's strategy. Full depth for the optimal-parse
+/// strategies; a shallower depth for the lazy/btlazy strategies (the splitter is
+/// behind a no-regression guard, so it only ever helps ratio — the shallower
+/// depth bounds the extra encode cost of trial-emitting at the faster levels).
+/// Fast/dfast stay unsplit (byte-identical, throughput untouched).
 pub(crate) fn split_depth_for(strategy: super::params::Strategy) -> usize {
-    if strategy >= super::params::Strategy::Btopt {
+    use super::params::Strategy::*;
+    if strategy >= Btopt {
         BLOCK_SPLIT_DEPTH
+    } else if strategy >= BtLazy2 {
+        // L13-15: the binary-tree parse dominates, so trial-emitting split
+        // candidates is ~free for ~0.4pp better ratio. The faster greedy/lazy/
+        // lazy2 levels (L5-12) skip it — there the repeated entropy emits cost up
+        // to ~40% encode, not worth it until the split benefit can be *estimated*
+        // cheaply (so homogeneous blocks aren't trial-split). Fast/dfast: never.
+        2
     } else {
         0
     }
