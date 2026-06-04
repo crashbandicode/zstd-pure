@@ -38,7 +38,9 @@ const MAX_BT_LOG: u32 = 23;
 
 #[inline]
 fn read_u32(data: &[u8], p: usize) -> u32 {
-    u32::from_le_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]])
+    // One slice bounds check (then a fixed-size load) instead of four indexed
+    // accesses — this is on the finder's per-position hot path.
+    u32::from_le_bytes(data[p..p + 4].try_into().unwrap())
 }
 
 #[inline]
@@ -48,16 +50,7 @@ fn hash4(v: u32, hash_log: u32) -> usize {
 
 #[inline]
 fn read_u64(data: &[u8], p: usize) -> u64 {
-    u64::from_le_bytes([
-        data[p],
-        data[p + 1],
-        data[p + 2],
-        data[p + 3],
-        data[p + 4],
-        data[p + 5],
-        data[p + 6],
-        data[p + 7],
-    ])
+    u64::from_le_bytes(data[p..p + 8].try_into().unwrap())
 }
 
 /// Hash of an 8-byte span — the `dfast` long-match table key. A longer span than

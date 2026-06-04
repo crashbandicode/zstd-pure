@@ -48,10 +48,14 @@ impl BitWriter {
         };
         self.acc |= masked << self.nbits;
         self.nbits += nb;
-        while self.nbits >= 8 {
-            self.out.push(self.acc as u8);
-            self.acc >>= 8;
-            self.nbits -= 8;
+        // Flush all whole bytes now ready in one extend (≤ 4 bytes since `nb` ≤ 32
+        // and `nbits` was < 8), rather than pushing them one at a time.
+        let nbytes = (self.nbits >> 3) as usize;
+        if nbytes > 0 {
+            self.out
+                .extend_from_slice(&self.acc.to_le_bytes()[..nbytes]);
+            self.acc >>= nbytes * 8;
+            self.nbits -= (nbytes as u32) * 8;
         }
     }
 
