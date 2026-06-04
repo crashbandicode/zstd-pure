@@ -205,6 +205,18 @@ fn best_match_at(
     }
 }
 
+/// Approximate offset-coding cost of back-distance `moff` at this point: the
+/// offset code (`of_code`) of the cheapest `offset_value` it maps to — ~0 for a
+/// repeat, ~log2(offset) for a fresh offset. The lazy look-ahead weighs this
+/// against match length so a cheaper-offset match can win without being strictly
+/// longer (libzstd's `ml*k - bits(offset)` gain), instead of deferring on raw
+/// length alone (which ignores that a long match at a huge offset can cost more
+/// than a shorter one at a repeat offset).
+#[inline]
+fn offset_bits(rep: &[u32; 3], moff: usize, ll0: bool) -> u32 {
+    of_code(encode_offset(rep, moff as u32, ll0)) as u32
+}
+
 /// Persistent match-finder state across a frame's blocks: one slot per 4-byte
 /// hash holding the most recent **absolute** position, so a match in any block
 /// can reference earlier blocks (subject to the window). Carrying it across
@@ -862,9 +874,13 @@ pub fn lazy_parse_block(
             ip += 1;
             continue;
         }
-        // Lazy: if a strictly-longer match starts one byte later, defer to it
-        // (emit one more literal). `lazy2` repeats the check once more. A deferred
-        // position always has a preceding literal, so `ll0` is false there.
+        // Lazy: defer to a match one byte later only when it is *worth more* — a
+        // gain comparison `ml*4 - offset_bits` (libzstd's), not raw length. This
+        // lets a cheaper-offset (e.g. repeat) match win without being longer, and
+        // stops a longer match at a huge offset from displacing a shorter cheap
+        // one. The current match gets a `+4` bias because deferring spends an extra
+        // literal. A deferred position always has a preceding literal (`ll0=false`).
+        let mut cur_obits = offset_bits(rep, moff, ip == anchor);
         let mut steps = lazy_steps;
         while steps > 0 && ip < ilimit {
             while inserted <= ip {
@@ -873,9 +889,13 @@ pub fn lazy_parse_block(
             }
             let (ml1, moff1) =
                 best_match_at(state, data, ip + 1, end, max_offset, depth, rep, false);
-            if ml1 > ml {
+            let la_obits = offset_bits(rep, moff1, false);
+            let gain_cur = (ml as i64) * 4 - cur_obits as i64 + 4;
+            let gain_la = (ml1 as i64) * 4 - la_obits as i64;
+            if ml1 >= MIN_MATCH && gain_la > gain_cur {
                 ml = ml1;
                 moff = moff1;
+                cur_obits = la_obits;
                 ip += 1;
                 steps -= 1;
             } else {
