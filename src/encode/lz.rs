@@ -264,12 +264,18 @@ impl DFastState {
     }
 
     /// Index `pos` (needs ≥ 4 readable bytes) in the short table, and the long
-    /// table too when ≥ 8 bytes are readable.
+    /// table too when ≥ 8 bytes are readable. When 8 bytes are available a single
+    /// `read_u64` feeds both hashes (its low 32 bits *are* the 4-byte value),
+    /// avoiding a second overlapping load — this runs once per interior position
+    /// of every emitted match, so it is the dfast fill hot path.
     #[inline]
     fn insert(&mut self, data: &[u8], pos: usize, end: usize) {
-        self.short[hash4(read_u32(data, pos), self.short_log)] = pos as i32;
         if pos + 8 <= end {
-            self.long[hash8(read_u64(data, pos), self.long_log)] = pos as i32;
+            let v64 = read_u64(data, pos);
+            self.short[hash4(v64 as u32, self.short_log)] = pos as i32;
+            self.long[hash8(v64, self.long_log)] = pos as i32;
+        } else {
+            self.short[hash4(read_u32(data, pos), self.short_log)] = pos as i32;
         }
     }
 }
@@ -322,7 +328,9 @@ pub fn dfast_parse_block(
             }
             let c = cand as usize;
             let offset = p - c;
-            if offset <= max_offset && read_u32(data, c) == read_u32(data, p) {
+            // `v32` is the 4-byte value at `p` (low 32 bits of the `read_u64`
+            // above, or the `read_u32` fallback) — reuse it instead of reloading.
+            if offset <= max_offset && read_u32(data, c) == v32 {
                 let ml = common_len(data, c, p, end);
                 if ml > best_ml {
                     best_ml = ml;
