@@ -2389,7 +2389,7 @@ mod tests {
             t
         };
         let mut tree = build();
-        let mut ref_tree = build();
+        let ref_tree = build();
         let (ref_len, _) = ref_tree.find_longest(&data, probe, end, 1 << 20, 32);
 
         let mut matches = Vec::new();
