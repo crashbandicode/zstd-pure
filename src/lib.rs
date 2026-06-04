@@ -169,6 +169,9 @@ pub use frame::{
     decompress_magicless_with_dict, decompress_with_dict, frame_header, frame_header_magicless,
     DecodedFrame, FrameHeader,
 };
+/// Parallel whole-archive seekable decode (`std`-only — uses `std::thread`).
+#[cfg(feature = "std")]
+pub use seekable::decompress_seekable_parallel;
 pub use seekable::{compress_seekable, decompress_seekable_frame, SeekFrame, SeekTable};
 pub use streaming::StreamingDecoder;
 

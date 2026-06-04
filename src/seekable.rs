@@ -257,6 +257,117 @@ pub fn decompress_seekable_frame(
     Ok(decoded.data)
 }
 
+/// Hard ceiling on decode worker threads (mirrors the parallel encoder's cap),
+/// so a pathologically large `n_jobs` can't spawn an unbounded number.
+#[cfg(feature = "std")]
+const MAX_DECODE_JOBS: usize = 256;
+
+/// Decompress an entire seekable `archive` in parallel across up to `n_jobs`
+/// worker threads, returning the full logical output. Each data frame is an
+/// **independent** standard zstd frame, so the frames decode concurrently with no
+/// shared state and the result is byte-identical to decoding them in sequence and
+/// concatenating (which is what [`crate::decompress`] does single-threaded). Any
+/// per-frame checksums are verified.
+///
+/// The frames are partitioned into `n_jobs` contiguous, roughly byte-balanced
+/// groups; the output buffer is pre-sized and `split_at_mut` into one disjoint
+/// region per group, so each worker decodes straight into its region with no
+/// post-pass concatenation. `std`-only (uses scoped threads); the `no_std` build
+/// uses the serial [`crate::decompress`].
+#[cfg(feature = "std")]
+pub fn decompress_seekable_parallel(
+    archive: &[u8],
+    table: &SeekTable,
+    n_jobs: usize,
+) -> Result<Vec<u8>> {
+    let frames = table.frames();
+    let total = table.decompressed_size() as usize;
+    let mut out = vec![0u8; total];
+    if frames.is_empty() {
+        return Ok(out);
+    }
+    let jobs = n_jobs.clamp(1, frames.len().min(MAX_DECODE_JOBS));
+
+    // Partition frames into `jobs` contiguous groups of ~equal decompressed bytes.
+    // `bounds[g]..bounds[g + 1]` is group g; contiguous groups mean each maps to a
+    // contiguous output region, so `split_at_mut` hands each worker a disjoint
+    // slice (no overlap, no copy-back).
+    let mut bounds = Vec::with_capacity(jobs + 1);
+    bounds.push(0usize);
+    let mut acc = 0u64;
+    for (i, f) in frames.iter().enumerate() {
+        acc += f.decompressed_size as u64;
+        // Close the current group once it holds its share of the total bytes,
+        // leaving enough frames for the remaining groups.
+        let remaining_groups = jobs - bounds.len() + 1;
+        let frames_left = frames.len() - (i + 1);
+        if bounds.len() < jobs
+            && frames_left >= remaining_groups - 1
+            && acc * jobs as u64 >= total as u64 * bounds.len() as u64
+        {
+            bounds.push(i + 1);
+        }
+    }
+    while bounds.len() <= jobs {
+        bounds.push(frames.len());
+    }
+
+    std::thread::scope(|s| -> Result<()> {
+        let mut handles = Vec::with_capacity(jobs);
+        let mut rest = out.as_mut_slice();
+        for g in 0..jobs {
+            let grp = &frames[bounds[g]..bounds[g + 1]];
+            let grp_bytes: usize = grp.iter().map(|f| f.decompressed_size as usize).sum();
+            let (region, tail) = rest.split_at_mut(grp_bytes);
+            rest = tail;
+            handles.push(s.spawn(move || decode_frame_group(archive, grp, region)));
+        }
+        for h in handles {
+            h.join().expect("seekable decode worker panicked")?;
+        }
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+/// Decode each frame of `grp` (in order) straight into `region`, the contiguous
+/// output slice that exactly spans the group's decompressed bytes. Verifies any
+/// stored checksum and that each frame's decoded length matches the table.
+#[cfg(feature = "std")]
+fn decode_frame_group(archive: &[u8], grp: &[SeekFrame], region: &mut [u8]) -> Result<()> {
+    let mut off = 0usize;
+    for f in grp {
+        let start = f.compressed_offset as usize;
+        let end = start + f.compressed_size as usize;
+        if end > archive.len() {
+            return Err(ZstdError::Truncated {
+                what: "seekable frame",
+                needed: end - archive.len(),
+            });
+        }
+        let want = f.decompressed_size as usize;
+        let decoded = decode_one(&archive[start..end], true, want + 1)?;
+        if decoded.data.len() != want {
+            return Err(ZstdError::Invalid {
+                what: "seekable frame size",
+                detail: "decoded length does not match the seek table".into(),
+            });
+        }
+        if let Some(expected) = f.checksum {
+            let computed = (xxh64(&decoded.data, 0) & 0xFFFF_FFFF) as u32;
+            if computed != expected {
+                return Err(ZstdError::ChecksumMismatch {
+                    stored: expected,
+                    computed,
+                });
+            }
+        }
+        region[off..off + want].copy_from_slice(&decoded.data);
+        off += want;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,6 +417,32 @@ mod tests {
                         let by_lz = zstd::bulk::decompress(&archive[s..e], chunk.len() + 64)
                             .expect("libzstd decodes a seekable data frame");
                         assert_eq!(by_lz, chunk, "libzstd frame {i} (fs={fs})");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Parallel whole-archive decode must equal the serial decode (and the
+    /// original) for every frame size, checksum setting, and worker count — the
+    /// frames are independent, so partitioning them across threads can't change the
+    /// result. `n_jobs` is swept past the frame count to exercise the clamp.
+    #[test]
+    fn parallel_decode_matches_serial() {
+        for data in corpus() {
+            for &fs in &[1usize, 64, 4096, 1 << 16] {
+                for &checksum in &[false, true] {
+                    let archive = compress_seekable(&data, fs, 9, checksum);
+                    let table = SeekTable::parse(&archive).expect("parse seek table");
+                    for &jobs in &[1usize, 2, 3, 8, 64] {
+                        let got = decompress_seekable_parallel(&archive, &table, jobs)
+                            .unwrap_or_else(|e| {
+                                panic!("parallel decode (fs={fs}, jobs={jobs}): {e}")
+                            });
+                        assert_eq!(
+                            got, data,
+                            "parallel decode (fs={fs}, ck={checksum}, jobs={jobs})"
+                        );
                     }
                 }
             }
