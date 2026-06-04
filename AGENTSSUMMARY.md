@@ -35,12 +35,27 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
 - Row-based finder (`RowHashState`) — correct but ~2× slower scalar; needs SIMD.
 - Block-split estimator "C" for L7–12 — couldn't make it free; cost is inherent.
 
+## On branch `wip/advanced-api` (NOT yet merged to main)
+- **Advanced-parameter API** (#5): `CompressOptions` builder + `compress_with_options`
+  (libzstd `ZSTD_CCtx_setParameter` analogue — window/hash/chain/search log,
+  min_match, target_length, strategy, checksum, magic, LDM). Defaults are
+  byte-identical to `compress`; overrides round-trip through our decoder + libzstd.
+  `compress`/`compress_long` refactored to share params-taking cores.
+- **COVER (k,d) dictionary optimization** (#4): greedy COVER parameterized by
+  segment `k` and dmer `d`; `train_dictionary_optimized` grid-searches `(k,d)` and
+  keeps the candidate that compresses the corpus smallest (grid includes the
+  defaults ⇒ provably ≤ `train_dictionary`). Ironclad test (both decoders, ≤ default,
+  < no-dict). Full suite + clippy/fmt/no_std green.
+- **Pending owner decision:** merge `wip/advanced-api` into main (coordinate with the
+  parallel agent working main on the `HANDOFF.md` tasks; reconcile conflicts at merge).
+
 ## In flight / next
 - See `HANDOFF.md` for two ready tasks for another agent: dfast rep-awareness
   (L3/L4 ratio) and `reduceIndex` (rebuild-free streaming slides).
-- Owner-directed next: advanced-parameter API, then a full COVER dictionary
-  trainer.
+- **Convention:** one feature → one `git worktree` on its own branch, so multiple
+  agents work in parallel without colliding (see `AGENTS.md` §0 / `CLAUDE.md`).
 - Deferred: v0.1.0 release (CHANGELOG needs refreshing to current `main` first).
+- COVER "stable" follow-ups: epoch-partitioned segment selection + a dict fuzz target.
 
 ## Build/test quickref
 `cargo test --release` · `cargo +nightly fuzz run {encode_roundtrip,decode_diff}`

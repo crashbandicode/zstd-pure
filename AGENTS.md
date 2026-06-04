@@ -20,6 +20,13 @@ anything, and **keep it and `AGENTSSUMMARY.md` current** (see §4).
 - **Git:** commit each green chunk; **do NOT push without explicit permission.**
   Multi-line commit messages via `git commit -F <tempfile>`. Branch for risky or
   ratio-affecting work; fast-forward merge when green.
+- **One feature → one worktree.** Do each feature in its own `git worktree` on its
+  own branch, so multiple agents can work different features in parallel without
+  colliding on `main` or each other's checkouts. Create it with
+  `git worktree add ../zstd-pure-<feature> -b wip/<feature>`, do all of that
+  feature's work and commits there, and `git worktree remove` it once the branch is
+  merged. Never run two features out of the same checkout. The no-regression gates
+  (§1) and ironclad-test bar (§5) apply per worktree before merge.
 
 ## 1. No regressions — prove every change
 A codec change alters output, so **measure, don't assume.** Before committing any
