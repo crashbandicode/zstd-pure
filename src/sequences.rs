@@ -213,15 +213,13 @@ pub fn decode(
         }
 
         // Read extra bits: offset, then match length, then literals length.
-        // The reverse bit window must be reloaded between reads so it never has
-        // to serve more than ~32 bits from one 64-bit fill (libzstd does the
-        // same at fixed points in `ZSTD_decodeSequence`).
-        br.reload();
-        let offset_value = (1u32 << of_code) + br.read(of_code);
-        br.reload();
-        let match_len = (ML_BASE[ml_code] + br.read(ML_BITS[ml_code])) as usize;
-        br.reload();
-        let lit_len = (LL_BASE[ll_code] + br.read(LL_BITS[ll_code])) as usize;
+        // `read_lazy` refills only when the next field would not fit the 64-bit
+        // window, instead of reloading before every field — the three fields
+        // (≤ 31 + 16 + 16 bits) plus the state updates below usually span far
+        // fewer than four fills. Identical bits, fewer refills.
+        let offset_value = (1u32 << of_code) + br.read_lazy(of_code);
+        let match_len = (ML_BASE[ml_code] + br.read_lazy(ML_BITS[ml_code])) as usize;
+        let lit_len = (LL_BASE[ll_code] + br.read_lazy(LL_BITS[ll_code])) as usize;
 
         let actual_offset = resolve_offset(rep, offset_value, ll_code == 0) as usize;
         if actual_offset == 0 {
@@ -265,7 +263,9 @@ pub fn decode(
         }
 
         if i + 1 < nb_seq {
-            br.reload();
+            // The three state updates read ≤ `table_log` bits each; ensure the
+            // window holds their combined worst case once, then update.
+            br.ensure(ll_table.table_log + ml_table.table_log + of_table.table_log);
             s_ll.update(&ll_table, &mut br);
             s_ml.update(&ml_table, &mut br);
             s_of.update(&of_table, &mut br);

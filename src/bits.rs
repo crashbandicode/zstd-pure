@@ -115,6 +115,26 @@ impl<'a> ReverseBitReader<'a> {
         v
     }
 
+    /// Refill only if the next read of `n` bits would not fit the current 64-bit
+    /// window (`bits_consumed + n > 64`). Unconditional `reload()`-before-every-read
+    /// is correct but wasteful: consecutive small reads (FSE/sequence fields +
+    /// state updates) usually all fit one fill. Reloading exactly when the window
+    /// is about to be exhausted gives identical bits with far fewer refills.
+    #[inline]
+    pub fn ensure(&mut self, n: u32) {
+        if self.bits_consumed + n > 64 {
+            self.reload();
+        }
+    }
+
+    /// [`ensure`](Self::ensure) the window holds `n` bits, then [`read`](Self::read)
+    /// them — the lazy-reload read used on the sequence-decode hot path.
+    #[inline]
+    pub fn read_lazy(&mut self, n: u32) -> u32 {
+        self.ensure(n);
+        self.read(n)
+    }
+
     /// Refill the container by stepping backwards through the stream.
     pub fn reload(&mut self) -> ReloadStatus {
         if self.bits_consumed > 64 {
