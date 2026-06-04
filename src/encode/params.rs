@@ -44,8 +44,8 @@ pub struct CParams {
 /// support up to that), and the `fast`/chain finders don't exploit a larger
 /// window anyway. This is well under libzstd's default `windowLogMax` (27), so
 /// a stock `ZSTD_decompress` still decodes our frames.
-const MIN_WINDOW_LOG: u32 = 10;
-const MAX_WINDOW_LOG: u32 = 23;
+pub(crate) const MIN_WINDOW_LOG: u32 = 10;
+pub(crate) const MAX_WINDOW_LOG: u32 = 23;
 
 /// Largest window log the encoder advertises under opt-in long-distance matching
 /// ([`params_for_level_ldm`] / `compress_long`): libzstd's default `windowLogMax`

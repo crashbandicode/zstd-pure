@@ -24,6 +24,7 @@ pub(crate) mod fse;
 pub(crate) mod huff;
 pub(crate) mod ldm;
 pub(crate) mod lz;
+pub(crate) mod options;
 /// Parallel (multi-threaded) compression. `std`-only — it uses `std::thread`.
 #[cfg(feature = "std")]
 pub(crate) mod parallel;
@@ -37,8 +38,10 @@ pub(crate) mod train;
 #[doc(hidden)]
 pub use frame::compress_huffman_literals;
 pub use frame::{compress, compress_long, compress_store, compress_with_dict};
+pub use options::{compress_with_options, CompressOptions};
 #[cfg(feature = "std")]
 pub use parallel::compress_parallel;
+pub use params::Strategy;
 pub use stream::StreamingEncoder;
 pub use train::{train_dictionary, train_dictionary_structured};
 

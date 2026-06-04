@@ -156,6 +156,18 @@ pub fn compress_store(data: &[u8], checksum: bool, expect_magic: bool) -> Vec<u8
 /// match-table size.
 pub fn compress(data: &[u8], level: i32, checksum: bool, expect_magic: bool) -> Vec<u8> {
     let params = super::params::params_for_level(level, data.len());
+    compress_with_params(data, &params, checksum, expect_magic)
+}
+
+/// Core of [`compress`] over explicit [`super::params::CParams`] — shared with the
+/// advanced [`compress_with_options`](super::options::compress_with_options) path
+/// so caller-tuned parameters run the exact same block pipeline.
+pub(crate) fn compress_with_params(
+    data: &[u8],
+    params: &super::params::CParams,
+    checksum: bool,
+    expect_magic: bool,
+) -> Vec<u8> {
     let window_log = params.window_log;
     let max_offset = 1usize << window_log;
     let split_depth = split_depth_for(params.strategy);
@@ -185,7 +197,7 @@ pub fn compress(data: &[u8], level: i32, checksum: bool, expect_magic: bool) -> 
             seq: super::sequences::SeqCTables::default(),
             lit: None,
         };
-        let mut finder = super::lz::Finder::new(&params);
+        let mut finder = super::lz::Finder::new(params);
         let n = data.len();
         let mut start = 0usize;
         while start < n {
@@ -238,14 +250,27 @@ pub fn compress(data: &[u8], level: i32, checksum: bool, expect_magic: bool) -> 
 /// encoder concern.
 pub fn compress_long(data: &[u8], level: i32, checksum: bool, expect_magic: bool) -> Vec<u8> {
     let params = super::params::params_for_level_ldm(level, data.len());
+    // LDM contributes only matches *beyond* the regular finder's reach (the
+    // level's nominal, un-bumped window); nearer matches are left to the finder,
+    // which parses them better. This keeps LDM purely additive.
+    let regular_reach = 1usize << super::params::params_for_level(level, data.len()).window_log;
+    compress_long_with_params(data, &params, regular_reach, checksum, expect_magic)
+}
+
+/// Core of [`compress_long`] over explicit [`super::params::CParams`]. `regular_reach`
+/// bounds the regular finder (LDM supplies the longer offsets); the caller must
+/// keep it ≤ the advertised window (`1 << params.window_log`). Shared with the
+/// advanced [`compress_with_options`](super::options::compress_with_options) path.
+pub(crate) fn compress_long_with_params(
+    data: &[u8],
+    params: &super::params::CParams,
+    regular_reach: usize,
+    checksum: bool,
+    expect_magic: bool,
+) -> Vec<u8> {
     let window_log = params.window_log;
     let max_offset = 1usize << window_log;
     let split_depth = split_depth_for(params.strategy);
-    // LDM contributes only matches *beyond* the regular finder's reach (the
-    // level's nominal, un-bumped window); nearer matches are left to the finder,
-    // which parses them better. This keeps LDM purely additive — it never forces
-    // a near match where the regular parse would do better.
-    let regular_reach = 1usize << super::params::params_for_level(level, data.len()).window_log;
 
     let mut out = Vec::with_capacity(data.len() / 2 + 64);
     if expect_magic {
@@ -261,7 +286,7 @@ pub fn compress_long(data: &[u8], level: i32, checksum: bool, expect_magic: bool
             seq: super::sequences::SeqCTables::default(),
             lit: None,
         };
-        let mut finder = super::lz::Finder::new(&params);
+        let mut finder = super::lz::Finder::new(params);
         // The coarse LDM index persists across the frame's blocks, so a long
         // match can reference any earlier block within the advertised window.
         let mut ldm = super::ldm::LdmState::new(window_log);
