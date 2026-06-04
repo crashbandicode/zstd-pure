@@ -224,8 +224,14 @@ pub fn decode_one_with_dict(
         Some(n) => (n as usize).min(max_output),
         None => max_output,
     };
+    // Pre-size the output to the pledged content size to avoid repeated reallocation
+    // on large frames — but bound the up-front allocation by the *input* size (×8)
+    // so a tiny/malicious frame claiming a huge `content_size` can't force a large
+    // allocation. The actual decompression-bomb guard is `max_output`, enforced as
+    // each block is produced; this only sizes the initial buffer. Always allow ≥1 MiB.
+    let reserve = cap.min(src.len().saturating_mul(8).max(1 << 20));
     let mut state = BlockState {
-        out: Vec::with_capacity(cap.min(1 << 20)),
+        out: Vec::with_capacity(reserve),
         dict_len: 0,
         max_output,
         huff: None,
