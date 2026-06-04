@@ -100,6 +100,9 @@ fn write_seq_count(out: &mut Vec<u8>, n: usize) {
 /// fixed by the decoder; only the tables differ by compression mode.
 fn encode_seq_bitstream(
     seqs: &[Seq],
+    ll_codes: &[usize],
+    of_codes: &[usize],
+    ml_codes: &[usize],
     ll_ct: &FseCTable,
     of_ct: &FseCTable,
     ml_ct: &FseCTable,
@@ -107,7 +110,9 @@ fn encode_seq_bitstream(
     let n = seqs.len();
     let mut bw = BitWriter::with_capacity(n * 2 + 16);
 
-    // Helpers to add the extra (low) bits of each field.
+    // Helpers to add the extra (low) bits of each field. The per-sequence codes
+    // are taken from the arrays the caller already built (computing them here too
+    // would repeat ll_code/ml_code's linear scan once more per sequence).
     let add_ll_extra = |bw: &mut BitWriter, s: &Seq, c: usize| {
         bw.add(s.lit_len - LL_BASE[c], LL_BITS[c]);
     };
@@ -117,9 +122,9 @@ fn encode_seq_bitstream(
 
     // Init the three states from the *last* sequence (encoded back-to-front).
     let last = &seqs[n - 1];
-    let ll_last = ll_code(last.lit_len);
-    let ml_last = ml_code(last.match_len);
-    let of_last = of_code(last.offset_value);
+    let ll_last = ll_codes[n - 1];
+    let ml_last = ml_codes[n - 1];
+    let of_last = of_codes[n - 1];
     let mut st_ml = ml_ct.init_state2(ml_last);
     let mut st_of = of_ct.init_state2(of_last);
     let mut st_ll = ll_ct.init_state2(ll_last);
@@ -128,10 +133,11 @@ fn encode_seq_bitstream(
     bw.add(last.offset_value, of_last as u32); // offset extra = low of_code bits
 
     // Body: sequences n-2 .. 0, emitting state transitions then extra bits.
-    for s in seqs[..n - 1].iter().rev() {
-        let ll_c = ll_code(s.lit_len);
-        let ml_c = ml_code(s.match_len);
-        let of_c = of_code(s.offset_value);
+    for i in (0..n - 1).rev() {
+        let s = &seqs[i];
+        let ll_c = ll_codes[i];
+        let ml_c = ml_codes[i];
+        let of_c = of_codes[i];
         of_ct.encode_symbol(&mut bw, &mut st_of, of_c);
         ml_ct.encode_symbol(&mut bw, &mut st_ml, ml_c);
         ll_ct.encode_symbol(&mut bw, &mut st_ll, ll_c);
@@ -163,7 +169,12 @@ pub fn write_sequences_predefined(out: &mut Vec<u8>, seqs: &[Seq]) -> Result<()>
     let ll_ct = build_ctable(&LL_DEFAULT, LL_PRED_MAX, LL_PRED_LOG);
     let of_ct = build_ctable(&OF_DEFAULT, OF_PRED_MAX, OF_PRED_LOG);
     let ml_ct = build_ctable(&ML_DEFAULT, ML_PRED_MAX, ML_PRED_LOG);
-    out.extend_from_slice(&encode_seq_bitstream(seqs, &ll_ct, &of_ct, &ml_ct));
+    let ll_codes: Vec<usize> = seqs.iter().map(|s| ll_code(s.lit_len)).collect();
+    let of_codes: Vec<usize> = seqs.iter().map(|s| of_code(s.offset_value)).collect();
+    let ml_codes: Vec<usize> = seqs.iter().map(|s| ml_code(s.match_len)).collect();
+    out.extend_from_slice(&encode_seq_bitstream(
+        seqs, &ll_codes, &of_codes, &ml_codes, &ll_ct, &of_ct, &ml_ct,
+    ));
     Ok(())
 }
 
@@ -338,7 +349,9 @@ pub fn write_sequences(out: &mut Vec<u8>, seqs: &[Seq], prev: &SeqCTables) -> Re
     out.extend_from_slice(&ll.header);
     out.extend_from_slice(&of.header);
     out.extend_from_slice(&ml.header);
-    out.extend_from_slice(&encode_seq_bitstream(seqs, &ll.ct, &of.ct, &ml.ct));
+    out.extend_from_slice(&encode_seq_bitstream(
+        seqs, &ll_codes, &of_codes, &ml_codes, &ll.ct, &of.ct, &ml.ct,
+    ));
     Ok(SeqCTables {
         ll: Some(ll.ct),
         of: Some(of.ct),
