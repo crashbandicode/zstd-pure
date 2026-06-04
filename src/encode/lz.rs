@@ -1201,6 +1201,15 @@ fn run_dp(
         rep: init_rep,
     };
 
+    // Match-length price indexed directly by length for the short region
+    // (`l <= MAX_SUBLEN`). `prices` is fixed for this call, so precomputing once
+    // lets the innermost length loops below index this instead of running
+    // `ml_code`'s binary search per length — the hottest part of the opt parse.
+    let mut ml_price = [0u64; MAX_SUBLEN + 1];
+    for (l, p) in ml_price.iter_mut().enumerate().skip(MIN_MATCH) {
+        *p = prices.ml[ml_code(l as u32)];
+    }
+
     for i in 0..n {
         let base = opt[i].price;
         let pend = if opt[i].mlen > 0 {
@@ -1283,7 +1292,7 @@ fn run_dp(
             let hi = ml.min(MAX_SUBLEN);
             for l in MIN_MATCH..=hi {
                 let j = i + l;
-                let price = base + ll_owed + ocost + prices.ml[ml_code(l as u32)];
+                let price = base + ll_owed + ocost + ml_price[l];
                 if price < opt[j].price {
                     opt[j] = Opt {
                         price,
@@ -1323,7 +1332,7 @@ fn run_dp(
             let hi = len_k.min(MAX_SUBLEN);
             for l in (prev_len + 1).max(MIN_MATCH)..=hi {
                 let j = i + l;
-                let price = base + ll_owed + ocost + prices.ml[ml_code(l as u32)];
+                let price = base + ll_owed + ocost + ml_price[l];
                 if price < opt[j].price {
                     opt[j] = Opt {
                         price,
