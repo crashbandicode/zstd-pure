@@ -91,16 +91,18 @@ fn main() {
         total as f64 / (1024.0 * 1024.0)
     );
     println!(
-        "{:<6} {:>8} {:>9} {:>10} {:>10} {:>7}   {:>10} {:>10} {:>7}",
-        "level",
+        "{:<5} {:>7} {:>8} {:>8} {:>7}  {:>8} {:>8} {:>6}  {:>8} {:>8} {:>6}",
+        "lvl",
         "data",
-        "ratio",
-        "enc ours",
-        "enc libz",
-        "slower",
-        "dec ours",
-        "dec libz",
-        "slower"
+        "cmp us",
+        "cmp lz",
+        "size\u{0394}",
+        "enc us",
+        "enc lz",
+        "x",
+        "dec us",
+        "dec lz",
+        "x"
     );
 
     for &level in &levels {
@@ -140,11 +142,18 @@ fn main() {
 
         let (eo, el) = (mbps(raw, our_e), mbps(raw, lz_e));
         let (deco, decl) = (mbps(raw, our_d), mbps(raw, lz_d));
+        // cmp = compression ratio (raw / compressed); size\u{0394} = how much larger
+        // our output is than libzstd's (csz/lsz - 1, in %).
+        let cmp_ours = raw as f64 / csz.max(1) as f64;
+        let cmp_libz = raw as f64 / lsz.max(1) as f64;
+        let size_delta_pct = (csz as f64 / lsz.max(1) as f64 - 1.0) * 100.0;
         println!(
-            "{:<6} {:>6.1}M {:>8.3}x {:>8.1} {:>9.1} {:>6.1}x   {:>8.1} {:>9.1} {:>6.1}x",
+            "{:<5} {:>6.0}M {:>7.3}x {:>7.3}x {:>+6.1}% {:>8.1} {:>8.1} {:>5.1}x {:>8.1} {:>8.1} {:>5.1}x",
             level,
             raw as f64 / (1024.0 * 1024.0),
-            csz as f64 / lsz.max(1) as f64,
+            cmp_ours,
+            cmp_libz,
+            size_delta_pct,
             eo,
             el,
             el / eo,
