@@ -56,21 +56,24 @@ fn highbit32(x: u32) -> u32 {
 
 /// Literals-length code for `lit_len` (largest code whose baseline fits).
 /// `pub(crate)` so the optimal parser can price literal-length codes.
+///
+/// `LL_BASE` is strictly increasing, so the largest `c` with `LL_BASE[c] <=
+/// lit_len` is `(count of entries <= lit_len) - 1` — a binary search
+/// ([`slice::partition_point`], ~6 steps) rather than the old reverse linear scan
+/// (worst-case ~36 steps, and the *small* lit lengths that dominate hit that
+/// worst case). `LL_BASE[0] == 0 <= lit_len` always, so the count is ≥ 1.
 #[inline]
 pub(crate) fn ll_code(lit_len: u32) -> usize {
-    (0..LL_BASE.len())
-        .rev()
-        .find(|&c| LL_BASE[c] <= lit_len)
-        .unwrap()
+    LL_BASE.partition_point(|&base| base <= lit_len) - 1
 }
 
-/// Match-length code for `match_len` (`match_len >= 3`).
+/// Match-length code for `match_len` (`match_len >= 3`). Binary search over the
+/// strictly-increasing `ML_BASE` (see [`ll_code`]); called per candidate length
+/// in the optimal parser's DP, so the O(log) lookup matters there.
+/// `ML_BASE[0] == 3 <= match_len` always, so the count is ≥ 1.
 #[inline]
 pub(crate) fn ml_code(match_len: u32) -> usize {
-    (0..ML_BASE.len())
-        .rev()
-        .find(|&c| ML_BASE[c] <= match_len)
-        .unwrap()
+    ML_BASE.partition_point(|&base| base <= match_len) - 1
 }
 
 /// Offset code = `floor(log2(offset_value))` (`offset_value >= 1`).
