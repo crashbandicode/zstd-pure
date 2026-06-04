@@ -121,13 +121,13 @@ pub fn write_compressed_block(
     )
 }
 
-/// Emit a [`Parsed`](super::lz::Parsed) block, keeping the smaller of its primary
-/// and (if present) alternative encodings — the no-regression guard for the
-/// optimal parse's rep-candidate alternative. Both candidates are emitted through
-/// the same [`emit_split`] (so the comparison is the *exact* encoded size,
+/// Emit a [`Parsed`](super::lz::Parsed) block, keeping the smallest of its primary
+/// and any alternative encodings — the no-regression guard for the optimal parse's
+/// rep-candidate and full-binary-tree alternatives. Every candidate is emitted
+/// through the same [`emit_split`] (so the comparison is the *exact* encoded size,
 /// splitting included); the winner's repeat offsets + entropy tables become the
-/// committed [`EncState`]. A simpler finder has no `alt`, so this is just one
-/// `emit_split`.
+/// committed [`EncState`]. A simpler finder has no alternatives, so this is just
+/// one `emit_split`.
 fn emit_and_pick(
     out: &mut Vec<u8>,
     last: bool,
@@ -136,9 +136,9 @@ fn emit_and_pick(
     prev_lit: Option<&super::huff::CodeTable>,
     max_split_depth: usize,
 ) -> Result<EncState> {
-    let mut buf_p = Vec::new();
-    let (seq_p, lit_p) = emit_split(
-        &mut buf_p,
+    let mut best_buf = Vec::new();
+    let (mut best_seq, mut best_lit) = emit_split(
+        &mut best_buf,
         last,
         &parsed.seqs,
         &parsed.literals,
@@ -146,7 +146,8 @@ fn emit_and_pick(
         prev_lit,
         max_split_depth,
     )?;
-    if let Some(alt) = parsed.alt {
+    let mut best_rep = parsed.rep;
+    for alt in &parsed.alts {
         let mut buf_a = Vec::new();
         let (seq_a, lit_a) = emit_split(
             &mut buf_a,
@@ -157,20 +158,18 @@ fn emit_and_pick(
             prev_lit,
             max_split_depth,
         )?;
-        if buf_a.len() < buf_p.len() {
-            out.extend_from_slice(&buf_a);
-            return Ok(EncState {
-                rep: alt.rep,
-                seq: seq_a,
-                lit: lit_a,
-            });
+        if buf_a.len() < best_buf.len() {
+            best_buf = buf_a;
+            best_seq = seq_a;
+            best_lit = lit_a;
+            best_rep = alt.rep;
         }
     }
-    out.extend_from_slice(&buf_p);
+    out.extend_from_slice(&best_buf);
     Ok(EncState {
-        rep: parsed.rep,
-        seq: seq_p,
-        lit: lit_p,
+        rep: best_rep,
+        seq: best_seq,
+        lit: best_lit,
     })
 }
 
