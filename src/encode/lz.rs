@@ -718,70 +718,6 @@ impl BtState {
         reduce_index_table(&mut self.bt, drop);
     }
 
-    /// Insert `curr` into the tree **and** return its longest match `(len,
-    /// offset)` (`len < MIN_MATCH` ⇒ none) — zstd's `ZSTD_insertBtAndGetAllMatches`
-    /// reduced to the longest (the hybrid only needs the long-range reach; the
-    /// chain supplies the short/medium Pareto set). Descends from the hash head,
-    /// extending each candidate from the known common prefix (`min(common_smaller,
-    /// common_larger)`, which only grows down a branch — the trick that keeps the
-    /// amortized cost near O(n log n) without a cap), tracking the longest, and
-    /// re-linking the tree so `curr` is inserted in suffix order. Extension is
-    /// **uncapped**.
-    fn insert_and_get_longest(
-        &mut self,
-        data: &[u8],
-        curr: usize,
-        end: usize,
-        max_offset: usize,
-        nb_compares: usize,
-    ) -> (usize, usize) {
-        let window_low = self.window_low(curr, max_offset);
-        let h = hash4(read_u32(data, curr), self.hash_log);
-        let mut match_index = self.hash[h];
-        self.hash[h] = curr as i32;
-
-        let curr_slot = 2 * (curr & self.bt_mask);
-        let mut smaller_ptr = curr_slot;
-        let mut larger_ptr = curr_slot + 1;
-        let mut common_smaller = 0usize;
-        let mut common_larger = 0usize;
-        let mut best_len = 0usize;
-        let mut best_off = 0usize;
-        let mut nb = nb_compares;
-
-        while nb > 0 && match_index >= 0 && (match_index as usize) > window_low {
-            nb -= 1;
-            let mi = match_index as usize;
-            // Resume from the prefix the tree descent already proved common, then
-            // extend word-at-a-time.
-            let start = common_smaller.min(common_larger);
-            let ml = start + common_len(data, mi + start, curr + start, end);
-            if ml > best_len {
-                best_len = ml;
-                best_off = curr - mi;
-            }
-            if curr + ml == end {
-                // Equal so far → can't pick a side; leave `curr`'s subtree empty.
-                break;
-            }
-            let match_slot = 2 * (mi & self.bt_mask);
-            if data[mi + ml] < data[curr + ml] {
-                self.bt[smaller_ptr] = match_index;
-                common_smaller = ml;
-                smaller_ptr = match_slot + 1;
-                match_index = self.bt[match_slot + 1];
-            } else {
-                self.bt[larger_ptr] = match_index;
-                common_larger = ml;
-                larger_ptr = match_slot;
-                match_index = self.bt[match_slot];
-            }
-        }
-        self.bt[smaller_ptr] = -1;
-        self.bt[larger_ptr] = -1;
-        (best_len, best_off)
-    }
-
     /// Insert `curr` and collect the **full Pareto match set** — a faithful
     /// `ZSTD_insertBtAndGetAllMatches`: every time the descent reaches a new
     /// longest match it appends `(len, offset)` to `out`, so `out` ends up sorted
@@ -790,9 +726,9 @@ impl BtState {
     /// starts at the hash head (the most recent position) and walks the tree,
     /// shorter lengths naturally land on smaller offsets and longer ones on larger
     /// offsets — the frontier the DP wants. `out` is cleared first and reused
-    /// across positions so the hot collection loop stays allocation-free. Identical
-    /// descent + re-linking to [`Self::insert_and_get_longest`] (so the tree stays
-    /// correct); extension is **uncapped**.
+    /// across positions so the hot collection loop stays allocation-free. Performs
+    /// the standard inserting tree descent + re-linking (so the tree stays correct);
+    /// extension is **uncapped**.
     fn insert_and_get_all_matches(
         &mut self,
         data: &[u8],
@@ -894,7 +830,7 @@ impl BtState {
     /// Insert `curr` into the tree without collecting matches — zstd's
     /// `ZSTD_insertBt1`, used to keep the index complete over positions the parser
     /// skips (inside a committed long match). Same descent as
-    /// [`Self::insert_and_get_longest`] but **caps** the extension at
+    /// [`Self::insert_and_get_all_matches`] but **caps** the extension at
     /// [`BT_INSERT_CAP`] to bound the per-position cost on periodic data.
     fn insert_bt1(
         &mut self,
@@ -1788,10 +1724,6 @@ pub fn opt_parse_block(
     // match (the chosen one is then extended fully), but bounded so repetitive
     // data — where the first candidate blows past it — stays cheap.
     let find_cap = suff.max(512);
-    // Only btultra2's two-pass model prices large offsets from realized statistics
-    // (`Prices::from_stats`), so only it can safely consume the binary tree's full
-    // Pareto set; btopt/btultra keep the small-offset hybrid (predef proxy).
-    let full_tree = two_pass;
 
     // --- match-collection pass (a single walk; no position is ever inserted into
     // either finder twice). At each searched position the chain gives the
@@ -1856,17 +1788,13 @@ pub fn opt_parse_block(
         );
         state.insert(data, ap);
         let chain_best = chain_scratch.last().map_or(0, |&(l, _)| l as usize);
-        // The tree descent is identical whether we keep all matches or just the
-        // longest, so `full_tree` only changes how much of it we record.
-        let (tree_len, tree_off) = if full_tree {
-            tree.insert_and_get_all_matches(data, ap, end, max_offset, depth, &mut tree_matches);
-            tree_matches
-                .last()
-                .map_or((0, 0u32), |&(l, o)| (l as usize, o))
-        } else {
-            let (l, o) = tree.insert_and_get_longest(data, ap, end, max_offset, depth);
-            (l, o as u32)
-        };
+        // The tree's full Pareto set (faithful getAllMatches); its last entry is the
+        // longest. The optimal parser uses the full set at every level, guarded
+        // below, so we always collect all matches.
+        tree.insert_and_get_all_matches(data, ap, end, max_offset, depth, &mut tree_matches);
+        let (tree_len, tree_off) = tree_matches
+            .last()
+            .map_or((0, 0u32), |&(l, o)| (l as usize, o));
         inserted = ap + 1;
 
         // Overall longest across chain and tree — drives the shared commit-long.
@@ -1899,13 +1827,11 @@ pub fn opt_parse_block(
         // chain ∪ tree frontier, so the DP sees medium tree matches the chain's
         // depth bound misses.
         hybrid_flat.extend_from_slice(&chain_scratch);
-        if full_tree {
-            full_scratch.clear();
-            full_scratch.extend_from_slice(&chain_scratch);
-            full_scratch.extend_from_slice(&tree_matches);
-            reduce_to_frontier(&mut full_scratch);
-            full_flat.extend_from_slice(&full_scratch);
-        }
+        full_scratch.clear();
+        full_scratch.extend_from_slice(&chain_scratch);
+        full_scratch.extend_from_slice(&tree_matches);
+        reduce_to_frontier(&mut full_scratch);
+        full_flat.extend_from_slice(&full_scratch);
     }
     hybrid_starts[n] = hybrid_flat.len() as u32;
     full_starts[n] = full_flat.len() as u32;
@@ -1945,24 +1871,22 @@ pub fn opt_parse_block(
         }
     };
 
-    // Hybrid stream: rep-free baseline (the no-regression bar) + rep-enabled. Always
-    // computed — it is the only stream for btopt/btultra.
+    // Hybrid stream: rep-free baseline (the no-regression bar) + rep-enabled.
     let (base_seqs, base_rep) = two_pass_dp(&hybrid_starts, &hybrid_flat, false);
     let (rep_seqs, rep_rep) = rep_dp(&hybrid_starts, &hybrid_flat);
 
-    // Full stream (btultra2 only): the same two parses over the richer match set.
-    let full = full_tree.then(|| {
-        let (fb_seqs, fb_rep) = two_pass_dp(&full_starts, &full_flat, false);
-        let (fr_seqs, fr_rep) = rep_dp(&full_starts, &full_flat);
-        (fb_seqs, fb_rep, fr_seqs, fr_rep)
-    });
+    // Full stream: the same two parses over the richer chain ∪ tree match set. It
+    // can beat the hybrid (closer to libzstd at L16-22) but, under the single-pass
+    // predef proxy, can also misprice large offsets — so it is never trusted on its
+    // own; the guard below keeps it only when it actually encodes smaller.
+    let (fb_seqs, fb_rep) = two_pass_dp(&full_starts, &full_flat, false);
+    let (fr_seqs, fr_rep) = rep_dp(&full_starts, &full_flat);
 
     // Fold the realized parse into the running cross-block stats (an encoder-side
     // pricing heuristic; never affects decode, so it may evolve regardless of which
-    // candidate the guard emits). Prefer the full stream's rep parse when present,
-    // since that is the one usually emitted at btultra2.
-    let record_seqs = full.as_ref().map_or(&rep_seqs, |(_, _, fr, _)| fr);
-    stats.record(data, start..end, record_seqs);
+    // candidate the guard emits). Record the full stream's rep parse — the richest,
+    // usually-emitted one.
+    stats.record(data, start..end, &fr_seqs);
 
     // Assemble candidates; [`emit_and_pick`] keeps whichever encodes smallest, so
     // every alternative is a pure no-regression option. Skip duplicates to avoid
@@ -1980,13 +1904,11 @@ pub fn opt_parse_block(
     if rep_seqs != base_seqs {
         alts.push(mk(rep_seqs, rep_rep));
     }
-    if let Some((fb_seqs, fb_rep, fr_seqs, fr_rep)) = full {
-        if fb_seqs != base_seqs && alts.iter().all(|a| a.seqs != fb_seqs) {
-            alts.push(mk(fb_seqs, fb_rep));
-        }
-        if fr_seqs != base_seqs && alts.iter().all(|a| a.seqs != fr_seqs) {
-            alts.push(mk(fr_seqs, fr_rep));
-        }
+    if fb_seqs != base_seqs && alts.iter().all(|a| a.seqs != fb_seqs) {
+        alts.push(mk(fb_seqs, fb_rep));
+    }
+    if fr_seqs != base_seqs && alts.iter().all(|a| a.seqs != fr_seqs) {
+        alts.push(mk(fr_seqs, fr_rep));
     }
 
     let mut primary = mk(base_seqs, base_rep);
