@@ -5,7 +5,7 @@
 //! 4-stream literal bitstreams. The built [`HuffTable`] is cacheable so the
 //! "treeless" literal block type can reuse the previous block's table.
 
-use super::bits::ReverseBitReader;
+use super::bits::{ReloadStatus, ReverseBitReader};
 use super::error::{Result, ZstdError};
 use super::fse;
 #[allow(unused_imports)]
@@ -162,11 +162,35 @@ pub(crate) fn build_table(weights: &[u8]) -> Result<HuffTable> {
 #[inline]
 fn decode_into(table: &HuffTable, src: &[u8], count: usize, out: &mut Vec<u8>) -> Result<()> {
     let mut br = ReverseBitReader::new(src)?;
-    for _ in 0..count {
+    out.reserve(count);
+    let max_bits = table.max_bits;
+    let mut i = 0usize;
+
+    // Fast path: decode 4 symbols per reload (libzstd's `HUF_decodeStreamX1`). A
+    // refilled 64-bit window serves `4 * max_bits` bits; with `max_bits <= 14`
+    // that is ≤ 56, and `reload()` leaves ≤ 7 bits already consumed, so all four
+    // `peek(max_bits)` stay within the window. `reload() == Unfinished` guarantees
+    // a full window was loaded (for `n >= 8` streams `ptr` never exceeds
+    // `len - 8`, so the load is never short); any other status drops to the tail.
+    if max_bits <= 14 {
+        while i + 4 <= count && br.reload() == ReloadStatus::Unfinished {
+            for _ in 0..4 {
+                let code = br.peek(max_bits) as usize;
+                out.push(table.symbols[code]);
+                br.consume(table.num_bits[code] as u32);
+            }
+            i += 4;
+        }
+    }
+
+    // Tail: one symbol per reload — robust near the start of the stream and for
+    // short streams / large `max_bits`.
+    while i < count {
         br.reload();
-        let code = br.peek(table.max_bits) as usize;
+        let code = br.peek(max_bits) as usize;
         out.push(table.symbols[code]);
         br.consume(table.num_bits[code] as u32);
+        i += 1;
     }
     Ok(())
 }
