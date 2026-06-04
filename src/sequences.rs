@@ -85,13 +85,15 @@ fn parse_mode(raw: u8, src: &[u8], p: &mut usize, max_log: u32) -> Result<Mode> 
 }
 
 fn rle_table(symbol: u8) -> FseDecodeTable {
+    let mut entries = Box::new([fse::FseEntry::default(); fse::FSE_DTABLE_SIZE]);
+    entries[0] = fse::FseEntry {
+        symbol,
+        num_bits: 0,
+        new_state_base: 0,
+    };
     FseDecodeTable {
         table_log: 0,
-        entries: vec![fse::FseEntry {
-            symbol,
-            num_bits: 0,
-            new_state_base: 0,
-        }],
+        entries,
     }
 }
 

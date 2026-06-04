@@ -13,6 +13,21 @@ use crate::alloc_prelude::*;
 /// Absolute maximum FSE accuracy log permitted by the spec.
 pub const FSE_MAX_TABLELOG: u32 = 15;
 
+/// Fixed capacity of a decode table's entry array. The largest table this codec
+/// builds is the Literals_Length / Match_Length sequence table at accuracy log 9
+/// (`1 << 9 == 512`); Offset caps at log 8, the Huffman-weight FSE at log 6.
+///
+/// Storing the entries in a *fixed-size* array (rather than a `Vec`) and indexing
+/// with `state & FSE_DTABLE_MASK` lets the compiler prove the index is in range
+/// (`x & 511` is statically `0..=511`, the array length is statically 512) and so
+/// **elide the per-symbol bounds check** — entirely within safe Rust. The mask is
+/// a no-op for correctness (the FSE invariant already keeps `state < 1 << log`),
+/// it exists only to communicate that range to LLVM. A runtime `& (len - 1)` on a
+/// `Vec` does *not* achieve this: the length is not a compile-time power of two,
+/// so the check survives.
+pub const FSE_DTABLE_SIZE: usize = 1 << 9;
+const FSE_DTABLE_MASK: usize = FSE_DTABLE_SIZE - 1;
+
 #[inline]
 fn highbit32(x: u32) -> u32 {
     31 - x.leading_zeros()
@@ -27,11 +42,13 @@ pub struct FseEntry {
     pub new_state_base: u16,
 }
 
-/// A built FSE decoding table (`1 << table_log` entries).
+/// A built FSE decoding table. The first `1 << table_log` entries are live; the
+/// array is over-sized to a fixed [`FSE_DTABLE_SIZE`] so the decode hot path can
+/// index it with a constant mask and skip bounds checks (see [`FSE_DTABLE_SIZE`]).
 #[derive(Debug, Clone)]
 pub struct FseDecodeTable {
     pub table_log: u32,
-    pub entries: Vec<FseEntry>,
+    pub entries: Box<[FseEntry; FSE_DTABLE_SIZE]>,
 }
 
 /// The normalized-count table description read from an FSE header.
@@ -158,8 +175,8 @@ pub fn build_dtable(norm: &[i16], max_symbol: usize, table_log: u32) -> Result<F
         ));
     }
 
-    let mut entries = vec![FseEntry::default(); size];
-    for (u, entry) in entries.iter_mut().enumerate() {
+    let mut entries = Box::new([FseEntry::default(); FSE_DTABLE_SIZE]);
+    for (u, entry) in entries[..size].iter_mut().enumerate() {
         let s = symbols[u];
         let next = symbol_next[s as usize];
         symbol_next[s as usize] += 1;
@@ -196,16 +213,18 @@ impl FseDecoder {
         }
     }
 
-    /// The symbol for the current state.
+    /// The symbol for the current state. The `& FSE_DTABLE_MASK` is a no-op for
+    /// correctness (`state < 1 << table_log <= FSE_DTABLE_SIZE`) but lets the
+    /// compiler elide the bounds check (see [`FSE_DTABLE_SIZE`]).
     #[inline]
     pub fn symbol(&self, table: &FseDecodeTable) -> u8 {
-        table.entries[self.state as usize].symbol
+        table.entries[self.state as usize & FSE_DTABLE_MASK].symbol
     }
 
     /// Advance the state by reading `num_bits` low bits for the current entry.
     #[inline]
     pub fn update(&mut self, table: &FseDecodeTable, br: &mut ReverseBitReader) {
-        let e = table.entries[self.state as usize];
+        let e = table.entries[self.state as usize & FSE_DTABLE_MASK];
         let low = br.read(e.num_bits as u32);
         self.state = e.new_state_base as u32 + low;
     }
@@ -274,7 +293,8 @@ mod tests {
             1, 1, 1, -1, -1, -1, -1,
         ];
         let dt = build_dtable(&LL_DEFAULT, 35, 6).expect("build default LL table");
-        assert_eq!(dt.entries.len(), 64);
+        // The array is over-sized to FSE_DTABLE_SIZE; only `1 << table_log` are live.
+        assert_eq!(dt.entries.len(), FSE_DTABLE_SIZE);
         assert_eq!(dt.table_log, 6);
     }
 }
