@@ -43,7 +43,7 @@ pub use options::{compress_with_options, CompressOptions};
 pub use parallel::compress_parallel;
 pub use params::Strategy;
 pub use stream::StreamingEncoder;
-pub use train::{train_dictionary, train_dictionary_structured};
+pub use train::{train_dictionary, train_dictionary_optimized, train_dictionary_structured};
 
 /// Compress `data` into a standard (magic-prefixed) store-mode frame. No
 /// content checksum. See [`compress_store`] for the full-control entry point.
@@ -591,6 +591,49 @@ mod dict_tests {
                  {with_dict} (dict) vs {no_dict} (none)"
             );
         }
+    }
+
+    #[test]
+    fn optimized_dict_is_no_worse_than_default_and_round_trips() {
+        // The (k, d) grid includes the default params and keeps the min-by-
+        // compressed-size candidate, so the optimized dictionary compresses the
+        // corpus no worse than the default trainer (at the scoring level) — and
+        // both round-trip through libzstd and our decoder and shrink the corpus.
+        let samples = small_records();
+        let refs: Vec<&[u8]> = samples.iter().map(|v| v.as_slice()).collect();
+        let opt = train_dictionary_optimized(&refs, 8 * 1024);
+        let def = train_dictionary(&refs, 8 * 1024);
+        assert!(
+            !opt.is_empty() && opt.len() <= 8 * 1024,
+            "bad optimized dict"
+        );
+
+        for s in samples.iter().take(40) {
+            for level in [3, 19] {
+                assert_dict_roundtrips(s, &opt, level);
+            }
+        }
+
+        let corpus_size = |dict: &Dictionary| -> usize {
+            samples
+                .iter()
+                .map(|s| compress_with_dict(s, dict, 9, false, true).len())
+                .sum()
+        };
+        let no_dict: usize = samples
+            .iter()
+            .map(|s| compress(s, 9, false, true).len())
+            .sum();
+        let s_opt = corpus_size(&Dictionary::raw(&opt));
+        let s_def = corpus_size(&Dictionary::raw(&def));
+        assert!(
+            s_opt <= s_def,
+            "optimized dict ({s_opt}) should be <= default ({s_def})"
+        );
+        assert!(
+            s_opt < no_dict,
+            "optimized dict should shrink the corpus ({s_opt} vs {no_dict} none)"
+        );
     }
 
     #[test]

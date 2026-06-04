@@ -161,8 +161,8 @@ pub use encode::compress_huffman_literals;
 pub use encode::compress_parallel;
 pub use encode::{
     compress, compress_long, compress_store, compress_stored, compress_with_dict,
-    compress_with_options, train_dictionary, train_dictionary_structured, CompressOptions,
-    Strategy, StreamingEncoder,
+    compress_with_options, train_dictionary, train_dictionary_optimized,
+    train_dictionary_structured, CompressOptions, Strategy, StreamingEncoder,
 };
 pub use error::{Result, ZstdError};
 pub use frame::{

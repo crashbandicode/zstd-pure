@@ -32,24 +32,21 @@ use alloc::collections::{BTreeMap, BTreeSet};
 /// matches without the optimal parser's per-position cost.
 const STATS_LEVEL: i32 = 9;
 
-/// dmer length (bytes). 8 lets a dmer be read directly as a little-endian `u64`,
-/// so it is its own exact map key — no hashing, no collisions.
-const D: usize = 8;
+/// Default dmer length (bytes). `<= 8` so a dmer packs into a little-endian `u64`
+/// — its own exact map key, no hashing, no collisions.
+const DEFAULT_D: usize = 8;
 /// Default segment length (bytes), clamped to the corpus size.
 const DEFAULT_SEGMENT: usize = 1024;
 
+/// The `d` (`<= 8`) bytes at `i`, little-endian, as the dmer map key. `i + d` must
+/// be in bounds (positions are validated to have `d` in-sample bytes).
 #[inline]
-fn dmer_at(buf: &[u8], i: usize) -> u64 {
-    u64::from_le_bytes([
-        buf[i],
-        buf[i + 1],
-        buf[i + 2],
-        buf[i + 3],
-        buf[i + 4],
-        buf[i + 5],
-        buf[i + 6],
-        buf[i + 7],
-    ])
+fn dmer_at(buf: &[u8], i: usize, d: usize) -> u64 {
+    let mut v = 0u64;
+    for k in 0..d {
+        v |= (buf[i + k] as u64) << (8 * k);
+    }
+    v
 }
 
 /// Train a raw-content dictionary of at most `max_size` bytes from `samples`
@@ -63,6 +60,15 @@ fn dmer_at(buf: &[u8], i: usize) -> u64 {
 /// produces are correct and improve ratio — verified through libzstd and our own
 /// decoder — so it's the training algorithm, not correctness, that's provisional.
 pub fn train_dictionary(samples: &[&[u8]], max_size: usize) -> Vec<u8> {
+    train_cover(samples, max_size, DEFAULT_SEGMENT, DEFAULT_D)
+}
+
+/// Greedy single-pool COVER for an explicit segment length `k` and dmer length
+/// `d` (`d <= 8`) — the `(k, d)`-parameterized core that [`train_dictionary`]
+/// (fixed defaults) and [`train_dictionary_optimized`] (grid search) both build
+/// on. Returns the dictionary content, or an empty `Vec` when there is nothing
+/// useful to extract.
+fn train_cover(samples: &[&[u8]], max_size: usize, k_req: usize, d: usize) -> Vec<u8> {
     if max_size == 0 {
         return Vec::new();
     }
@@ -78,17 +84,17 @@ pub fn train_dictionary(samples: &[&[u8]], max_size: usize) -> Vec<u8> {
     }
     bounds.push(buf.len());
     let total = buf.len();
-    if total < D {
+    if total < d {
         return Vec::new();
     }
-    let n_pos = total - D + 1;
+    let n_pos = total - d + 1;
 
     // Which dmer start positions lie wholly inside a single sample.
     let mut valid = vec![false; n_pos];
     for w in 0..samples.len() {
         let (s, e) = (bounds[w], bounds[w + 1]);
-        if e >= s + D {
-            for slot in valid.iter_mut().take(e - D + 1).skip(s) {
+        if e >= s + d {
+            for slot in valid.iter_mut().take(e - d + 1).skip(s) {
                 *slot = true;
             }
         }
@@ -99,20 +105,20 @@ pub fn train_dictionary(samples: &[&[u8]], max_size: usize) -> Vec<u8> {
     let mut freq: BTreeMap<u64, u32> = BTreeMap::new();
     for w in 0..samples.len() {
         let (s, e) = (bounds[w], bounds[w + 1]);
-        if e < s + D {
+        if e < s + d {
             continue;
         }
         let mut seen = BTreeSet::new();
-        for i in s..=(e - D) {
-            let dm = dmer_at(&buf, i);
+        for i in s..=(e - d) {
+            let dm = dmer_at(&buf, i, d);
             if seen.insert(dm) {
                 *freq.entry(dm).or_insert(0) += 1;
             }
         }
     }
 
-    let k = DEFAULT_SEGMENT.min(total).max(D);
-    let seg_dmers = k - D + 1; // dmer start positions inside one segment
+    let k = k_req.min(total).max(d);
+    let seg_dmers = k - d + 1; // dmer start positions inside one segment
     let last_start = total - k; // inclusive max segment start
 
     // Greedily pick the highest-coverage segment, then zero the freq of the
@@ -126,7 +132,7 @@ pub fn train_dictionary(samples: &[&[u8]], max_size: usize) -> Vec<u8> {
         let mut score: u64 = 0;
         for (i, &ok) in valid.iter().enumerate().take(seg_dmers) {
             if ok {
-                let dm = dmer_at(&buf, i);
+                let dm = dmer_at(&buf, i, d);
                 let c = wcount.entry(dm).or_insert(0);
                 if *c == 0 {
                     score += freq[&dm] as u64;
@@ -141,7 +147,7 @@ pub fn train_dictionary(samples: &[&[u8]], max_size: usize) -> Vec<u8> {
             // Drop the dmer leaving on the left.
             let lo = start - 1;
             if valid[lo] {
-                let dm = dmer_at(&buf, lo);
+                let dm = dmer_at(&buf, lo, d);
                 if let Some(c) = wcount.get_mut(&dm) {
                     *c -= 1;
                     if *c == 0 {
@@ -153,7 +159,7 @@ pub fn train_dictionary(samples: &[&[u8]], max_size: usize) -> Vec<u8> {
             // Take in the dmer entering on the right.
             let hi = start + seg_dmers - 1;
             if valid[hi] {
-                let dm = dmer_at(&buf, hi);
+                let dm = dmer_at(&buf, hi, d);
                 let c = wcount.entry(dm).or_insert(0);
                 if *c == 0 {
                     score += freq[&dm] as u64;
@@ -173,7 +179,7 @@ pub fn train_dictionary(samples: &[&[u8]], max_size: usize) -> Vec<u8> {
         accumulated += k;
         for (off, &ok) in valid[best_start..best_start + seg_dmers].iter().enumerate() {
             if ok {
-                freq.insert(dmer_at(&buf, best_start + off), 0);
+                freq.insert(dmer_at(&buf, best_start + off, d), 0);
             }
         }
     }
@@ -190,6 +196,57 @@ pub fn train_dictionary(samples: &[&[u8]], max_size: usize) -> Vec<u8> {
         content.drain(..cut);
     }
     content
+}
+
+/// Scoring level for the `(k, d)` grid search — a mid-level parse, fast enough to
+/// run per candidate while still reflecting how the dictionary will be used.
+const OPTIMIZE_SCORE_LEVEL: i32 = 9;
+
+/// Train a raw-content dictionary by **optimizing the COVER `(k, d)` parameters**
+/// — a pure-Rust analogue of libzstd's `ZDICT_optimizeTrainFromBuffer_cover`.
+/// Trains a candidate with [`train_cover`] for each `(segment, dmer)` in a small
+/// grid, scores each by the total compressed size of the samples under that
+/// candidate dictionary, and returns the smallest-scoring content. The grid
+/// includes the [`train_dictionary`] defaults, so the result is never worse — on
+/// the training corpus — than the fixed-parameter trainer.
+///
+/// Much slower than [`train_dictionary`] (it trains *and* test-compresses for
+/// every grid point) — this is the offline, best-quality path. Falls back to the
+/// default trainer when no candidate yields content.
+pub fn train_dictionary_optimized(samples: &[&[u8]], max_size: usize) -> Vec<u8> {
+    if max_size == 0 {
+        return Vec::new();
+    }
+    // (segment, dmer) grid: a spread of segment lengths × the two useful dmer
+    // widths. The defaults are included so `optimized <= default` on the corpus.
+    const SEGMENTS: [usize; 5] = [64, 256, DEFAULT_SEGMENT, 4096, 8192];
+    const DMERS: [usize; 2] = [6, DEFAULT_D];
+
+    let mut best: Option<Vec<u8>> = None;
+    let mut best_score = u64::MAX;
+    for &d in &DMERS {
+        for &k in &SEGMENTS {
+            let content = train_cover(samples, max_size, k, d);
+            if content.is_empty() {
+                continue;
+            }
+            let dict = crate::dict::Dictionary::raw(&content);
+            // Lower total compressed size = better dictionary.
+            let score: u64 = samples
+                .iter()
+                .filter(|s| !s.is_empty())
+                .map(|s| {
+                    super::frame::compress_with_dict(s, &dict, OPTIMIZE_SCORE_LEVEL, false, true)
+                        .len() as u64
+                })
+                .sum();
+            if score < best_score {
+                best_score = score;
+                best = Some(content);
+            }
+        }
+    }
+    best.unwrap_or_else(|| train_dictionary(samples, max_size))
 }
 
 /// Train a **structured (tagged)** dictionary of at most `max_size` bytes — a
