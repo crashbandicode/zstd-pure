@@ -85,6 +85,30 @@ fn hash8(v: u64, hash_log: u32) -> usize {
     (v.wrapping_mul(0x9E37_79B1_85EB_CA87) >> (64 - hash_log)) as usize
 }
 
+/// Hash the first `mls` bytes (4, 5, or 6) at `pos` into a `hash_log`-bit bucket.
+/// A wider hash than [`hash4`] makes the chain buckets more *selective* at the
+/// higher levels (whose `min_match` is 5–6): a depth-bounded walk then sees
+/// candidates that share more bytes and so extend into longer matches, instead
+/// of spending the depth budget on 4-byte coincidences that don't pan out — the
+/// same `mls`-width keying libzstd's finders use. The constants are libzstd's
+/// `prime5bytes`/`prime6bytes`. Falls back to the 4-byte hash when fewer than 8
+/// bytes are readable (the `read_u64` would run off the end); that decision is a
+/// pure function of `pos`, so insert and find always pick the same bucket.
+#[inline]
+fn hash_pos(data: &[u8], pos: usize, hash_log: u32, mls: u32) -> usize {
+    if mls >= 5 && pos + 8 <= data.len() {
+        let u = read_u64(data, pos);
+        let (shift, prime) = if mls == 5 {
+            (24u32, 889_523_592_379u64) // keep the low 5 bytes (40 bits)
+        } else {
+            (16u32, 227_718_039_650_203u64) // low 6 bytes (48 bits)
+        };
+        ((u << shift).wrapping_mul(prime) >> (64 - hash_log)) as usize
+    } else {
+        hash4(read_u32(data, pos), hash_log)
+    }
+}
+
 /// Pick the cheapest `offset_value` that encodes back-distance `offset` at the
 /// current point. Prefers a repeat code (`1..=3`) when one reproduces `offset`
 /// exactly given the running repeat offsets `rep` and `ll0` (whether the
@@ -434,11 +458,15 @@ pub struct ChainState {
     chain: Vec<i32>,
     hash_log: u32,
     chain_mask: usize,
+    /// Hash width in bytes (4–6) — the level's `min_match`, so chains are keyed on
+    /// as many bytes as a match must have (see [`hash_pos`]).
+    mls: u32,
 }
 
 impl ChainState {
-    /// Allocate empty head + chain tables (logs clamped to a sane range).
-    pub fn new(hash_log: u32, chain_log: u32) -> Self {
+    /// Allocate empty head + chain tables (logs clamped to a sane range). `mls` is
+    /// the hash width in bytes (clamped to 4–6).
+    pub fn new(hash_log: u32, chain_log: u32, mls: u32) -> Self {
         let hash_log = hash_log.clamp(MIN_HASH_LOG, MAX_HASH_LOG);
         let chain_log = chain_log.clamp(MIN_HASH_LOG, MAX_HASH_LOG);
         ChainState {
@@ -446,6 +474,7 @@ impl ChainState {
             chain: vec![-1i32; 1usize << chain_log],
             hash_log,
             chain_mask: (1usize << chain_log) - 1,
+            mls: mls.clamp(4, 6),
         }
     }
 
@@ -453,7 +482,7 @@ impl ChainState {
     /// chain. Each position is inserted exactly once by the parser.
     #[inline]
     fn insert(&mut self, data: &[u8], pos: usize) {
-        let h = hash4(read_u32(data, pos), self.hash_log);
+        let h = hash_pos(data, pos, self.hash_log, self.mls);
         self.chain[pos & self.chain_mask] = self.head[h];
         self.head[h] = pos as i32;
     }
@@ -469,7 +498,7 @@ impl ChainState {
         max_offset: usize,
         depth: usize,
     ) -> (usize, usize) {
-        let h = hash4(read_u32(data, ip), self.hash_log);
+        let h = hash_pos(data, ip, self.hash_log, self.mls);
         let mut cand = self.head[h];
         let mut best_ml = MIN_MATCH - 1; // a candidate must beat this to count
         let mut best_pos = 0usize;
@@ -522,7 +551,7 @@ impl ChainState {
     ) {
         let (ip, end) = (range.start, range.end);
         out.clear();
-        let h = hash4(read_u32(data, ip), self.hash_log);
+        let h = hash_pos(data, ip, self.hash_log, self.mls);
         let mut cand = self.head[h];
         let mut best_ml = MIN_MATCH - 1;
         let mut steps = 0usize;
@@ -827,7 +856,8 @@ pub fn lazy_parse_block(
         // and is preferred over an equal-length chain match). `ll0` here is whether
         // a match at `ip` would open with no preceding literals (`ip == anchor`),
         // which selects which repeat slot is cheapest.
-        let (mut ml, mut moff) = best_match_at(state, data, ip, end, max_offset, depth, rep, ip == anchor);
+        let (mut ml, mut moff) =
+            best_match_at(state, data, ip, end, max_offset, depth, rep, ip == anchor);
         if ml < MIN_MATCH {
             ip += 1;
             continue;
@@ -841,7 +871,8 @@ pub fn lazy_parse_block(
                 state.insert(data, inserted);
                 inserted += 1;
             }
-            let (ml1, moff1) = best_match_at(state, data, ip + 1, end, max_offset, depth, rep, false);
+            let (ml1, moff1) =
+                best_match_at(state, data, ip + 1, end, max_offset, depth, rep, false);
             if ml1 > ml {
                 ml = ml1;
                 moff = moff1;
@@ -1736,7 +1767,7 @@ impl Finder {
             Fast => Finder::Fast(MatchState::new(params.hash_log)),
             Dfast => Finder::DFast(DFastState::new(params.hash_log, params.chain_log)),
             Btopt | Btultra | Btultra2 => Finder::Opt {
-                state: ChainState::new(params.hash_log, params.chain_log),
+                state: ChainState::new(params.hash_log, params.chain_log, params.min_match),
                 tree: BtState::new(params.hash_log, params.window_log),
                 // The optimal parse visits every position, so the per-position
                 // search is the dominant cost — keep it moderate. Long matches are
@@ -1748,7 +1779,7 @@ impl Finder {
                 stats: OptStats::new(),
             },
             BtLazy2 => Finder::BtLazy {
-                state: ChainState::new(params.hash_log, params.chain_log),
+                state: ChainState::new(params.hash_log, params.chain_log, params.min_match),
                 tree: BtState::new(params.hash_log, params.window_log),
                 depth: 1usize << params.search_log.min(10),
                 target: (params.target_length as usize).max(MIN_MATCH),
@@ -1761,7 +1792,7 @@ impl Finder {
                     _ => 2,
                 };
                 Finder::Chain {
-                    state: ChainState::new(params.hash_log, params.chain_log),
+                    state: ChainState::new(params.hash_log, params.chain_log, params.min_match),
                     lazy_steps,
                     depth: 1usize << params.search_log.min(10),
                 }
@@ -2073,7 +2104,7 @@ mod tests {
             data.push((s >> 33) as u8);
         }
         for two_pass in [false, true] {
-            let mut state = ChainState::new(18, 18);
+            let mut state = ChainState::new(18, 18, 4);
             let mut tree = BtState::new(18, 20);
             let mut stats = OptStats::new();
             let parsed = opt_parse_block(
