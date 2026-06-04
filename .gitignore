@@ -3,3 +3,4 @@ Cargo.lock
 # Internal handoff / working docs — kept local, not part of the published crate.
 HANDOFF.md
 COST_MODEL_NOTES.md
+PERF_NOTES.md
