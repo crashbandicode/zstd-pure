@@ -17,15 +17,13 @@
 //!
 //! Memory is **bounded** — independent of the total (possibly multi-gigabyte)
 //! input. The encoder retains only roughly two windows plus a couple of blocks of
-//! past input: once the retained history grows past `2 * window`, the dead prefix
-//! (older than one window before the last emitted block, so unreachable by any
-//! future back-reference) is dropped and the match finder is **rebuilt over the
-//! retained window** via the same priming path a dictionary uses — uniform across
-//! every strategy (including the binary tree) and reusing already-tested code, so
-//! it cannot reintroduce a position-aliasing bug. (A tighter, rebuild-free bound
-//! via an in-place index reduction is a possible later refinement.) Input is also
-//! consumed in block-sized steps internally, so a single huge [`push`] does not
-//! spike memory.
+//! past input: once the retained history grows past `2 * window`, an aligned
+//! dead prefix (older than one window before the last emitted block, so
+//! unreachable by any future back-reference) is dropped and the finder positions
+//! are reduced in place. The drop is aligned to any position-indexed finder ring
+//! so ring slots remain valid after the retained buffer moves to zero. Input is
+//! also consumed in block-sized steps internally, so a single huge [`push`] does
+//! not spike memory.
 //!
 //! Long-distance matching is available via [`with_options_long`]: a coarse
 //! content-defined index ([`super::ldm`]) contributes matches at offsets *beyond*
@@ -33,8 +31,8 @@
 //! the streaming analogue of [`compress_long`](crate::compress_long). Because LDM
 //! matches reach back across the advertised window, the LDM encoder retains that
 //! much history (so a larger window costs proportionally more memory) — but it is
-//! still bounded the same way: a slide rebuilds both the finder and the coarse
-//! index over the retained window.
+//! still bounded the same way: a slide reduces both the finder and the coarse
+//! index in place.
 //!
 //! [`push`]: StreamingEncoder::push
 //! [`finish`]: StreamingEncoder::finish
@@ -64,8 +62,6 @@ use super::frame::{split_depth_for, write_frame_header_streaming};
 pub struct StreamingEncoder {
     /// Whether a trailing XXH64 content checksum is written on `finish`.
     checksum: bool,
-    /// Level parameters, kept so the finder can be rebuilt after a slide.
-    params: super::params::CParams,
     /// Advertised frame window (max back-reference reach); fixed for the level so
     /// it never depends on how much input eventually arrives. Equals
     /// `regular_reach` without LDM; larger (the LDM window) with it.
@@ -94,7 +90,7 @@ pub struct StreamingEncoder {
     /// plus the checksum once `finish` runs).
     out: Vec<u8>,
     /// Persistent match finder (spans block boundaries up to `max_offset`);
-    /// rebuilt over the retained window on each slide.
+    /// positions are reduced in place on each slide.
     finder: super::lz::Finder,
     /// Cross-block encoder state: running repeat offsets + the previous
     /// compressed block's entropy tables (Repeat / Treeless reuse). Holds
@@ -133,7 +129,6 @@ impl StreamingEncoder {
 
         StreamingEncoder {
             checksum,
-            params,
             max_offset,
             regular_reach: max_offset,
             ldm: None,
@@ -187,7 +182,6 @@ impl StreamingEncoder {
 
         StreamingEncoder {
             checksum,
-            params,
             max_offset,
             regular_reach,
             ldm: Some(super::ldm::LdmState::new(window_log)),
@@ -237,46 +231,29 @@ impl StreamingEncoder {
         }
     }
 
-    /// Drop the dead prefix and rebuild the finder once the retained, already-
-    /// emitted history exceeds `2 * window`. The dropped bytes are older than one
-    /// window before the last emitted block, so no future back-reference can reach
-    /// them; afterward exactly one window of history is retained. Rebuilding the
-    /// finder over that window (via the dictionary-priming path) keeps its position
-    /// tables consistent with the slid buffer — correct for every strategy,
-    /// including the binary tree, with no bespoke index-shifting.
+    /// Drop an aligned dead prefix once the retained, already-emitted history
+    /// exceeds `2 * window`. The dropped bytes are older than one window before
+    /// the last emitted block, so no future back-reference can reach them. The
+    /// drop is aligned to the active finder's largest position-indexed ring so an
+    /// in-place `pos -= drop` keeps ring slots valid; content-keyed tables and the
+    /// LDM index shift without extra alignment.
     fn maybe_slide(&mut self) {
         let history = self.emitted - self.dropped;
         if history <= 2 * self.max_offset {
             return;
         }
-        let drop = history - self.max_offset; // leave exactly one window of history
+        let desired = history - self.max_offset; // never drop reachable history
+        let period = self.finder.slide_period();
+        let drop = desired - (desired % period);
+        if drop == 0 {
+            return;
+        }
+        self.finder.reduce_index(drop);
+        if let Some(ldm) = self.ldm.as_mut() {
+            ldm.reduce_index(drop);
+        }
         self.input.drain(..drop);
         self.dropped += drop;
-        let retained = self.emitted - self.dropped; // == max_offset (the advertised window)
-
-        // Rebuild the regular finder over the retained window. Bounded to its own
-        // `regular_reach` (= `max_offset` without LDM); priming a larger retained
-        // LDM window is safe because the binary tree clamps its search to its array
-        // coverage (the b34cb85 window_low fix).
-        self.finder = super::lz::Finder::new(&self.params);
-        self.finder.prime(&self.input, retained, self.regular_reach);
-
-        // Rebuild the coarse LDM index the same way: re-scan the retained window
-        // and discard the matches, which repopulates the index over exactly the
-        // bytes still reachable. (Like the finder rebuild, this trades the
-        // in-place index reduction's CPU win for simplicity and reuse of tested
-        // code.)
-        if self.ldm.is_some() {
-            let window_log = self.max_offset.trailing_zeros();
-            let mut ldm = super::ldm::LdmState::new(window_log);
-            let _ = ldm.generate(
-                &self.input[..retained],
-                0..retained,
-                self.regular_reach,
-                self.max_offset,
-            );
-            self.ldm = Some(ldm);
-        }
     }
 
     /// Remove and return the compressed output produced so far (the frame header
@@ -604,7 +581,7 @@ mod tests {
         // L1 has the smallest window (512 KiB), so a few-MB input forces several
         // slides cheaply. Mildly redundant (small alphabet) so real matches — not
         // just store blocks — cross the slide boundaries. (Higher levels share the
-        // exact slide + finder-rebuild path; only the thresholds grow.)
+        // exact slide + index-reduction path; only the thresholds grow.)
         let mut data = Vec::with_capacity(3 << 20);
         let mut x = 0x9E37_79B9u32;
         while data.len() < (3 << 20) {
@@ -749,7 +726,7 @@ mod tests {
         // window_log 20 (1 MiB) so a ~3 MiB input forces slides cheaply. A 128 KiB
         // chunk recurs at offset ~768 KiB — beyond L1's 512 KiB regular reach but
         // inside the 1 MiB LDM window — and the slide happens later (in the
-        // trailing filler), so the LDM index rebuild runs without losing the match.
+        // trailing filler), so LDM index reduction runs without losing the match.
         let chunk = prng(128 * 1024, 0x0000_ABCD);
         let mut data = Vec::new();
         data.extend_from_slice(&chunk);

@@ -27,6 +27,21 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
   lazy (L5–15), `mls`-width chain hash (halved the real-world gap), block
   splitting (L13–15).
 - Parallel seekable decoder (+ capped/bomb-safe variant + negative tests).
+- **Advanced-parameter API** (#5): `CompressOptions` + `compress_with_options`
+  (libzstd `ZSTD_CCtx_setParameter` analogue — window/hash/chain/search log,
+  min_match, target_length, strategy, checksum, magic, LDM). Defaults
+  byte-identical to `compress`; overrides round-trip through our decoder + libzstd.
+  `compress`/`compress_long` share params-taking cores.
+- **COVER (k,d) dictionary optimization** (#4): greedy COVER parameterized by
+  segment `k`/dmer `d`; `train_dictionary_optimized` grid-searches `(k,d)` and
+  keeps the candidate that compresses the corpus smallest (grid includes the
+  defaults ⇒ provably ≤ `train_dictionary`). Ironclad test (both decoders,
+  ≤ default, < no-dict).
+- **dfast rep-offset awareness** (#3) for L3/L4: Silesia sizeΔ improved
+  L3 `+1.6%→+1.1%`, L4 `+1.5%→+0.9%`; synthetic ratio profiles improved or held.
+- **Rebuild-free streaming reduceIndex** (#2): streaming slides shift finder/LDM
+  positions in place instead of rebuilding; chain/binary-tree drops are aligned to
+  their ring periods so slots stay valid. Slide tests, fuzz, throughput, ratio clean.
 
 ## Tried & rejected (don't redo without a new angle — see PERF_NOTES)
 - `unsafe`/`get_unchecked` (≈0% after the safe elision) — discarded.
@@ -35,25 +50,10 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
 - Row-based finder (`RowHashState`) — correct but ~2× slower scalar; needs SIMD.
 - Block-split estimator "C" for L7–12 — couldn't make it free; cost is inherent.
 
-## On branch `wip/advanced-api` (NOT yet merged to main)
-- **Advanced-parameter API** (#5): `CompressOptions` builder + `compress_with_options`
-  (libzstd `ZSTD_CCtx_setParameter` analogue — window/hash/chain/search log,
-  min_match, target_length, strategy, checksum, magic, LDM). Defaults are
-  byte-identical to `compress`; overrides round-trip through our decoder + libzstd.
-  `compress`/`compress_long` refactored to share params-taking cores.
-- **COVER (k,d) dictionary optimization** (#4): greedy COVER parameterized by
-  segment `k` and dmer `d`; `train_dictionary_optimized` grid-searches `(k,d)` and
-  keeps the candidate that compresses the corpus smallest (grid includes the
-  defaults ⇒ provably ≤ `train_dictionary`). Ironclad test (both decoders, ≤ default,
-  < no-dict). Full suite + clippy/fmt/no_std green.
-- **Pending owner decision:** merge `wip/advanced-api` into main (coordinate with the
-  parallel agent working main on the `HANDOFF.md` tasks; reconcile conflicts at merge).
-
 ## In flight / next
-- See `HANDOFF.md` for two ready tasks for another agent: dfast rep-awareness
-  (L3/L4 ratio) and `reduceIndex` (rebuild-free streaming slides).
-- **Convention:** one feature → one `git worktree` on its own branch, so multiple
-  agents work in parallel without colliding (see `AGENTS.md` §0 / `CLAUDE.md`).
+- **Convention:** one feature → one `git worktree` on its own branch (see
+  `AGENTS.md` §0 / `CLAUDE.md`), so agents work in parallel without colliding.
+- All four queued tasks (#2–#5) are landed; the `HANDOFF.md` encoder tasks are done.
 - Deferred: v0.1.0 release (CHANGELOG needs refreshing to current `main` first).
 - COVER "stable" follow-ups: epoch-partitioned segment selection + a dict fuzz target.
 
