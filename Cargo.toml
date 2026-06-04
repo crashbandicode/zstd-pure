@@ -35,9 +35,10 @@ criterion = { version = "0.5", default-features = false, features = ["cargo_benc
 # proptest adds shrinking property tests (`tests/proptest.rs`) — a cross-platform,
 # always-on complement to the deterministic LCG sweeps in `tests/corpus.rs`.
 proptest = "1"
-# ruzstd is the pure-Rust zstd DECODER peer — a dev-only benchmark reference (like
-# libzstd) for the decode-speed comparison, never used at runtime.
-ruzstd = "0.7"
+# Pure-Rust peer codecs used only by the comparison example; never part of the
+# runtime dependency graph.
+ruzstd = "0.8.3"
+oxiarc-zstd = "0.3.2"
 
 [[bench]]
 name = "compression"
