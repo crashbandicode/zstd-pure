@@ -263,25 +263,50 @@ pub fn decompress_seekable_frame(
 const MAX_DECODE_JOBS: usize = 256;
 
 /// Decompress an entire seekable `archive` in parallel across up to `n_jobs`
-/// worker threads, returning the full logical output. Each data frame is an
-/// **independent** standard zstd frame, so the frames decode concurrently with no
-/// shared state and the result is byte-identical to decoding them in sequence and
-/// concatenating (which is what [`crate::decompress`] does single-threaded). Any
-/// per-frame checksums are verified.
+/// worker threads, returning the full logical output. **Uncapped** — the output
+/// is sized from the (untrusted) seek table's declared total, so use this only on
+/// archives you trust; for untrusted input use [`decompress_seekable_parallel_capped`]
+/// (this mirrors [`crate::decompress`] vs [`crate::decompress_capped`]).
 ///
-/// The frames are partitioned into `n_jobs` contiguous, roughly byte-balanced
-/// groups; the output buffer is pre-sized and `split_at_mut` into one disjoint
-/// region per group, so each worker decodes straight into its region with no
-/// post-pass concatenation. `std`-only (uses scoped threads); the `no_std` build
-/// uses the serial [`crate::decompress`].
+/// Each data frame is an **independent** standard zstd frame, so the frames
+/// decode concurrently and the result is byte-identical to serial decode +
+/// concatenation. Per-frame checksums are verified. `std`-only (scoped threads);
+/// the `no_std` build uses the serial [`crate::decompress`].
 #[cfg(feature = "std")]
 pub fn decompress_seekable_parallel(
     archive: &[u8],
     table: &SeekTable,
     n_jobs: usize,
 ) -> Result<Vec<u8>> {
+    decompress_seekable_parallel_capped(archive, table, n_jobs, table.decompressed_size() as usize)
+}
+
+/// [`decompress_seekable_parallel`] with a hard ceiling on total decompressed
+/// size — the decompression-bomb-safe variant for untrusted archives. Errors with
+/// [`ZstdError::OutputTooLarge`] **before allocating** if the seek table's declared
+/// total exceeds `max_output` (a corrupt table can claim an enormous size), and
+/// caps each frame's decode as well.
+///
+/// Frames are partitioned into `n_jobs` contiguous, byte-balanced groups; the
+/// output is pre-sized and `split_at_mut` into one disjoint region per group, so
+/// there is no post-pass concatenation. (Each worker currently decodes a frame
+/// into a temporary buffer and copies it into its region; a true zero-copy
+/// decode-into-slice path — a `BlockState` that writes through a `&mut [u8]`
+/// cursor — is a documented future optimization.) `n_jobs` is clamped to
+/// `[1, min(frames, MAX_DECODE_JOBS)]`, so `0` runs single-threaded.
+#[cfg(feature = "std")]
+pub fn decompress_seekable_parallel_capped(
+    archive: &[u8],
+    table: &SeekTable,
+    n_jobs: usize,
+    max_output: usize,
+) -> Result<Vec<u8>> {
     let frames = table.frames();
-    let total = table.decompressed_size() as usize;
+    // Bomb guard: reject an over-large declared total before the big allocation.
+    if table.decompressed_size() > max_output as u64 {
+        return Err(ZstdError::OutputTooLarge { limit: max_output });
+    }
+    let total = table.decompressed_size() as usize; // <= max_output, fits usize
     let mut out = vec![0u8; total];
     if frames.is_empty() {
         return Ok(out);
@@ -291,19 +316,20 @@ pub fn decompress_seekable_parallel(
     // Partition frames into `jobs` contiguous groups of ~equal decompressed bytes.
     // `bounds[g]..bounds[g + 1]` is group g; contiguous groups mean each maps to a
     // contiguous output region, so `split_at_mut` hands each worker a disjoint
-    // slice (no overlap, no copy-back).
+    // slice (no overlap, no copy-back). `u128` math avoids overflow in the balance
+    // comparison regardless of the (table-declared) sizes.
     let mut bounds = Vec::with_capacity(jobs + 1);
     bounds.push(0usize);
-    let mut acc = 0u64;
+    let mut acc = 0u128;
     for (i, f) in frames.iter().enumerate() {
-        acc += f.decompressed_size as u64;
+        acc += f.decompressed_size as u128;
         // Close the current group once it holds its share of the total bytes,
         // leaving enough frames for the remaining groups.
         let remaining_groups = jobs - bounds.len() + 1;
         let frames_left = frames.len() - (i + 1);
         if bounds.len() < jobs
             && frames_left >= remaining_groups - 1
-            && acc * jobs as u64 >= total as u64 * bounds.len() as u64
+            && acc * jobs as u128 >= total as u128 * bounds.len() as u128
         {
             bounds.push(i + 1);
         }
@@ -330,15 +356,22 @@ pub fn decompress_seekable_parallel(
     Ok(out)
 }
 
-/// Decode each frame of `grp` (in order) straight into `region`, the contiguous
-/// output slice that exactly spans the group's decompressed bytes. Verifies any
-/// stored checksum and that each frame's decoded length matches the table.
+/// Decode each frame of `grp` (in order) into `region`, the contiguous output
+/// slice that exactly spans the group's decompressed bytes. Offset arithmetic is
+/// checked (a corrupt seek table can't trigger overflow/OOB), the stored checksum
+/// is verified, and a decoded length that disagrees with the table is rejected.
 #[cfg(feature = "std")]
 fn decode_frame_group(archive: &[u8], grp: &[SeekFrame], region: &mut [u8]) -> Result<()> {
+    let bad_offset = || ZstdError::Invalid {
+        what: "seekable frame offset",
+        detail: "compressed offset/size overflows or exceeds the archive".into(),
+    };
     let mut off = 0usize;
     for f in grp {
-        let start = f.compressed_offset as usize;
-        let end = start + f.compressed_size as usize;
+        let start = usize::try_from(f.compressed_offset).map_err(|_| bad_offset())?;
+        let end = start
+            .checked_add(f.compressed_size as usize)
+            .ok_or_else(bad_offset)?;
         if end > archive.len() {
             return Err(ZstdError::Truncated {
                 what: "seekable frame",
@@ -362,8 +395,9 @@ fn decode_frame_group(archive: &[u8], grp: &[SeekFrame], region: &mut [u8]) -> R
                 });
             }
         }
-        region[off..off + want].copy_from_slice(&decoded.data);
-        off += want;
+        let dst_end = off.checked_add(want).ok_or_else(bad_offset)?;
+        region[off..dst_end].copy_from_slice(&decoded.data);
+        off = dst_end;
     }
     Ok(())
 }
@@ -447,6 +481,57 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Parallel decode must reject every malformed/abusive input rather than
+    /// panic, OOM, or return wrong bytes: an over-large declared size (capped),
+    /// a corrupted frame (with and without a checksum), a truncated archive, and
+    /// it must run correctly at `n_jobs = 0` (clamped to serial).
+    #[test]
+    fn parallel_decode_rejects_corruption_truncation_and_overcap() {
+        let data: Vec<u8> = (0..50_000u32)
+            .flat_map(|i| (i % 251).to_le_bytes())
+            .collect();
+
+        // --- checksum on ---
+        let archive = compress_seekable(&data, 4096, 9, true);
+        let table = SeekTable::parse(&archive).unwrap();
+        let total = table.decompressed_size() as usize;
+
+        // n_jobs = 0 clamps to one worker — correct output, no panic.
+        assert_eq!(
+            decompress_seekable_parallel(&archive, &table, 0).unwrap(),
+            data
+        );
+
+        // Bomb guard: a cap below the declared total errors *before* allocating.
+        assert!(matches!(
+            decompress_seekable_parallel_capped(&archive, &table, 4, total - 1),
+            Err(ZstdError::OutputTooLarge { .. })
+        ));
+        // The exact cap (and one above) succeed.
+        assert_eq!(
+            decompress_seekable_parallel_capped(&archive, &table, 4, total).unwrap(),
+            data
+        );
+
+        // A corrupted frame body fails (checksum mismatch / decode error / length).
+        let mut bad = archive.clone();
+        let f0 = table.frames()[0];
+        bad[f0.compressed_offset as usize + f0.compressed_size as usize / 2] ^= 0xFF;
+        assert!(decompress_seekable_parallel(&bad, &table, 4).is_err());
+
+        // A truncated archive (frame bytes cut) fails — the table is from the full
+        // archive, so a frame's end exceeds the truncated length.
+        assert!(decompress_seekable_parallel(&archive[..archive.len() / 2], &table, 4).is_err());
+
+        // --- checksum off: corruption still errors (decode failure / length) ---
+        let archive2 = compress_seekable(&data, 4096, 9, false);
+        let table2 = SeekTable::parse(&archive2).unwrap();
+        let mut bad2 = archive2.clone();
+        let g0 = table2.frames()[0];
+        bad2[g0.compressed_offset as usize + 3] ^= 0xFF; // hit the frame header/entropy early
+        assert!(decompress_seekable_parallel(&bad2, &table2, 4).is_err());
     }
 
     /// Random access: every offset maps to the frame covering it, and decoding

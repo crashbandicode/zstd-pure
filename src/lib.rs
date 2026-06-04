@@ -169,10 +169,11 @@ pub use frame::{
     decompress_magicless_with_dict, decompress_with_dict, frame_header, frame_header_magicless,
     DecodedFrame, FrameHeader,
 };
-/// Parallel whole-archive seekable decode (`std`-only — uses `std::thread`).
-#[cfg(feature = "std")]
-pub use seekable::decompress_seekable_parallel;
 pub use seekable::{compress_seekable, decompress_seekable_frame, SeekFrame, SeekTable};
+/// Parallel whole-archive seekable decode (`std`-only — uses `std::thread`); the
+/// `_capped` form is the decompression-bomb-safe variant for untrusted archives.
+#[cfg(feature = "std")]
+pub use seekable::{decompress_seekable_parallel, decompress_seekable_parallel_capped};
 pub use streaming::StreamingDecoder;
 
 /// Decompress a single magicless frame and return just the bytes (the common
