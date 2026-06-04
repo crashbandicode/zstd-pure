@@ -252,13 +252,19 @@ pub fn decode(
             // so copy it in one bulk move (a memcpy) instead of byte-by-byte.
             out.extend_from_within(start..start + match_len);
         } else {
-            // Overlapping back-reference (offset < length): each copied byte may
-            // feed a later one in the same match, so it must replicate one byte at
-            // a time. Reserve up front to avoid repeated growth checks.
+            // Overlapping back-reference (offset < length): replicate the
+            // `actual_offset`-byte pattern. Copy it in geometrically growing
+            // chunks — each `extend_from_within` copies everything written from
+            // `start` so far (which doubles the available source each step), so the
+            // whole match is O(match_len) memcpy work, not byte-by-byte. Every
+            // copied byte references bytes already written, so overlap stays valid.
             out.reserve(match_len);
-            for k in 0..match_len {
-                let b = out[start + k];
-                out.push(b);
+            let mut remaining = match_len;
+            while remaining > 0 {
+                let avail = out.len() - start;
+                let n = remaining.min(avail);
+                out.extend_from_within(start..start + n);
+                remaining -= n;
             }
         }
 
