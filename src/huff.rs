@@ -202,6 +202,19 @@ pub fn decode_1stream(table: &HuffTable, src: &[u8], regen_size: usize) -> Resul
     Ok(out)
 }
 
+/// Decode one Huffman symbol, refilling the window only when the next `max_bits`
+/// peek would not fit. Used by the interleaved 4-stream decoder, where four of
+/// these run in lockstep so their (otherwise serial: peek → table → consume)
+/// dependency chains overlap.
+#[inline]
+fn huf_one(br: &mut ReverseBitReader, table: &HuffTable) -> u8 {
+    br.ensure(table.max_bits);
+    let code = br.peek(table.max_bits) as usize;
+    let s = table.symbols[code];
+    br.consume(table.num_bits[code] as u32);
+    s
+}
+
 /// Decode a 4-stream Huffman literal block. The first 6 bytes are a jump table
 /// (three little-endian `u16` stream sizes); the four streams each produce
 /// `ceil(regen_size/4)` symbols (the last takes the remainder).
@@ -245,10 +258,80 @@ pub fn decode_4stream(table: &HuffTable, src: &[u8], regen_size: usize) -> Resul
         });
     }
     let last = regen_size - seg * 3;
-    let mut out = Vec::with_capacity(regen_size);
-    decode_into(table, s1, seg, &mut out)?;
-    decode_into(table, s2, seg, &mut out)?;
-    decode_into(table, s3, seg, &mut out)?;
-    decode_into(table, s4, last, &mut out)?;
+    assert!(last <= seg); // regen <= 4*seg, so the remainder never exceeds a segment
+    let mut out = vec![0u8; regen_size];
+    {
+        // The four output segments, written by four independent decoders.
+        let (a, r) = out.split_at_mut(seg);
+        let (b, r) = r.split_at_mut(seg);
+        let (c, d) = r.split_at_mut(seg); // c: seg, d: last (the remainder)
+        let mut r0 = ReverseBitReader::new(s1)?;
+        let mut r1 = ReverseBitReader::new(s2)?;
+        let mut r2 = ReverseBitReader::new(s3)?;
+        let mut r3 = ReverseBitReader::new(s4)?;
+        let mb = table.max_bits;
+
+        // One symbol from a reader into `dst[idx]`, no reload (the caller refills).
+        macro_rules! step {
+            ($r:expr, $dst:expr, $idx:expr) => {{
+                let code = $r.peek(mb) as usize;
+                $dst[$idx] = table.symbols[code];
+                $r.consume(table.num_bits[code] as u32);
+            }};
+        }
+
+        // Interleave the four streams so their (serial: peek→table→consume) decode
+        // chains overlap — the point of the 4-stream layout (libzstd's
+        // HUF_decompress4X). Fast loops do 4 symbols per reader per reload while all
+        // active readers hold a full window; per-symbol tails finish the rest.
+        // Phase 1: all four streams, for the shortest length (`last`).
+        let mut i = 0usize;
+        while i + 4 <= last
+            && (r0.reload(), r1.reload(), r2.reload(), r3.reload())
+                == (
+                    ReloadStatus::Unfinished,
+                    ReloadStatus::Unfinished,
+                    ReloadStatus::Unfinished,
+                    ReloadStatus::Unfinished,
+                )
+        {
+            for k in 0..4 {
+                step!(r0, a, i + k);
+                step!(r1, b, i + k);
+                step!(r2, c, i + k);
+                step!(r3, d, i + k);
+            }
+            i += 4;
+        }
+        while i < last {
+            a[i] = huf_one(&mut r0, table);
+            b[i] = huf_one(&mut r1, table);
+            c[i] = huf_one(&mut r2, table);
+            d[i] = huf_one(&mut r3, table);
+            i += 1;
+        }
+        // Phase 2: streams 1–3 carry `seg`, one segment longer than stream 4.
+        while i + 4 <= seg
+            && (r0.reload(), r1.reload(), r2.reload())
+                == (
+                    ReloadStatus::Unfinished,
+                    ReloadStatus::Unfinished,
+                    ReloadStatus::Unfinished,
+                )
+        {
+            for k in 0..4 {
+                step!(r0, a, i + k);
+                step!(r1, b, i + k);
+                step!(r2, c, i + k);
+            }
+            i += 4;
+        }
+        while i < seg {
+            a[i] = huf_one(&mut r0, table);
+            b[i] = huf_one(&mut r1, table);
+            c[i] = huf_one(&mut r2, table);
+            i += 1;
+        }
+    }
     Ok(out)
 }
