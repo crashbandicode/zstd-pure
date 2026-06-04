@@ -414,7 +414,7 @@ pub fn dfast_parse_block(
 
         // Best of the two candidates.
         let mut best_ml = MIN_MATCH - 1;
-        let mut best_c = 0usize;
+        let mut best_off = 0usize;
         for &cand in &[cand_long, cand_short] {
             if cand < 0 {
                 continue;
@@ -427,16 +427,22 @@ pub fn dfast_parse_block(
                 let ml = common_len(data, c, p, end);
                 if ml > best_ml {
                     best_ml = ml;
-                    best_c = c;
+                    best_off = offset;
                 }
             }
+        }
+
+        let ll0 = p == anchor;
+        let (rml, roff) = rep_match_at(data, p, end, rep, ll0);
+        if rml >= MIN_MATCH && rml >= best_ml {
+            best_ml = rml;
+            best_off = roff;
         }
 
         if best_ml >= MIN_MATCH {
             let lit_len = p - anchor;
             literals.extend_from_slice(&data[anchor..p]);
-            let ll0 = lit_len == 0;
-            let offset_value = encode_offset(rep, (p - best_c) as u32, ll0);
+            let offset_value = encode_offset(rep, best_off as u32, ll0);
             resolve_offset(rep, offset_value, ll0);
             seqs.push(Seq {
                 lit_len: lit_len as u32,
@@ -2134,6 +2140,20 @@ mod tests {
         assert!(
             rep_codes > 0,
             "expected repeat-offset codes, got none of {} sequences",
+            seqs.len()
+        );
+    }
+
+    #[test]
+    fn dfast_emits_repeat_offset_codes() {
+        let data = rep_heavy_input();
+        let mut state = DFastState::new(DEFAULT_HASH_LOG, DEFAULT_HASH_LOG);
+        let mut rep = [1u32, 4, 8];
+        let (seqs, _lits) = dfast_parse_block(&data, 0..data.len(), &mut state, 1 << 17, &mut rep);
+        let rep_codes = seqs.iter().filter(|s| s.offset_value <= 3).count();
+        assert!(
+            rep_codes > 0,
+            "expected dfast repeat-offset codes, got none of {} sequences",
             seqs.len()
         );
     }
