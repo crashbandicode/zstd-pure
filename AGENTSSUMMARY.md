@@ -42,6 +42,14 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
 - **Rebuild-free streaming reduceIndex** (#2): streaming slides shift finder/LDM
   positions in place instead of rebuilding; chain/binary-tree drops are aligned to
   their ring periods so slots stay valid. Slide tests, fuzz, throughput, ratio clean.
+- **Full binary-tree match set at btultra2** (L19–22): the opt parser now collects
+  the tree's full Pareto set (faithful `insert_and_get_all_matches`) alongside the
+  proven chain hybrid, in ONE finder walk, and `emit_and_pick` keeps whichever
+  block actually encodes smaller (per-block no-regression guard via `Parsed.alts`).
+  **Silesia L19 sizeΔ +2.4%→+0.5%** (≈ libzstd's 3.468×); synthetic json/wiki/3x90k
+  improved, others unchanged, zero regressions; L16–18 + non-opt byte-identical.
+  Cost: a 2nd DP over the richer stream at L19–22 (collection is shared). See
+  `COST_MODEL_NOTES.md`.
 
 ## Tried & rejected (don't redo without a new angle — see PERF_NOTES)
 - `unsafe`/`get_unchecked` (≈0% after the safe elision) — discarded.
@@ -54,6 +62,12 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
 - **Convention:** one feature → one `git worktree` on its own branch (see
   `AGENTS.md` §0 / `CLAUDE.md`), so agents work in parallel without colliding.
 - All four queued tasks (#2–#5) are landed; the `HANDOFF.md` encoder tasks are done.
+- **Investigating** (`wip/btopt-fulltree` worktree): extend the guarded full
+  binary-tree match set to btopt/btultra (L16–18). The guard makes it
+  regression-proof; open question is whether the ratio gain justifies the 2nd-DP
+  encode cost at those (meant-to-be-faster) levels — a measurement pass.
+- Parallel agent: competitive benchmark vs other pure-Rust zstd crates + code
+  coverage/badge + coverage-driven tests (see `HANDOFF.md`).
 - Deferred: v0.1.0 release (CHANGELOG needs refreshing to current `main` first).
 - COVER "stable" follow-ups: epoch-partitioned segment selection + a dict fuzz target.
 
