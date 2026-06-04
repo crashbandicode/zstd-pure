@@ -204,7 +204,7 @@ const OPTIMIZE_SCORE_LEVEL: i32 = 9;
 
 /// Train a raw-content dictionary by **optimizing the COVER `(k, d)` parameters**
 /// — a pure-Rust analogue of libzstd's `ZDICT_optimizeTrainFromBuffer_cover`.
-/// Trains a candidate with [`train_cover`] for each `(segment, dmer)` in a small
+/// Trains a candidate with `train_cover` for each `(segment, dmer)` in a small
 /// grid, scores each by the total compressed size of the samples under that
 /// candidate dictionary, and returns the smallest-scoring content. The grid
 /// includes the [`train_dictionary`] defaults, so the result is never worse — on
