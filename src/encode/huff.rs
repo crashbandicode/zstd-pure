@@ -425,28 +425,58 @@ pub fn write_literals_auto(
     lits: &[u8],
     prev: Option<&CodeTable>,
 ) -> Option<CodeTable> {
-    // Each candidate carries the table that becomes current if it's chosen.
-    let mut raw = Vec::with_capacity(lits.len() + 3);
-    write_raw_literals(&mut raw, lits);
-    let mut candidates: Vec<(Vec<u8>, Option<CodeTable>)> = vec![(raw, prev.cloned())];
-
+    // The raw candidate's size is known without building it (`raw_header_len` +
+    // the bytes verbatim), so only the *compressing* candidates are materialized;
+    // raw is written straight into `out` if it wins, avoiding a full copy of the
+    // (often large) literals when compression is chosen. Each candidate carries
+    // the table that becomes current if it's chosen.
+    let mut best: Option<(Vec<u8>, Option<CodeTable>)> = None;
+    let mut consider = |bytes: Vec<u8>, table: Option<CodeTable>| {
+        // `<` (strict) keeps the first-inserted on ties — compressed before
+        // treeless — matching the old `min_by_key` (first minimum wins).
+        // (`map_or`, not `is_none_or`, to stay within the 1.81 MSRV.)
+        if best.as_ref().map_or(true, |(b, _)| bytes.len() < b.len()) {
+            best = Some((bytes, table));
+        }
+    };
     if let Ok((bytes, table)) = build_compressed_section(lits) {
-        candidates.push((bytes, Some(table)));
+        consider(bytes, Some(table));
     }
     if let Some(t) = prev {
         if t.can_encode(lits) {
             if let Ok(bytes) = build_treeless_section(lits, t) {
-                candidates.push((bytes, prev.cloned()));
+                consider(bytes, prev.cloned());
             }
         }
     }
 
-    let (bytes, table) = candidates
-        .into_iter()
-        .min_by_key(|(b, _)| b.len())
-        .expect("the raw candidate is always present");
-    out.extend_from_slice(&bytes);
-    table
+    // Raw wins ties (it was the first candidate in the old `min_by_key`), so the
+    // compressing best must be *strictly* smaller to be chosen.
+    let raw_size = lits.len() + raw_header_len(lits.len());
+    match best {
+        Some((bytes, table)) if bytes.len() < raw_size => {
+            out.extend_from_slice(&bytes);
+            table
+        }
+        _ => {
+            write_raw_literals(out, lits);
+            prev.cloned()
+        }
+    }
+}
+
+/// Header byte count [`write_raw_literals`] emits for `regen` literal bytes
+/// (Size_Format 0/1/3: 5-/12-/20-bit size). Lets [`write_literals_auto`] size the
+/// raw candidate without materializing it.
+#[inline]
+fn raw_header_len(regen: usize) -> usize {
+    if regen < 32 {
+        1
+    } else if regen < 4096 {
+        2
+    } else {
+        3
+    }
 }
 
 /// Rebuild the encode [`CodeTable`] from a decoded Huffman table — e.g. a

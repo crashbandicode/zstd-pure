@@ -10,10 +10,10 @@
 use crate::alloc_prelude::*;
 /// Forward LSB bit writer. Whole bytes are flushed from the low end of a 64-bit
 /// accumulator only when the next field would not fit it (libzstd's `BIT_addBits`
-/// + lazy `BIT_flushBits`). Because the flushed bytes are always the low bytes of
-/// the accumulated bit string in order, *when* the flush happens doesn't change
-/// the output — deferring it just batches the `extend_from_slice` calls (≈5
-/// Huffman symbols per flush instead of one), so only the order and width of
+/// with a lazy `BIT_flushBits`). Because the flushed bytes are always the low
+/// bytes of the accumulated bit string in order, *when* the flush happens doesn't
+/// change the output — deferring it just batches the `extend_from_slice` calls
+/// (≈5 Huffman symbols per flush instead of one), so only the order and width of
 /// `add` calls matters for correctness.
 #[derive(Default)]
 pub struct BitWriter {
