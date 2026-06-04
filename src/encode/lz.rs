@@ -124,6 +124,63 @@ fn rep_resolved_offset(rep: &[u32; 3], offset_value: u32, ll0: bool) -> u32 {
     }
 }
 
+/// Longest repeat-offset match at `p` — `(len, back_distance)`, or `(0, 0)` if
+/// none reaches [`MIN_MATCH`]. Probes the three decoder-resolved repeat offsets
+/// (cheapest first) and verifies the bytes, so the returned distance is one the
+/// encoder will code as a tiny repeat code (offset code 0–2) rather than a full
+/// offset. The greedy/lazy parser uses this so a cheap repeat match competes with
+/// the hash-chain match — libzstd's lazy finder seeds the same rep candidates,
+/// and on real data a same-offset continuation is both common and far cheaper to
+/// code than a fresh long offset. Correctness is independent of the choice: any
+/// distance returned here is re-coded through the usual [`encode_offset`] path.
+#[inline]
+fn rep_match_at(data: &[u8], p: usize, end: usize, rep: &[u32; 3], ll0: bool) -> (usize, usize) {
+    // Only the cheapest repeat (offset code 0, i.e. `offset_value == 1`) is probed:
+    // it is the "continue at the last offset" case that dominates real data, and
+    // checking it alone keeps the per-position cost to a single byte-compare —
+    // libzstd's lazy finder likewise leads with rep0. (Offering all three reps
+    // barely improved ratio but tripled the finder's per-position work.)
+    let off = rep_resolved_offset(rep, 1, ll0) as usize;
+    if off == 0 || off > p {
+        return (0, 0); // no history at this distance (would underflow `p - off`)
+    }
+    let len = common_len(data, p - off, p, end);
+    if len >= MIN_MATCH {
+        (len, off)
+    } else {
+        (0, 0)
+    }
+}
+
+/// Best match at `p` for the chain/lazy parser as `(len, back_distance)`: the
+/// hash-chain match, but replaced by a [`rep_match_at`] repeat match when that is
+/// **at least as long**. A repeat that ties or beats the chain match on length
+/// always wins on cost (its offset codes to ~1 bit vs a full offset), so taking
+/// it is a strict per-step improvement; the chain still wins whenever it finds a
+/// strictly longer match. `(0, 0)` if neither reaches [`MIN_MATCH`].
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn best_match_at(
+    state: &ChainState,
+    data: &[u8],
+    p: usize,
+    end: usize,
+    max_offset: usize,
+    depth: usize,
+    rep: &[u32; 3],
+    ll0: bool,
+) -> (usize, usize) {
+    let (cml, cmpos) = state.find(data, p, end, max_offset, depth);
+    let (rml, roff) = rep_match_at(data, p, end, rep, ll0);
+    if rml >= MIN_MATCH && rml >= cml {
+        (rml, roff)
+    } else if cml >= MIN_MATCH {
+        (cml, p - cmpos)
+    } else {
+        (0, 0)
+    }
+}
+
 /// Persistent match-finder state across a frame's blocks: one slot per 4-byte
 /// hash holding the most recent **absolute** position, so a match in any block
 /// can reference earlier blocks (subject to the window). Carrying it across
@@ -766,23 +823,28 @@ pub fn lazy_parse_block(
             state.insert(data, inserted);
             inserted += 1;
         }
-        let (mut ml, mut mpos) = state.find(data, ip, end, max_offset, depth);
+        // Best match at `ip`, repeat-offset-aware (a cheap rep match competes with
+        // and is preferred over an equal-length chain match). `ll0` here is whether
+        // a match at `ip` would open with no preceding literals (`ip == anchor`),
+        // which selects which repeat slot is cheapest.
+        let (mut ml, mut moff) = best_match_at(state, data, ip, end, max_offset, depth, rep, ip == anchor);
         if ml < MIN_MATCH {
             ip += 1;
             continue;
         }
         // Lazy: if a strictly-longer match starts one byte later, defer to it
-        // (emit one more literal). `lazy2` repeats the check once more.
+        // (emit one more literal). `lazy2` repeats the check once more. A deferred
+        // position always has a preceding literal, so `ll0` is false there.
         let mut steps = lazy_steps;
         while steps > 0 && ip < ilimit {
             while inserted <= ip {
                 state.insert(data, inserted);
                 inserted += 1;
             }
-            let (ml1, mpos1) = state.find(data, ip + 1, end, max_offset, depth);
+            let (ml1, moff1) = best_match_at(state, data, ip + 1, end, max_offset, depth, rep, false);
             if ml1 > ml {
                 ml = ml1;
-                mpos = mpos1;
+                moff = moff1;
                 ip += 1;
                 steps -= 1;
             } else {
@@ -792,7 +854,7 @@ pub fn lazy_parse_block(
 
         let lit_len = ip - anchor;
         literals.extend_from_slice(&data[anchor..ip]);
-        let offset = ip - mpos;
+        let offset = moff;
         let ll0 = lit_len == 0;
         let offset_value = encode_offset(rep, offset as u32, ll0);
         resolve_offset(rep, offset_value, ll0);
