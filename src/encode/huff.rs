@@ -175,7 +175,10 @@ fn build_code_table(lengths: &[u8; 256]) -> Result<CodeTable> {
 /// Encode one literal sub-stream. Symbols are emitted in **reverse** order so
 /// the decoder's reverse bitstream reader replays them forwards.
 fn encode_stream(table: &CodeTable, lits: &[u8]) -> Vec<u8> {
-    let mut bw = BitWriter::new();
+    // A Huffman stream is never larger than its input (codes average < 8 bits when
+    // Huffman is chosen at all); reserve that up front so the per-literal loop
+    // never reallocates.
+    let mut bw = BitWriter::with_capacity(lits.len() + 8);
     for &b in lits.iter().rev() {
         let s = b as usize;
         bw.add(table.code[s], table.nbits[s] as u32);

@@ -53,6 +53,30 @@ fn read_u64(data: &[u8], p: usize) -> u64 {
     u64::from_le_bytes(data[p..p + 8].try_into().unwrap())
 }
 
+/// Length of the common prefix of `data[a..]` and `data[b..]` (with `a < b`), not
+/// extending past `end` (so the match stays within the block: `b + len <= end`).
+/// Word-at-a-time like libzstd's `ZSTD_count` — compares 8 bytes per step and
+/// locates the first mismatch via `trailing_zeros` — then a byte tail. Gives the
+/// exact same length as the scalar loop, with ~8× fewer iterations on long
+/// matches (the finder's dominant cost on compressible data).
+#[inline]
+fn common_len(data: &[u8], a: usize, b: usize, end: usize) -> usize {
+    let max = end - b;
+    let mut i = 0usize;
+    while i + 8 <= max {
+        // Both reads are in bounds: `a < b` and `b + i + 8 <= end <= data.len()`.
+        let x = read_u64(data, a + i) ^ read_u64(data, b + i);
+        if x != 0 {
+            return i + (x.trailing_zeros() / 8) as usize;
+        }
+        i += 8;
+    }
+    while i < max && data[a + i] == data[b + i] {
+        i += 1;
+    }
+    i
+}
+
 /// Hash of an 8-byte span — the `dfast` long-match table key. A longer span than
 /// [`hash4`] collides far less, so it preserves long-match candidates that the
 /// 4-byte table would overwrite with frequent short n-grams.
@@ -167,18 +191,12 @@ pub fn parse_block(
         if cand >= 0 {
             let c = cand as usize;
             let offset = p - c;
-            if offset <= max_offset
-                && offset >= 1
-                && data[c..c + MIN_MATCH] == data[p..p + MIN_MATCH]
-            {
+            if offset <= max_offset && offset >= 1 && read_u32(data, c) == read_u32(data, p) {
                 // Extend the match forward, bounded by this block's `end` (the
                 // matched bytes belong to this block's output). Overlap-safe:
                 // comparing against the original data validates the decoder's
-                // repeating copy.
-                let mut ml = MIN_MATCH;
-                while p + ml < end && data[c + ml] == data[p + ml] {
-                    ml += 1;
-                }
+                // repeating copy. Word-at-a-time via `common_len`.
+                let ml = common_len(data, c, p, end);
 
                 let lit_len = p - anchor;
                 literals.extend_from_slice(&data[anchor..p]);
@@ -301,11 +319,8 @@ pub fn dfast_parse_block(
             }
             let c = cand as usize;
             let offset = p - c;
-            if offset <= max_offset && data[c..c + MIN_MATCH] == data[p..p + MIN_MATCH] {
-                let mut ml = MIN_MATCH;
-                while p + ml < end && data[c + ml] == data[p + ml] {
-                    ml += 1;
-                }
+            if offset <= max_offset && read_u32(data, c) == read_u32(data, p) {
+                let ml = common_len(data, c, p, end);
                 if ml > best_ml {
                     best_ml = ml;
                     best_c = c;
@@ -399,10 +414,7 @@ impl ChainState {
             // Only bother extending if this candidate can beat the current best
             // (the byte just past `best_ml` must match) — the standard speedup.
             if ip + best_ml < end && data[c + best_ml] == data[ip + best_ml] {
-                let mut ml = 0usize;
-                while ip + ml < end && data[c + ml] == data[ip + ml] {
-                    ml += 1;
-                }
+                let ml = common_len(data, c, ip, end);
                 if ml > best_ml {
                     best_ml = ml;
                     best_pos = c;
@@ -453,10 +465,9 @@ impl ChainState {
                 break;
             }
             if ip + best_ml < end && data[c + best_ml] == data[ip + best_ml] {
-                let mut ml = 0usize;
-                while ip + ml < end && ml < cap && data[c + ml] == data[ip + ml] {
-                    ml += 1;
-                }
+                // Capped at `cap` (the search only needs "long enough"), bounded so
+                // `ip + ml <= end`.
+                let ml = common_len(data, c, ip, end.min(ip + cap));
                 if ml > best_ml {
                     best_ml = ml;
                     out.push((ml as u32, offset as u32));
@@ -478,11 +489,7 @@ impl ChainState {
     /// extending a "long enough" match the [`find_matches`] cap truncated.
     #[inline]
     fn extend_full(&self, data: &[u8], ip: usize, c: usize, end: usize) -> usize {
-        let mut ml = 0usize;
-        while ip + ml < end && data[c + ml] == data[ip + ml] {
-            ml += 1;
-        }
-        ml
+        common_len(data, c, ip, end)
     }
 }
 
@@ -573,10 +580,10 @@ impl BtState {
         while nb > 0 && match_index >= 0 && (match_index as usize) > window_low {
             nb -= 1;
             let mi = match_index as usize;
-            let mut ml = common_smaller.min(common_larger);
-            while curr + ml < end && data[mi + ml] == data[curr + ml] {
-                ml += 1;
-            }
+            // Resume from the prefix the tree descent already proved common, then
+            // extend word-at-a-time.
+            let start = common_smaller.min(common_larger);
+            let ml = start + common_len(data, mi + start, curr + start, end);
             if ml > best_len {
                 best_len = ml;
                 best_off = curr - mi;
@@ -628,10 +635,8 @@ impl BtState {
         while nb > 0 && match_index >= 0 && (match_index as usize) > window_low {
             nb -= 1;
             let mi = match_index as usize;
-            let mut ml = common_smaller.min(common_larger);
-            while ip + ml < end && data[mi + ml] == data[ip + ml] {
-                ml += 1;
-            }
+            let start = common_smaller.min(common_larger);
+            let ml = start + common_len(data, mi + start, ip + start, end);
             if ml > best_len {
                 best_len = ml;
                 best_pos = mi;

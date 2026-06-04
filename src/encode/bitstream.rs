@@ -20,14 +20,6 @@ pub struct BitWriter {
 }
 
 impl BitWriter {
-    pub fn new() -> Self {
-        BitWriter {
-            acc: 0,
-            nbits: 0,
-            out: Vec::new(),
-        }
-    }
-
     pub fn with_capacity(cap: usize) -> Self {
         BitWriter {
             acc: 0,
