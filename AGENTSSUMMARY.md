@@ -57,6 +57,17 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
   synthetic json 1.28×→1.04×, mixed now beats libzstd; only `records` +6 B (accepted
   synthetic blip). Encode speed unchanged (tree already maintained at these levels).
 
+## Coverage baseline
+- Task #2 branch `wip/coverage-info`: separate informational `cargo-llvm-cov`
+  workflow with Codecov upload plus `coverage-summary.txt`/`lcov.info` artifacts,
+  and a README coverage badge. Local baseline measured 2026-06-04 with
+  cargo-llvm-cov 0.8.7: **92.76% line**, 93.56% region, 93.65% function coverage.
+  The coverage command runs release-profile all-features tests and skips only
+  exhaustive matrix tests already covered by normal CI to keep the job bounded:
+  `cargo llvm-cov --release --summary-only --all-features -- --skip compress_roundtrips_across_levels --skip round_trips_three_ways_across_levels --skip frame_is_independent_of_write_chunk_size --skip multi_block_stream_compresses_and_round_trips --skip our_frames_round_trip_through_the_streaming_decoder`.
+  Largest remaining line gaps: `huff.rs` 80.25%, `encode/mod.rs` 82.11%,
+  `frame.rs` 86.42%, `encode/stream.rs` 88.84%.
+
 ## Tried & rejected (don't redo without a new angle — see PERF_NOTES)
 - `unsafe`/`get_unchecked` (≈0% after the safe elision) — discarded.
 - Huffman fixed-array elision (ILP already hides it); per-block literal-buffer
@@ -83,4 +94,5 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
 ## Build/test quickref
 `cargo test --release` · `cargo +nightly fuzz run {encode_roundtrip,decode_diff}`
 · `cargo clippy --all-targets` · `cargo build --no-default-features` ·
-`ZSTD_PURE_CORPUS=~/fixtures/silesia cargo run --release --example {throughput,ratio}`.
+`cargo llvm-cov --release --summary-only --all-features -- --skip compress_roundtrips_across_levels --skip round_trips_three_ways_across_levels --skip frame_is_independent_of_write_chunk_size --skip multi_block_stream_compresses_and_round_trips --skip our_frames_round_trip_through_the_streaming_decoder`
+· `ZSTD_PURE_CORPUS=~/fixtures/silesia cargo run --release --example {throughput,ratio}`.
