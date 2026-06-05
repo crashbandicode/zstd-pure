@@ -1,10 +1,10 @@
 //! Block-level encoding — RFC 8878 §3.1.1.2.
 //!
-//! This writes the two literal block types that need no entropy coding —
-//! **Raw** (store the bytes verbatim) and **RLE** (a single byte repeated) —
-//! plus a **Compressed** block whose body is a Huffman-coded literals section
-//! followed by an empty sequences section (the T2.1 entropy-encoder building
-//! block; the match finder / real sequences land in T2.3).
+//! This writes all three block types: **Raw** (bytes verbatim), **RLE** (a single
+//! byte repeated), and **Compressed** (a Huffman/Treeless literals section plus an
+//! FSE-coded sequences section from the match finder). Each block is emitted as
+//! the smallest of its candidate encodings (and the splitter may partition a parse
+//! into adjacent blocks with their own entropy tables — see `emit_split`).
 
 use super::super::error::Result;
 #[allow(unused_imports)]

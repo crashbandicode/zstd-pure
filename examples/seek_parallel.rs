@@ -39,7 +39,7 @@ fn main() {
     }
     let n = data.len();
     let frame_size = 1 << 20; // 1 MiB frames
-    let archive = compress_seekable(&data, frame_size, 9, true);
+    let archive = compress_seekable(&data, frame_size, 9, true).unwrap();
     let table = SeekTable::parse(&archive).unwrap();
     println!(
         "{:.1} MiB, {} frames of {} KiB",

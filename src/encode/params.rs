@@ -3,10 +3,9 @@
 //! window adjustment (`ZSTD_adjustCParams`).
 //!
 //! `level` selects a row; the row gives the window/hash/chain/search sizes, the
-//! minimum match length, the `target_length`, and the parse [`Strategy`]. Only
-//! the `fast` finder is wired today, so the stronger strategies currently map
-//! onto it; `window_log` (back-reference reach + frame header) and `hash_log`
-//! (match-table size) are the columns actually consumed so far.
+//! minimum match length, the `target_length`, and the parse [`Strategy`]. All
+//! columns are consumed: each strategy (`fast` … `btultra2`) has its own match
+//! finder, and the logs/target_length size its tables and tune its search.
 
 /// Parse strategy in increasing ratio/cost order (libzstd's `ZSTD_strategy`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

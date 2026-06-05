@@ -160,6 +160,9 @@ fn copy_power_of_two_pattern(out: &mut Vec<u8>, start: usize, offset: usize, mat
 /// Decode the sequences section and reconstruct the block's contribution into
 /// `out`, appending behind any existing history. `out` already contains all
 /// prior output (window history) usable by back-references.
+/// Decode the sequences section with no output ceiling (for tests / callers that
+/// have already bounded the output). Production decode goes through
+/// [`decode_capped`].
 pub fn decode(
     src: &[u8],
     literals: &[u8],
@@ -167,6 +170,25 @@ pub fn decode(
     tables: &mut SeqTables,
     rep: &mut [u32; 3],
 ) -> Result<()> {
+    decode_capped(src, literals, out, tables, rep, 0, usize::MAX)
+}
+
+/// Decode the sequences section, enforcing an output ceiling. `dict_len` is the
+/// dictionary prefix already in `out` (excluded from the cap); `max_output` bounds
+/// the real regenerated output. The ceiling is checked before every growth so a
+/// hostile compressed block cannot expand past it (a spec block regenerates
+/// ≤ 128 KiB, but a corrupt one can claim an arbitrary `match_len`).
+pub fn decode_capped(
+    src: &[u8],
+    literals: &[u8],
+    out: &mut Vec<u8>,
+    tables: &mut SeqTables,
+    rep: &mut [u32; 3],
+    dict_len: usize,
+    max_output: usize,
+) -> Result<()> {
+    // Bytes still allowed before the output ceiling, given what `out` already holds.
+    let headroom = |out: &Vec<u8>| max_output.saturating_sub(out.len() - dict_len);
     if src.is_empty() {
         return Err(ZstdError::Truncated {
             what: "sequences header",
@@ -195,6 +217,9 @@ pub fn decode(
     };
 
     if nb_seq == 0 {
+        if literals.len() > headroom(out) {
+            return Err(ZstdError::OutputTooLarge { limit: max_output });
+        }
         out.extend_from_slice(literals);
         return Ok(());
     }
@@ -261,6 +286,11 @@ pub fn decode(
             });
         }
 
+        // Enforce the output ceiling before growing by this sequence's bytes.
+        if lit_len + match_len > headroom(out) {
+            return Err(ZstdError::OutputTooLarge { limit: max_output });
+        }
+
         // Copy `lit_len` literals.
         if lit_pos + lit_len > literals.len() {
             return Err(ZstdError::Invalid {
@@ -319,6 +349,9 @@ pub fn decode(
     }
 
     // Trailing literals after the last sequence.
+    if literals.len() - lit_pos > headroom(out) {
+        return Err(ZstdError::OutputTooLarge { limit: max_output });
+    }
     out.extend_from_slice(&literals[lit_pos..]);
     Ok(())
 }

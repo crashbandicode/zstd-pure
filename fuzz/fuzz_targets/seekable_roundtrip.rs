@@ -16,7 +16,7 @@ fuzz_target!(|data: &[u8]| {
     //     (>= 16 bytes, ~7 frames for larger inputs) so the multi-frame + seek
     //     paths are exercised while the frame count stays bounded.
     let frame_size = (data.len() / 7).max(16);
-    let archive = compress_seekable(data, frame_size, 3, true);
+    let archive = compress_seekable(data, frame_size, 3, true).expect("compress_seekable");
 
     // Whole-stream decode — a seekable archive is a standard multi-frame stream.
     assert_eq!(decompress(&archive).expect("decode seekable archive"), data, "whole-stream mismatch");

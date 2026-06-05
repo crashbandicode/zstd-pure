@@ -1,8 +1,8 @@
 //! Frame-level encoding — RFC 8878 §3.1.1.1.
 //!
 //! Writes a frame header, the block sequence, and the optional XXH64 content
-//! checksum. The block bodies come from [`super::block`] (raw/RLE today;
-//! compressed blocks land with the match finder in T2.3).
+//! checksum. The block bodies come from [`super::block`] (raw / RLE / compressed,
+//! the last fed by the level's match finder).
 
 use super::super::frame::ZSTD_MAGIC;
 use super::super::xxhash::xxh64;
@@ -149,11 +149,9 @@ pub fn compress_store(data: &[u8], checksum: bool, expect_magic: bool) -> Vec<u8
 /// spec-conformant frame that libzstd and this crate's decoder both accept, and
 /// is never larger than [`compress_store`].
 ///
-/// `level` selects the compression parameters (window/hash sizes and, once the
-/// stronger strategies land, the parse strategy) from the zstd level table; see
-/// the `params` module. Today every level uses the `fast` finder, but `level`
-/// already drives the window log (back-reference reach + frame header) and the
-/// match-table size.
+/// `level` selects the compression parameters — window/hash/chain sizes and the
+/// parse strategy (`fast` … `btultra2`) — from the zstd level table; see the
+/// `params` module.
 pub fn compress(data: &[u8], level: i32, checksum: bool, expect_magic: bool) -> Vec<u8> {
     let params = super::params::params_for_level(level, data.len());
     compress_with_params(data, &params, checksum, expect_magic)
@@ -476,8 +474,8 @@ fn at_least_two_distinct(chunk: &[u8]) -> bool {
 /// the output is never larger than [`compress_store`] and is always a
 /// spec-conformant frame (libzstd and this crate's decoder both accept it).
 ///
-/// This is the T2.1a entropy-encoder milestone; ratio-competitive output needs
-/// the match finder (T2.3).
+/// Huffman-coded literals with no match finding — strictly worse than
+/// [`compress`]; kept as an internal building block / test path.
 pub fn compress_huffman_literals(data: &[u8], checksum: bool, expect_magic: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len() + 32);
     if expect_magic {

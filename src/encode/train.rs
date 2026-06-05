@@ -12,10 +12,10 @@
 //! This is the single-pool greedy variant: a `d`-byte dmer frequency map counted
 //! once per sample, then repeated selection of the highest-coverage `k`-byte
 //! segment with the covered dmers zeroed after each pick (so later picks add new
-//! coverage rather than repeat it). It does not do COVER's epoch partitioning or
-//! the `(d, k)` parameter optimisation, and it does not finalize an entropy
-//! header — a structured / tagged dictionary (entropy tables + dict id) is a
-//! follow-up. The output is deterministic.
+//! coverage rather than repeat it). The `(d, k)` parameter optimisation is
+//! [`train_dictionary_optimized`] and the structured / tagged dictionary (entropy
+//! tables + dict id) is [`train_dictionary_structured`]; COVER's epoch
+//! partitioning is still a follow-up. The output is deterministic.
 
 use super::super::dict::DICT_MAGIC;
 use super::super::xxhash::xxh64;
@@ -327,7 +327,16 @@ pub fn train_dictionary_structured(samples: &[&[u8]], max_size: usize) -> Vec<u8
     for r in [1u32, 4, 8] {
         out.extend_from_slice(&r.to_le_bytes());
     }
-    out.extend_from_slice(&content);
+    // Honor the `max_size` contract: the entropy header is prepended on top of the
+    // COVER content, so trim the content to fit. The repeat offsets 1/4/8 need ≥ 8
+    // content bytes — if the header leaves no room for that, fall back to the raw
+    // COVER content (itself ≤ max_size).
+    let header_len = out.len();
+    if header_len + 8 > max_size {
+        return content;
+    }
+    let kept = content.len().min(max_size - header_len);
+    out.extend_from_slice(&content[..kept]);
     out
 }
 

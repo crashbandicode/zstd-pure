@@ -52,7 +52,15 @@ fn read_u32(b: &[u8], at: usize) -> u32 {
 /// and any standard decoder reconstruct `data` by concatenating the frames and
 /// skipping the table — while [`SeekTable`] + [`decompress_seekable_frame`] give
 /// random access. Empty input yields just an (empty) seek table.
-pub fn compress_seekable(data: &[u8], frame_size: usize, level: i32, checksum: bool) -> Vec<u8> {
+/// Returns an error if any chunk/frame size or the seek table itself does not fit
+/// the format's `u32` fields (i.e. a `frame_size` or compressed frame ≥ 4 GiB, or
+/// ≥ 2³² frames) — rather than silently truncating into a corrupt seek table.
+pub fn compress_seekable(
+    data: &[u8],
+    frame_size: usize,
+    level: i32,
+    checksum: bool,
+) -> Result<Vec<u8>> {
     let frame_size = frame_size.max(1);
     let mut out = Vec::new();
     let mut entries: Vec<(u32, u32, u32)> = Vec::new();
@@ -63,20 +71,34 @@ pub fn compress_seekable(data: &[u8], frame_size: usize, level: i32, checksum: b
         } else {
             0
         };
-        entries.push((frame.len() as u32, chunk.len() as u32, ck));
+        // Seek-table entries are u32; refuse a ≥4 GiB frame/chunk rather than wrap.
+        let cs = u32::try_from(frame.len()).map_err(|_| seek_size_err("frame", frame.len()))?;
+        let ds = u32::try_from(chunk.len()).map_err(|_| seek_size_err("chunk", chunk.len()))?;
+        entries.push((cs, ds, ck));
         out.extend_from_slice(&frame);
     }
-    write_seek_table(&mut out, &entries, checksum);
-    out
+    write_seek_table(&mut out, &entries, checksum)?;
+    Ok(out)
+}
+
+fn seek_size_err(what: &str, size: usize) -> ZstdError {
+    ZstdError::Invalid {
+        what: "seekable size",
+        detail: format!("{what} size {size} bytes does not fit the u32 seek-table field"),
+    }
 }
 
 /// Append the seek-table skippable frame for `entries` (`(compressed_size,
-/// decompressed_size, checksum)`).
-fn write_seek_table(out: &mut Vec<u8>, entries: &[(u32, u32, u32)], checksum: bool) {
+/// decompressed_size, checksum)`). Errors if the table size or frame count
+/// overflows the format's `u32` fields.
+fn write_seek_table(out: &mut Vec<u8>, entries: &[(u32, u32, u32)], checksum: bool) -> Result<()> {
     let entry_size = if checksum { 12 } else { 8 };
     let content = entries.len() * entry_size + FOOTER_SIZE;
+    let content = u32::try_from(content).map_err(|_| seek_size_err("seek table", content))?;
+    let num_frames = u32::try_from(entries.len())
+        .map_err(|_| seek_size_err("seek table frame count", entries.len()))?;
     out.extend_from_slice(&SEEK_TABLE_SKIPPABLE_MAGIC.to_le_bytes());
-    out.extend_from_slice(&(content as u32).to_le_bytes());
+    out.extend_from_slice(&content.to_le_bytes());
     for &(cs, ds, ck) in entries {
         out.extend_from_slice(&cs.to_le_bytes());
         out.extend_from_slice(&ds.to_le_bytes());
@@ -84,9 +106,10 @@ fn write_seek_table(out: &mut Vec<u8>, entries: &[(u32, u32, u32)], checksum: bo
             out.extend_from_slice(&ck.to_le_bytes());
         }
     }
-    out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    out.extend_from_slice(&num_frames.to_le_bytes());
     out.push(if checksum { 0x80 } else { 0 });
     out.extend_from_slice(&SEEKABLE_MAGIC.to_le_bytes());
+    Ok(())
 }
 
 /// One frame's location in a seekable archive: where its compressed bytes sit,
@@ -429,7 +452,7 @@ mod tests {
         for data in corpus() {
             for &fs in &[1usize, 64, 4096, 1 << 16] {
                 for &checksum in &[false, true] {
-                    let archive = compress_seekable(&data, fs, 9, checksum);
+                    let archive = compress_seekable(&data, fs, 9, checksum).unwrap();
                     // Whole-archive decode through our (multi-frame + skippable) decoder.
                     assert_eq!(
                         decompress(&archive).unwrap(),
@@ -466,7 +489,7 @@ mod tests {
         for data in corpus() {
             for &fs in &[1usize, 64, 4096, 1 << 16] {
                 for &checksum in &[false, true] {
-                    let archive = compress_seekable(&data, fs, 9, checksum);
+                    let archive = compress_seekable(&data, fs, 9, checksum).unwrap();
                     let table = SeekTable::parse(&archive).expect("parse seek table");
                     for &jobs in &[1usize, 2, 3, 8, 64] {
                         let got = decompress_seekable_parallel(&archive, &table, jobs)
@@ -494,7 +517,7 @@ mod tests {
             .collect();
 
         // --- checksum on ---
-        let archive = compress_seekable(&data, 4096, 9, true);
+        let archive = compress_seekable(&data, 4096, 9, true).unwrap();
         let table = SeekTable::parse(&archive).unwrap();
         let total = table.decompressed_size() as usize;
 
@@ -526,7 +549,7 @@ mod tests {
         assert!(decompress_seekable_parallel(&archive[..archive.len() / 2], &table, 4).is_err());
 
         // --- checksum off: corruption still errors (decode failure / length) ---
-        let archive2 = compress_seekable(&data, 4096, 9, false);
+        let archive2 = compress_seekable(&data, 4096, 9, false).unwrap();
         let table2 = SeekTable::parse(&archive2).unwrap();
         let mut bad2 = archive2.clone();
         let g0 = table2.frames()[0];
@@ -541,7 +564,7 @@ mod tests {
         let data: Vec<u8> = (0..40_000u32)
             .flat_map(|i| (i.wrapping_mul(2654435761) >> 13).to_le_bytes())
             .collect();
-        let archive = compress_seekable(&data, 4096, 6, true);
+        let archive = compress_seekable(&data, 4096, 6, true).unwrap();
         let table = SeekTable::parse(&archive).unwrap();
         assert!(table.num_frames() > 1, "expected multiple frames");
 
@@ -571,7 +594,7 @@ mod tests {
     #[test]
     fn checksum_detects_corruption() {
         let data = b"checksum this seekable payload ".repeat(400);
-        let mut archive = compress_seekable(&data, 1024, 3, true);
+        let mut archive = compress_seekable(&data, 1024, 3, true).unwrap();
         let table = SeekTable::parse(&archive).unwrap();
         // Corrupt a byte inside the first frame's compressed body (past the header).
         let f0 = table.frames()[0];

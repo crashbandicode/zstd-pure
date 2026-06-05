@@ -1,15 +1,13 @@
 //! Pure-Rust Zstandard **encoder** (RFC 8878).
 //!
-//! Staged build-out (see `README.md`):
-//!
-//! * `block` / `frame` — block + frame writers. Store mode (raw / RLE blocks)
-//!   plus a Huffman-literals compressed block (`[Huffman literals][0
-//!   sequences]`), both producing fully spec-conformant frames that libzstd and
-//!   this crate's decoder accept. This is the skeleton the match finder hangs
-//!   off.
-//! * `huff` — Huff0 literal **encoder** (T2.1a).
-//! * (planned) `fse` — FSE encoder (T2.1b); `sequences` / match finders — the
-//!   ratio work (T2.3).
+//! Feature-complete: levels 1–22 across all parse strategies (`fast`, `dfast`,
+//! `greedy`/`lazy`/`lazy2`, `btlazy2`, `btopt`/`btultra`/`btultra2`), every block
+//! and literal/sequence mode (raw / RLE / compressed; Huffman + Treeless literals;
+//! Predefined / RLE / per-block FSE / Repeat sequence tables), dictionaries,
+//! streaming, long-distance matching, parallel compression, and the seekable
+//! format — all producing spec-conformant frames that libzstd and this crate's
+//! decoder accept. Submodules (`block`, `frame`, `huff`, `fse`, `lz`, `sequences`,
+//! …) are the encoder implementation.
 
 #[allow(unused_imports)]
 use crate::alloc_prelude::*;
@@ -33,7 +31,7 @@ pub(crate) mod sequences;
 pub(crate) mod stream;
 pub(crate) mod train;
 
-/// A T2.1a stepping-stone (Huffman-coded literals, no match finding) — strictly
+/// A stepping-stone path (Huffman-coded literals, no match finding) — strictly
 /// worse than [`compress`]. Hidden from the public API; kept for internal tests.
 #[doc(hidden)]
 pub use frame::compress_huffman_literals;

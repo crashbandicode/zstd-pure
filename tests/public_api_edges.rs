@@ -1,8 +1,9 @@
 use std::io::Read;
 
 use zstd_pure::{
-    compress, compress_with_options, decompress_magicless_bytes, frame_header,
-    frame_header_magicless, CompressOptions, StreamingDecoder, ZstdError,
+    compress, compress_with_options, decompress, decompress_capped, decompress_magicless_bytes,
+    frame_header, frame_header_magicless, train_dictionary_structured, CompressOptions,
+    StreamingDecoder, ZstdError,
 };
 
 fn libzstd_decompress_magicless(frame: &[u8], out_len: usize) -> Vec<u8> {
@@ -114,4 +115,74 @@ fn streaming_magicless_and_window_cap_edges_are_public_black_box() {
     out.clear();
     dec.read_to_end(&mut out).expect("read capped stream");
     assert_eq!(out, data);
+}
+
+/// `decompress_capped` enforces a TOTAL output ceiling across all frames, so a
+/// multi-frame stream whose frames are each under the cap but together exceed it
+/// is refused (issue #1: per-frame vs aggregate cap).
+#[test]
+fn decompress_capped_enforces_total_output_across_frames() {
+    let each = 50_000usize;
+    let a = vec![0xABu8; each];
+    let b: Vec<u8> = (0..each as u32)
+        .map(|i| (i.wrapping_mul(2654435761) >> 24) as u8)
+        .collect();
+    let mut stream = compress(&a, 9, false, true);
+    stream.extend_from_slice(&compress(&b, 9, false, true));
+
+    // A cap between one frame and the sum rejects the multi-frame stream.
+    assert!(matches!(
+        decompress_capped(&stream, each + each / 2),
+        Err(ZstdError::OutputTooLarge { .. })
+    ));
+    // A cap at the true total (and the default cap) reconstructs both frames.
+    let mut both = a.clone();
+    both.extend_from_slice(&b);
+    assert_eq!(decompress_capped(&stream, 2 * each).unwrap(), both);
+    assert_eq!(decompress(&stream).unwrap(), both);
+}
+
+/// A compressed (type-2) block must not be allowed to expand past `max_output`
+/// (issue #1: only raw/RLE blocks checked the ceiling before).
+#[test]
+fn decompress_capped_bounds_compressed_block_output() {
+    // Repetitive-but-varied → a real compressed block (matches/sequences), not RLE.
+    let data = b"the quick brown fox jumps over the lazy dog. ".repeat(5000);
+    let frame = compress(&data, 9, false, true);
+    assert!(
+        frame.len() < data.len() / 10,
+        "expected a well-compressed frame"
+    );
+    assert!(matches!(
+        decompress_capped(&frame, 1024),
+        Err(ZstdError::OutputTooLarge { .. })
+    ));
+    assert_eq!(decompress_capped(&frame, data.len()).unwrap(), data);
+}
+
+/// A frame that references a dictionary id but is decoded with no dictionary must
+/// error rather than silently decode against missing history (issue #1). Crafted
+/// header: magic | FHD(dict_id_flag=1) | window_descriptor | dict_id=7.
+#[test]
+fn frame_referencing_dict_id_without_dict_errors() {
+    let frame = [0x28u8, 0xB5, 0x2F, 0xFD, 0x01, 0x00, 0x07];
+    assert!(matches!(decompress(&frame), Err(ZstdError::Dictionary(_))));
+}
+
+/// `train_dictionary_structured` honors its `max_size` contract — the prepended
+/// entropy header must not push the finalized dictionary past `max_size` (issue #3).
+#[test]
+fn structured_dictionary_respects_max_size() {
+    let samples: Vec<Vec<u8>> = (0..200u32)
+        .map(|i| format!("record {{ id: {}, tag: \"shared-prefix-value\" }}", i % 13).into_bytes())
+        .collect();
+    let refs: Vec<&[u8]> = samples.iter().map(|s| s.as_slice()).collect();
+    for &max in &[64usize, 256, 1024, 4096] {
+        let dict = train_dictionary_structured(&refs, max);
+        assert!(
+            dict.len() <= max,
+            "structured dict {} bytes exceeds max_size {max}",
+            dict.len()
+        );
+    }
 }

@@ -72,14 +72,19 @@ impl BlockState {
     }
 
     /// Decode a Compressed block body (literals section + sequences section).
+    /// The output ceiling is enforced inside [`sequences::decode`] so a hostile
+    /// block cannot expand past `max_output` (unlike the up-front `check_ceiling`
+    /// of raw/RLE blocks, a compressed block's size isn't known until decoded).
     pub fn decode_compressed(&mut self, data: &[u8]) -> Result<()> {
         let (lits, consumed) = literals::decode(data, &mut self.huff)?;
-        sequences::decode(
+        sequences::decode_capped(
             &data[consumed..],
             &lits,
             &mut self.out,
             &mut self.seq,
             &mut self.rep,
+            self.dict_len,
+            self.max_output,
         )
     }
 

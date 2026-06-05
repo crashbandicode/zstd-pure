@@ -16,14 +16,16 @@
 //! threading, and checksum are all functions of the byte stream alone.
 //!
 //! Memory is **bounded** — independent of the total (possibly multi-gigabyte)
-//! input. The encoder retains only roughly two windows plus a couple of blocks of
-//! past input: once the retained history grows past `2 * window`, an aligned
-//! dead prefix (older than one window before the last emitted block, so
-//! unreachable by any future back-reference) is dropped and the finder positions
-//! are reduced in place. The drop is aligned to any position-indexed finder ring
-//! so ring slots remain valid after the retained buffer moves to zero. Input is
-//! also consumed in block-sized steps internally, so a single huge [`push`] does
-//! not spike memory.
+//! input: once the retained history grows past `2 * window`, the dead prefix
+//! (older than one window before the last emitted block, so unreachable by any
+//! future back-reference) is dropped and the finder positions are reduced in
+//! place. The drop is rounded **down** to the active finder's ring period so ring
+//! slots stay valid after the buffer moves to zero — so the retained buffer is
+//! bounded by `2 * window + ring_period` (the period is 1 for the `fast` finder
+//! but up to ~one window for the chain/tree strategies, so high levels retain
+//! closer to ~3 windows). The bound is on the *window*, not the total input.
+//! Input is also consumed in block-sized steps internally, so a single huge
+//! [`push`] does not spike memory.
 //!
 //! Long-distance matching is available via [`with_options_long`]: a coarse
 //! content-defined index ([`super::ldm`]) contributes matches at offsets *beyond*

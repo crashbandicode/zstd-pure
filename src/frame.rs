@@ -259,6 +259,15 @@ pub fn decode_one_with_dict(
             state.seq = e.tables.clone();
             state.rep = e.rep;
         }
+    } else if header.dictionary_id != 0 {
+        // The frame references a dictionary by id but none was supplied: refuse
+        // rather than decode against missing history (which would yield wrong
+        // bytes or a late offset error). Matches the `ZstdError::Dictionary`
+        // contract documented in `error.rs`.
+        return Err(ZstdError::Dictionary(format!(
+            "frame references dictionary id {} but no dictionary was supplied",
+            header.dictionary_id
+        )));
     }
     let dict_len = state.dict_len;
 
@@ -350,12 +359,16 @@ pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
     decompress_capped(src, DEFAULT_MAX_OUTPUT)
 }
 
-/// Decompress a standard stream with an explicit per-frame output ceiling.
+/// Decompress a standard stream with an explicit **total** output ceiling across
+/// all frames. Each frame is decoded against the budget still remaining, so a
+/// multi-frame stream (each frame individually under the cap) cannot together
+/// exceed `max_output` — a decompression-bomb guard for concatenated frames.
 pub fn decompress_capped(src: &[u8], max_output: usize) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut pos = 0usize;
     while pos < src.len() {
-        let frame = decode_one(&src[pos..], true, max_output)?;
+        let remaining = max_output - out.len();
+        let frame = decode_one(&src[pos..], true, remaining)?;
         out.extend_from_slice(&frame.data);
         pos += frame.consumed;
     }

@@ -6,8 +6,9 @@
 //! decoder's `resolve_offset` expects). This module emits the count header, the
 //! compression-modes byte, and the three-state interleaved FSE bitstream.
 //!
-//! Only the **predefined** table mode is implemented here (modes byte `0`); the
-//! per-block FSE table mode is a later ratio refinement. The bitstream layout is
+//! All four table modes are implemented and chosen per channel by exact cost:
+//! Predefined (`0`), RLE (`1`), per-block FSE (`2`), and Repeat (`3`). The
+//! bitstream layout is
 //! ported from libzstd's `ZSTD_encodeSequences_body`: states init from the last
 //! sequence, the body loops backward emitting `OF`/`ML`/`LL` state transitions
 //! then the `LL`/`ML`/offset extra bits, and the three states flush in
@@ -201,8 +202,9 @@ struct ChannelPlan {
 /// * **Per-block FSE** (mode 2) — a `write_ncount` header + a custom table;
 ///   only when ≥ 2 distinct codes (FSE needs a real alphabet).
 ///
-/// Repeat (mode 3) is a later refinement. Costs compare only the parts that
-/// differ between modes (state bits + header bytes); the extra/low bits are
+/// Repeat (mode 3) reuses the previous block's table (chosen elsewhere, when it
+/// fits). Costs compare only the parts that differ between modes (state bits +
+/// header bytes); the extra/low bits are
 /// mode-independent and the three channels' state bits are independent, so
 /// per-channel selection minimizes the whole section.
 fn plan_channel(
