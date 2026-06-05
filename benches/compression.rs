@@ -14,7 +14,8 @@ use zstd_pure::{compress, decompress};
 /// Decode a standard frame with the pure-Rust `ruzstd` decoder (the decode-speed
 /// peer; libzstd is the C reference). Reads to a fresh buffer each call.
 fn ruzstd_decode(frame: &[u8]) -> Vec<u8> {
-    let mut dec = ruzstd::StreamingDecoder::new(frame).expect("ruzstd: construct decoder");
+    let mut dec =
+        ruzstd::decoding::StreamingDecoder::new(frame).expect("ruzstd: construct decoder");
     let mut out = Vec::new();
     dec.read_to_end(&mut out).expect("ruzstd: decode");
     out

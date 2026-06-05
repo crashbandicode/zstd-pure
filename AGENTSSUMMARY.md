@@ -89,6 +89,13 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
 ## In flight / next
 - **Convention:** one feature → one `git worktree` on its own branch (see
   `AGENTS.md` §0 / `CLAUDE.md`), so agents work in parallel without colliding.
+- **Pure-Rust peer comparison (Task #1, `wip/competitor-comparison`)**:
+  `COMPARISON.md` now records reproducible `pure_rust_compare` results for
+  zstd-pure vs ruzstd 0.8.3 and oxiarc-zstd 0.3.2 on synthetic profiles and
+  Silesia raw (8 MiB/file cap), including cross-decode correctness, unsafe
+  counts, and a capability matrix. Verdict: zstd-pure is the only tested
+  pure-Rust encoder with libzstd + ruzstd cross-decode compatibility and
+  competitive size; libzstd still wins speed, and OxiArc failed cross-decode.
 - All four queued tasks (#2–#5) are landed; the `HANDOFF.md` encoder tasks are done.
 - **Mid levels:** L13–15 closed to ≈libzstd (gain-based btlazy2, above). **L9–L12
   (Lazy2) deliberately left tree-less** at +1.5–2.0%: a measured experiment giving

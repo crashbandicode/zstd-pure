@@ -208,6 +208,9 @@ Ratio and throughput vs libzstd (and a decode comparison vs the pure-Rust
 bench_large` (large-input size + time + parallel speedup), `cargo bench` (criterion
 throughput).
 
+Pure-Rust peer results (ruzstd / OxiArc, including cross-decode correctness and
+capability/safety posture) are tracked in [`COMPARISON.md`](COMPARISON.md).
+
 ## Features / `no_std`
 
 | feature | default | effect |
