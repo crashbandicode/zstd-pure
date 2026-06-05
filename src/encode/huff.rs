@@ -290,10 +290,29 @@ fn write_weight_header_fse(out: &mut Vec<u8>, table: &CodeTable) -> Result<()> {
     Ok(())
 }
 
-/// Write the compressed/treeless literals header (RFC 8878 §3.1.1.3.1.1),
-/// selecting the smallest `Size_Format` that fits `regen` + `comp`.
-/// `block_type` is 2 (Compressed — a tree description precedes the streams) or
-/// 3 (Treeless — streams only, reusing the previous block's Huffman table).
+/// The smallest literals `Size_Format` (0–3) that fits `regen` + `comp` for the
+/// given stream form, with its header byte length — or `None` if both exceed the
+/// 18-bit maximum. Format 0 is single-stream; 1/2/3 are four-stream with 10/14/18-
+/// bit size fields and 3/4/5-byte headers. Single source of truth shared by the
+/// writer and the sizer so they can't drift (RFC 8878 §3.1.1.3.1.1).
+fn size_format(four: bool, regen: usize, comp: usize) -> Option<(u8, usize)> {
+    if !four {
+        (regen <= 0x3FF && comp <= 0x3FF).then_some((0, 3))
+    } else if regen <= 0x3FF && comp <= 0x3FF {
+        Some((1, 3))
+    } else if regen <= 0x3FFF && comp <= 0x3FFF {
+        Some((2, 4))
+    } else if regen <= 0x3FFFF && comp <= 0x3FFFF {
+        Some((3, 5))
+    } else {
+        None
+    }
+}
+
+/// Write the compressed/treeless literals header, selecting the smallest
+/// `Size_Format` via [`size_format`]. `block_type` is 2 (Compressed — a tree
+/// description precedes the streams) or 3 (Treeless — streams only, reusing the
+/// previous block's Huffman table).
 fn write_compressed_lit_header(
     out: &mut Vec<u8>,
     block_type: u32,
@@ -301,31 +320,18 @@ fn write_compressed_lit_header(
     regen: usize,
     comp: usize,
 ) -> Result<()> {
-    let too_big = || ZstdError::Invalid {
+    let (fmt, _) = size_format(four, regen, comp).ok_or_else(|| ZstdError::Invalid {
         what: "compressed literals header",
         detail: format!("regen {regen} / comp {comp} exceed 18-bit fields"),
-    };
-    if !four {
-        // Size_Format 0: single stream, 10-bit regen/comp, 3-byte header.
-        if regen > 0x3FF || comp > 0x3FF {
-            return Err(too_big());
-        }
-        let v = block_type | (regen as u32) << 4 | (comp as u32) << 14;
-        out.extend_from_slice(&v.to_le_bytes()[..3]);
-    } else if regen <= 0x3FF && comp <= 0x3FF {
-        // Size_Format 1: four streams, 10-bit, 3-byte header.
-        let v = block_type | 1 << 2 | (regen as u32) << 4 | (comp as u32) << 14;
-        out.extend_from_slice(&v.to_le_bytes()[..3]);
-    } else if regen <= 0x3FFF && comp <= 0x3FFF {
-        // Size_Format 2: four streams, 14-bit, 4-byte header.
-        let v = block_type | 2 << 2 | (regen as u32) << 4 | (comp as u32) << 18;
-        out.extend_from_slice(&v.to_le_bytes());
-    } else if regen <= 0x3FFFF && comp <= 0x3FFFF {
-        // Size_Format 3: four streams, 18-bit, 5-byte header.
-        let v = block_type as u64 | 3 << 2 | (regen as u64) << 4 | (comp as u64) << 22;
-        out.extend_from_slice(&v.to_le_bytes()[..5]);
-    } else {
-        return Err(too_big());
+    })?;
+    let (bt, r, c) = (block_type as u64, regen as u64, comp as u64);
+    match fmt {
+        // Formats differ only in the `comp` shift and header length; the format bit
+        // pattern is `fmt << 2`.
+        0 => out.extend_from_slice(&((bt | r << 4 | c << 14) as u32).to_le_bytes()[..3]),
+        1 => out.extend_from_slice(&((bt | 1 << 2 | r << 4 | c << 14) as u32).to_le_bytes()[..3]),
+        2 => out.extend_from_slice(&((bt | 2 << 2 | r << 4 | c << 18) as u32).to_le_bytes()),
+        _ => out.extend_from_slice(&(bt | 3 << 2 | r << 4 | c << 22).to_le_bytes()[..5]),
     }
     Ok(())
 }
@@ -430,17 +436,7 @@ fn streams_byte_len(table: &CodeTable, lits: &[u8]) -> Option<(bool, usize)> {
 /// Byte length of [`write_compressed_lit_header`] for the given form / sizes, or
 /// `None` if `regen`/`comp` exceed the largest `Size_Format` (the writer errors).
 fn compressed_header_len(four: bool, regen: usize, comp: usize) -> Option<usize> {
-    if !four {
-        (regen <= 0x3FF && comp <= 0x3FF).then_some(3)
-    } else if regen <= 0x3FF && comp <= 0x3FF {
-        Some(3)
-    } else if regen <= 0x3FFF && comp <= 0x3FFF {
-        Some(4)
-    } else if regen <= 0x3FFFF && comp <= 0x3FFFF {
-        Some(5)
-    } else {
-        None
-    }
+    size_format(four, regen, comp).map(|(_, len)| len)
 }
 
 /// Build a **Treeless** (block_type 3) literals section — the streams only,

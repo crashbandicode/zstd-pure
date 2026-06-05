@@ -62,6 +62,24 @@ encoder/decoder change, ALL of these must pass (this mirrors CI):
   `hash_pos`, `log2_fp`, …) rather than re-deriving.
 - Keep functions documented with their exact invariants — especially anything that
   indexes by an offset/hash (state why it's in bounds).
+- **Leave it smaller and clearer (standing requirement).** Every change should
+  keep the codebase easy for a human to follow and trend LOC *down*, not up:
+  - Don't duplicate logic — extract a shared helper/iterator instead of copying a
+    loop or formula. Splitting a file into smaller files is fine when it nets less
+    code or clearly improves readability. A net LOC reduction at equal
+    functionality is a win.
+  - Refactors must be **functionally identical** (no behaviour/ratio change) and
+    pass the full §1 gates — for hot/correctness-critical paths (decoder, opt
+    parse, match finders) confirm byte-identical output via the corpus differential
+    before committing.
+  - Keep docs honest: when you change behaviour, update the surrounding comments
+    and module headers in the same commit — no stale "planned/TODO/Tx.y" claims.
+- **Tests: black-box, high-bang-for-buck, no coverage loss.** Prefer public-API
+  round-trip + libzstd-differential + negative tests that exercise many corner
+  cases at once over many narrow white-box tests. When adding/refactoring tests,
+  consolidate duplication (shared fixtures/generators, parameterized loops) so the
+  suite tests the same or *more* with less code. Never reduce coverage to cut LOC;
+  deterministic only (fixed PRNG seeds, no timing/threading races).
 
 ## 3. Chunk large tasks (survive context compaction)
 The context window gets compacted mid-task; design so a compaction never loses
