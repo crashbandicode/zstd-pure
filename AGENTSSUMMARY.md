@@ -21,6 +21,17 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
 **parallel seekable decode** (`decompress_seekable_parallel[_capped]`, ~3.4×/8thr).
 
 ## Recently landed (on origin/main)
+- **Code-quality / LOC pass** (`wip/quality`): de-duplicated logic at equal
+  functionality — byte-identical, proven by the libzstd corpus differential (both
+  directions, all levels) + the full suite. One block-type dispatch
+  (`BlockState::decode_block_at`) shared by the one-shot frame loop and the
+  streaming decoder; one `bits::highbit32` (was 5 copies across the FSE/Huff
+  decoders + encoders); a `BitWriter::flush_full_bytes` helper (was inlined
+  twice); the Huff0 `size_format` ladder unified (one source for header packing +
+  analytic sizing); the test-only SplitMix64 `prng` hoisted to `crate::testutil`.
+  Net LOC down with no behaviour/ratio change. Codified the standing quality bar
+  in `AGENTS.md` §2 (trend LOC down, no duplicated logic, functionally-identical
+  refactors gated by the corpus differential, honest docs, black-box tests).
 - Decode: FSE bounds-check elision (fixed array), 4-stream Huffman interleave.
 - Encode: deferred BitWriter, code reuse + binary-search codes, analytic literals
   sizing, opt-parse ml-price hoist; finder — rep-offset awareness + gain-based
