@@ -14,8 +14,10 @@ use super::error::{Result, ZstdError};
 use crate::alloc_prelude::*;
 
 /// Position (0-based) of the most-significant set bit of `x` (`x` must be > 0).
+/// Shared by the FSE/Huff decoders and encoders (`log2` of a power-of-two-ish
+/// count); kept here, the lowest-level module, so there is one definition.
 #[inline]
-fn highbit32(x: u32) -> u32 {
+pub(crate) fn highbit32(x: u32) -> u32 {
     31 - x.leading_zeros()
 }
 

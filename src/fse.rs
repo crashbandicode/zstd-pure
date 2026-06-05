@@ -5,7 +5,7 @@
 //! `FSE_decompress` used for Huffman weights. Sequence decoding drives the
 //! per-symbol [`FseDecoder`] states directly (see `sequences`).
 
-use super::bits::{ForwardBitReader, ReloadStatus, ReverseBitReader};
+use super::bits::{highbit32, ForwardBitReader, ReloadStatus, ReverseBitReader};
 use super::error::{Result, ZstdError};
 #[allow(unused_imports)]
 use crate::alloc_prelude::*;
@@ -27,11 +27,6 @@ pub const FSE_MAX_TABLELOG: u32 = 15;
 /// so the check survives.
 pub const FSE_DTABLE_SIZE: usize = 1 << 9;
 const FSE_DTABLE_MASK: usize = FSE_DTABLE_SIZE - 1;
-
-#[inline]
-fn highbit32(x: u32) -> u32 {
-    31 - x.leading_zeros()
-}
 
 /// One decode-table entry: emit `symbol`, then read `num_bits` and add to
 /// `new_state_base` to get the next state.

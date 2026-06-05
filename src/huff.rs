@@ -5,7 +5,7 @@
 //! 4-stream literal bitstreams. The built [`HuffTable`] is cacheable so the
 //! "treeless" literal block type can reuse the previous block's table.
 
-use super::bits::{ReloadStatus, ReverseBitReader};
+use super::bits::{highbit32, ReloadStatus, ReverseBitReader};
 use super::error::{Result, ZstdError};
 use super::fse;
 #[allow(unused_imports)]
@@ -13,11 +13,6 @@ use crate::alloc_prelude::*;
 
 /// Maximum Huffman code length / table log.
 const HUF_TABLELOG_MAX: u32 = 12;
-
-#[inline]
-fn highbit32(x: u32) -> u32 {
-    31 - x.leading_zeros()
-}
 
 const HUF_DTABLE_SIZE: usize = 1usize << (HUF_TABLELOG_MAX as usize);
 const HUF_DTABLE_MASK: usize = HUF_DTABLE_SIZE - 1;

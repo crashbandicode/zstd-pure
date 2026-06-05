@@ -14,6 +14,7 @@
 //! then the `LL`/`ML`/offset extra bits, and the three states flush in
 //! `ML`/`OF`/`LL` order — exactly inverting the decoder's read sequence.
 
+use super::super::bits::highbit32;
 use super::super::error::Result;
 use super::super::sequences::{
     LL_BASE, LL_BITS, LL_DEFAULT, ML_BASE, ML_BITS, ML_DEFAULT, OF_DEFAULT,
@@ -48,11 +49,6 @@ pub struct Seq {
     pub lit_len: u32,
     pub match_len: u32,
     pub offset_value: u32,
-}
-
-#[inline]
-fn highbit32(x: u32) -> u32 {
-    31 - x.leading_zeros()
 }
 
 /// Literals-length code for `lit_len` (largest code whose baseline fits).

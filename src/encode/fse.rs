@@ -14,15 +14,11 @@
 //! [`encode`]) follow, both verified by round-tripping through the decoder's
 //! `fse::decompress`.
 
+use super::super::bits::highbit32;
 use super::super::fse::FSE_MAX_TABLELOG;
 use super::bitstream::BitWriter;
 #[allow(unused_imports)]
 use crate::alloc_prelude::*;
-
-#[inline]
-fn highbit32(x: u32) -> u32 {
-    31 - x.leading_zeros()
-}
 
 /// Pick a valid accuracy log for `num_present` symbols within `[5, max_log]`.
 ///

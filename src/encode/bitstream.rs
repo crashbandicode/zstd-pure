@@ -31,6 +31,20 @@ impl BitWriter {
         }
     }
 
+    /// Drain every whole byte currently buffered (the low bytes of `acc`, in
+    /// order), leaving `< 8` bits. A no-op when fewer than 8 bits are buffered
+    /// (`nbytes == 0` makes both the slice empty and `acc >>= 0` / `nbits -= 0`
+    /// no-ops). Callers keep `nbits < 64`, so `nbytes ≤ 7` and `acc >>= nbytes*8`
+    /// never shifts by 64.
+    #[inline]
+    fn flush_full_bytes(&mut self) {
+        let nbytes = (self.nbits >> 3) as usize;
+        self.out
+            .extend_from_slice(&self.acc.to_le_bytes()[..nbytes]);
+        self.acc >>= nbytes * 8;
+        self.nbits -= (nbytes as u32) * 8;
+    }
+
     /// Append the low `nb` bits of `value` (`nb` ≤ 32). High bits of `value`
     /// beyond `nb` are masked off (FSE pushes state values whose high bits must
     /// be discarded).
@@ -38,16 +52,11 @@ impl BitWriter {
     pub fn add(&mut self, value: u32, nb: u32) {
         // Flush whole bytes only when the next field wouldn't fit the 64-bit
         // accumulator. The `>= 64` (not `> 64`) keeps `nbits < 64` after every
-        // add, so a flush is at most 7 bytes — `acc >>= nbytes*8` never shifts by
-        // 64 (which would overflow). After a flush `nbits < 8`, so the `<< nbits`
-        // below can't overflow either. The common case (the field fits) skips the
-        // flush entirely, batching the `extend_from_slice`s.
+        // add, so after a flush `nbits < 8` and the `<< nbits` below can't
+        // overflow. The common case (the field fits) skips the flush entirely,
+        // batching the `extend_from_slice`s.
         if self.nbits + nb >= 64 {
-            let nbytes = (self.nbits >> 3) as usize;
-            self.out
-                .extend_from_slice(&self.acc.to_le_bytes()[..nbytes]);
-            self.acc >>= nbytes * 8;
-            self.nbits -= (nbytes as u32) * 8;
+            self.flush_full_bytes();
         }
         let masked = if nb >= 32 {
             value as u64
@@ -64,13 +73,7 @@ impl BitWriter {
         self.add(1, 1);
         // Deferred `add` can leave up to 64 bits buffered — drain every whole byte
         // (from the low end, in order) before the final partial byte.
-        let nbytes = (self.nbits >> 3) as usize;
-        if nbytes > 0 {
-            self.out
-                .extend_from_slice(&self.acc.to_le_bytes()[..nbytes]);
-            self.acc >>= nbytes * 8;
-            self.nbits -= (nbytes as u32) * 8;
-        }
+        self.flush_full_bytes();
         if self.nbits > 0 {
             self.out.push(self.acc as u8);
         }
