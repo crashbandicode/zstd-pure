@@ -13,7 +13,7 @@ jobs:
     name: fmt + clippy + docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -32,7 +32,7 @@ jobs:
     name: test + no_std build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - name: test (std, default features)
         run: cargo test --all-features
@@ -43,7 +43,7 @@ jobs:
     name: MSRV (1.81) builds
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.81.0
       # The MSRV applies to the library + its single runtime dep (thiserror); dev
       # dependencies may need a newer toolchain, so this checks builds only, not
@@ -57,7 +57,7 @@ jobs:
     name: bare-metal target (thumbv7em-none-eabi)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: thumbv7em-none-eabi
@@ -68,7 +68,7 @@ jobs:
     name: fuzz targets build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
       - name: install cargo-fuzz
         run: cargo install cargo-fuzz
