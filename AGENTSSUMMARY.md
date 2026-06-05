@@ -82,8 +82,9 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
   (`scripts/coverage_badge.sh`) plus a one-page report, and a second `deploy` job
   publishes them to GitHub Pages (`actions/deploy-pages`, Pages source = Actions).
   No badge branch (so no "compare & pull request" banner), no token secret, no
-  external service. README badge = `https://crashbandicode.github.io/zstd-pure/coverage.svg`;
-  full table also goes to the run summary + artifacts.
+  external service. Layout: full report at `/coverage/`, badge at
+  `/coverage/badge.svg` (what the README embeds), and a small root landing page
+  linking to the report. Full table also goes to the run summary + artifacts.
 - Task #2 branch `wip/coverage-info`: separate informational `cargo-llvm-cov`
   workflow plus `coverage-summary.txt`/`lcov.info` artifacts and a README
   coverage badge. Local baseline measured 2026-06-04 with
