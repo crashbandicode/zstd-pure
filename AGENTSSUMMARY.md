@@ -67,7 +67,16 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
   `cargo llvm-cov --release --summary-only --all-features -- --skip compress_roundtrips_across_levels --skip round_trips_three_ways_across_levels --skip frame_is_independent_of_write_chunk_size --skip multi_block_stream_compresses_and_round_trips --skip our_frames_round_trip_through_the_streaming_decoder`.
   Largest remaining line gaps: `huff.rs` 80.25%, `encode/mod.rs` 82.11%,
   `frame.rs` 86.42%, `encode/stream.rs` 88.84%.
-
+- Task #3 branch `wip/coverage-tests`: added `tests/public_api_edges.rs`, a
+  black-box public API suite for magicless helpers/header parsing, libzstd
+  magicless differential decode, typed malformed-header errors, streaming
+  magicless decode, and streaming window-cap rejection. Coverage remeasured with
+  the same command: **92.98% line**, 93.68% region, 94.01% function coverage.
+  Biggest useful wins: `frame.rs` 86.42%→90.94% and `streaming.rs`
+  90.94%→92.15%. Remaining low files (`huff.rs`, `encode/mod.rs`,
+  `encode/stream.rs`) are mostly internal entropy/finder details or exhaustive
+  matrix tests that normal CI still runs; chasing them is not needed for the
+  >=90% bar.
 ## Tried & rejected (don't redo without a new angle — see PERF_NOTES)
 - `unsafe`/`get_unchecked` (≈0% after the safe elision) — discarded.
 - Huffman fixed-array elision (ILP already hides it); per-block literal-buffer
