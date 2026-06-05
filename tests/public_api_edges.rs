@@ -18,6 +18,37 @@ fn libzstd_decompress_magicless(frame: &[u8], out_len: usize) -> Vec<u8> {
     out
 }
 
+fn raw_block_frame(window_descriptor: u8, data: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(4 + 1 + 1 + 3 + data.len());
+    frame.extend_from_slice(&[0x28, 0xB5, 0x2F, 0xFD]);
+    frame.push(0x00); // no content size, not single segment
+    frame.push(window_descriptor);
+    let block_header = 1u32 | ((data.len() as u32) << 3); // last raw block
+    let bytes = block_header.to_le_bytes();
+    frame.extend_from_slice(&bytes[..3]);
+    frame.extend_from_slice(data);
+    frame
+}
+
+fn assert_oversized_block_is_rejected(frame: &[u8], block_size: usize, block_max: usize) {
+    match decompress(frame) {
+        Err(ZstdError::Invalid {
+            what: "block size",
+            detail,
+        }) => {
+            assert_eq!(
+                detail,
+                format!("block {block_size} exceeds max {block_max}")
+            );
+        }
+        other => panic!("expected typed oversized block error, got {other:?}"),
+    }
+    assert!(
+        zstd::bulk::decompress(frame, block_size + 64).is_err(),
+        "libzstd must reject the same oversized block"
+    );
+}
+
 #[test]
 fn magicless_helpers_headers_and_caps_are_public_black_box() {
     let mut data = b"magicless public helper corpus ".repeat(3000);
@@ -115,6 +146,34 @@ fn streaming_magicless_and_window_cap_edges_are_public_black_box() {
     out.clear();
     dec.read_to_end(&mut out).expect("read capped stream");
     assert_eq!(out, data);
+}
+
+#[test]
+fn raw_block_larger_than_128k_is_rejected_like_libzstd() {
+    let block_size = 128 * 1024 + 1;
+    let frame = raw_block_frame(0x38, &vec![0xA5; block_size]); // 128 KiB window
+    assert_oversized_block_is_rejected(&frame, block_size, 128 * 1024);
+}
+
+#[test]
+fn raw_block_larger_than_declared_window_is_rejected_like_libzstd() {
+    let block_size = 1025;
+    let frame = raw_block_frame(0x00, &vec![0x5A; block_size]); // 1 KiB window
+    assert_oversized_block_is_rejected(&frame, block_size, 1024);
+}
+
+#[test]
+fn raw_block_at_128k_limit_still_decodes() {
+    let data: Vec<u8> = (0..128 * 1024)
+        .map(|i| (i as u8).wrapping_mul(31).wrapping_add(7))
+        .collect();
+    let frame = raw_block_frame(0x38, &data); // 128 KiB window
+
+    assert_eq!(decompress(&frame).expect("our decode"), data);
+    assert_eq!(
+        zstd::bulk::decompress(&frame, data.len() + 64).expect("libzstd decode"),
+        data
+    );
 }
 
 /// `decompress_capped` enforces a TOTAL output ceiling across all frames, so a

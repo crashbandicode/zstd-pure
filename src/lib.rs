@@ -3,22 +3,23 @@
 // CI-checkable guarantee (a decompression library handling hostile input is a
 // much easier thing to trust when it cannot contain UB).
 #![forbid(unsafe_code)]
-//! A pure-Rust Zstandard ([RFC 8878]) codec, implemented from the specification
-//! (no GPL / Switch-Toolbox code). It exists so the crate can decode Nintendo's
-//! **MeshCodec** mesh stream — a custom container that reuses zstd's block and
-//! entropy primitives — without depending on libzstd's C internals, and is
-//! structured (std + `thiserror` only, no other crate deps) so it can later be
-//! lifted into a standalone `zstd-pure` crate.
+//! A pure-Rust Zstandard ([RFC 8878]) codec, implemented from the specification:
+//! no GPL code, no libzstd at runtime, `#![forbid(unsafe_code)]`, and
+//! `no_std + alloc` support with only `thiserror` as a runtime dependency.
 //!
-//! ## Status
+//! The crate ships full RFC 8878 decode and encode. Decode covers standard and
+//! magicless frames, multi-frame streams, skippable frames, dictionaries,
+//! streaming/bounded-memory reads, frame inspection, seekable archives, and
+//! parallel seekable decode. Encode covers levels 1-22 across the fast, dfast,
+//! greedy/lazy/lazy2, btlazy2, and optimal parse strategies, with content
+//! checksums, magicless frames, dictionaries, streaming encode, long-distance
+//! matching, and parallel compression.
 //!
-//! Decoder, built bottom-up and validated against libzstd and the real TotK
-//! BFRES frames (which are themselves standard magicless zstd):
-//!
-//! * [`bits`] — the reverse (FSE/Huffman) and forward bit readers.
-//! * [`xxhash`] — XXH64 for the content checksum.
-//! * `fse` / `huff` — the entropy decoders (in progress).
-//! * `frame` — frame/block orchestration (in progress).
+//! The dictionary trainers (COVER-style `train_dictionary*`) are experimental:
+//! they produce correct dictionaries, but their output quality and exact bytes
+//! may change as the trainer improves. The codec is validated against libzstd
+//! and real Nintendo TotK BFRES / MeshCodec frames, which are standard magicless
+//! zstd frames.
 //!
 //! [RFC 8878]: https://www.rfc-editor.org/rfc/rfc8878
 

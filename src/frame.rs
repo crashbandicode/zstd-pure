@@ -19,6 +19,9 @@ const SKIPPABLE_MAGIC: u32 = 0x184D_2A50;
 /// Default output ceiling when a frame doesn't pledge a content size (256 MiB).
 pub const DEFAULT_MAX_OUTPUT: usize = 256 << 20;
 
+/// RFC 8878 §3.1.1.2: no block may exceed `min(Window_Size, 128 KiB)`.
+const MAX_BLOCK_SIZE: usize = 128 * 1024;
+
 /// A decoded frame and how many input bytes it consumed.
 pub struct DecodedFrame {
     pub data: Vec<u8>,
@@ -219,6 +222,7 @@ pub fn decode_one_with_dict(
 
     let header = parse_frame_header(&src[pos..])?;
     pos += header.header_len;
+    let block_max = header.window_size.min(MAX_BLOCK_SIZE as u64) as usize;
 
     let cap = match header.content_size {
         Some(n) => (n as usize).min(max_output),
@@ -274,6 +278,12 @@ pub fn decode_one_with_dict(
     loop {
         let header = block::read_header(&src[pos..])?;
         pos += 3;
+        if header.block_size > block_max {
+            return Err(ZstdError::Invalid {
+                what: "block size",
+                detail: format!("block {} exceeds max {}", header.block_size, block_max),
+            });
+        }
         match header.block_type {
             0 => {
                 if src.len() < pos + header.block_size {

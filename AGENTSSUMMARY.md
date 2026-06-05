@@ -84,6 +84,13 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
   `encode/stream.rs`) are mostly internal entropy/finder details or exhaustive
   matrix tests that normal CI still runs; chasing them is not needed for the
   >=90% bar.
+- **Core-library issue #4:** frame decode now enforces RFC 8878
+  `Block_Maximum_Size = min(Window_Size, 128 KiB)` immediately after each block
+  header; oversized Raw/RLE/Compressed block headers return a typed
+  `ZstdError::Invalid { what: "block size", .. }`. `tests/public_api_edges.rs`
+  covers >128 KiB, >small-window, and exactly-128 KiB raw blocks against libzstd.
+  Crate-level docs and the old `nx-layout-toolbox` error-module reference were
+  refreshed to match the standalone `zstd-pure` surface.
 ## Tried & rejected (don't redo without a new angle — see PERF_NOTES)
 - `unsafe`/`get_unchecked` (≈0% after the safe elision) — discarded.
 - Huffman fixed-array elision (ILP already hides it); per-block literal-buffer
