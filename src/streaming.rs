@@ -17,7 +17,7 @@
 use crate::alloc_prelude::*;
 use crate::io::{self, Read};
 
-use super::block::BlockState;
+use super::block::{BlockState, MAX_BLOCK_SIZE};
 use super::dict::Dictionary;
 use super::error::{Result, ZstdError};
 use super::frame::{frame_header, frame_header_magicless};
@@ -103,6 +103,9 @@ impl<'a> StreamingDecoder<'a> {
             // input length, and the window bounds total residency, so the
             // one-shot ceiling is disabled here.
             max_output: usize::MAX,
+            // The RFC block-size cap is a format check (not a memory guard), so
+            // it still applies in streaming mode.
+            block_max: header.window_size.min(MAX_BLOCK_SIZE as u64) as usize,
             huff: None,
             seq: SeqTables::default(),
             rep: [1, 4, 8],

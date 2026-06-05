@@ -1,7 +1,7 @@
 //! Frame decoding — RFC 8878 §3.1.1.1: frame header parse, the block loop,
 //! and the optional XXH64 content checksum.
 
-use super::block::BlockState;
+use super::block::{BlockState, MAX_BLOCK_SIZE};
 use super::dict::Dictionary;
 use super::error::{Result, ZstdError};
 use super::sequences::SeqTables;
@@ -219,6 +219,7 @@ pub fn decode_one_with_dict(
 
     let header = parse_frame_header(&src[pos..])?;
     pos += header.header_len;
+    let block_max = header.window_size.min(MAX_BLOCK_SIZE as u64) as usize;
 
     let cap = match header.content_size {
         Some(n) => (n as usize).min(max_output),
@@ -234,6 +235,7 @@ pub fn decode_one_with_dict(
         out: Vec::with_capacity(reserve),
         dict_len: 0,
         max_output,
+        block_max,
         huff: None,
         seq: SeqTables::default(),
         rep: [1, 4, 8],

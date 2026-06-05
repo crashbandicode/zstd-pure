@@ -1,7 +1,8 @@
 //! Typed errors for the pure-Rust Zstandard codec.
 //!
-//! Kept `std`- and `thiserror`-only so this module can be lifted into a
-//! standalone crate later (no dependency on the rest of `nx-layout-toolbox`).
+//! The error surface is shared by the `zstd-pure` decode and encode paths and
+//! stays compatible with `no_std + alloc`: owned detail strings come from
+//! `alloc`, while `thiserror` provides the optional `std::error::Error` impl.
 
 #[allow(unused_imports)]
 use crate::alloc_prelude::*;

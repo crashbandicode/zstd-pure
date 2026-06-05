@@ -10,6 +10,10 @@ use super::{literals, sequences};
 #[allow(unused_imports)]
 use crate::alloc_prelude::*;
 
+/// RFC 8878 §3.1.1.2: no block may exceed `min(Window_Size, 128 KiB)`. Callers
+/// set [`BlockState::block_max`] to the per-frame value.
+pub const MAX_BLOCK_SIZE: usize = 128 * 1024;
+
 /// Per-frame decode state shared across blocks (entropy-table reuse +
 /// repeat offsets), plus the growing output (which doubles as window history).
 pub struct BlockState {
@@ -20,6 +24,9 @@ pub struct BlockState {
     pub dict_len: usize,
     /// Ceiling on real output size.
     pub max_output: usize,
+    /// Largest permitted `Block_Size`, `min(Window_Size, MAX_BLOCK_SIZE)`
+    /// (RFC 8878 §3.1.1.2) — enforced in [`Self::decode_block_at`].
+    pub block_max: usize,
     pub huff: Option<HuffTable>,
     pub seq: sequences::SeqTables,
     pub rep: [u32; 3],
@@ -99,13 +106,20 @@ impl BlockState {
     /// its output to `self.out`. Returns the input position just past the block
     /// body and whether it was the last block of the frame.
     ///
-    /// The block-type dispatch (raw / RLE / compressed, with per-type truncation
-    /// checks) is identical for the one-shot [`crate::frame`] loop and the
+    /// Enforces the RFC block-size cap ([`block_max`](Self::block_max)) and then
+    /// the block-type dispatch (raw / RLE / compressed, with per-type truncation
+    /// checks) — identical for the one-shot [`crate::frame`] loop and the
     /// bounded-memory [`crate::streaming`] decoder, so both drive blocks through
     /// here. Callers layer their own post-block work on top (checksum/window
     /// bookkeeping); this only advances one block.
     pub fn decode_block_at(&mut self, src: &[u8], pos: usize) -> Result<(usize, bool)> {
         let header = read_header(&src[pos..])?;
+        if header.block_size > self.block_max {
+            return Err(ZstdError::Invalid {
+                what: "block size",
+                detail: format!("block {} exceeds max {}", header.block_size, self.block_max),
+            });
+        }
         let mut pos = pos + 3;
         match header.block_type {
             0 => {
