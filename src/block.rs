@@ -94,4 +94,59 @@ impl BlockState {
         self.out.resize(self.out.len() + count, byte);
         Ok(())
     }
+
+    /// Decode the one block whose 3-byte header sits at `src[pos..]`, appending
+    /// its output to `self.out`. Returns the input position just past the block
+    /// body and whether it was the last block of the frame.
+    ///
+    /// The block-type dispatch (raw / RLE / compressed, with per-type truncation
+    /// checks) is identical for the one-shot [`crate::frame`] loop and the
+    /// bounded-memory [`crate::streaming`] decoder, so both drive blocks through
+    /// here. Callers layer their own post-block work on top (checksum/window
+    /// bookkeeping); this only advances one block.
+    pub fn decode_block_at(&mut self, src: &[u8], pos: usize) -> Result<(usize, bool)> {
+        let header = read_header(&src[pos..])?;
+        let mut pos = pos + 3;
+        match header.block_type {
+            0 => {
+                let end = pos + header.block_size;
+                if src.len() < end {
+                    return Err(ZstdError::Truncated {
+                        what: "raw block body",
+                        needed: end - src.len(),
+                    });
+                }
+                self.decode_raw(&src[pos..end])?;
+                pos = end;
+            }
+            1 => {
+                if src.len() <= pos {
+                    return Err(ZstdError::Truncated {
+                        what: "RLE block byte",
+                        needed: 1,
+                    });
+                }
+                self.decode_rle(src[pos], header.block_size)?;
+                pos += 1;
+            }
+            2 => {
+                let end = pos + header.block_size;
+                if src.len() < end {
+                    return Err(ZstdError::Truncated {
+                        what: "compressed block body",
+                        needed: end - src.len(),
+                    });
+                }
+                self.decode_compressed(&src[pos..end])?;
+                pos = end;
+            }
+            _ => {
+                return Err(ZstdError::Invalid {
+                    what: "block type",
+                    detail: "reserved block type 3".into(),
+                })
+            }
+        }
+        Ok((pos, header.last))
+    }
 }

@@ -1,7 +1,7 @@
 //! Frame decoding — RFC 8878 §3.1.1.1: frame header parse, the block loop,
 //! and the optional XXH64 content checksum.
 
-use super::block::{self, BlockState};
+use super::block::BlockState;
 use super::dict::Dictionary;
 use super::error::{Result, ZstdError};
 use super::sequences::SeqTables;
@@ -272,47 +272,9 @@ pub fn decode_one_with_dict(
     let dict_len = state.dict_len;
 
     loop {
-        let header = block::read_header(&src[pos..])?;
-        pos += 3;
-        match header.block_type {
-            0 => {
-                if src.len() < pos + header.block_size {
-                    return Err(ZstdError::Truncated {
-                        what: "raw block body",
-                        needed: pos + header.block_size - src.len(),
-                    });
-                }
-                state.decode_raw(&src[pos..pos + header.block_size])?;
-                pos += header.block_size;
-            }
-            1 => {
-                if src.len() <= pos {
-                    return Err(ZstdError::Truncated {
-                        what: "RLE block byte",
-                        needed: 1,
-                    });
-                }
-                state.decode_rle(src[pos], header.block_size)?;
-                pos += 1;
-            }
-            2 => {
-                if src.len() < pos + header.block_size {
-                    return Err(ZstdError::Truncated {
-                        what: "compressed block body",
-                        needed: pos + header.block_size - src.len(),
-                    });
-                }
-                state.decode_compressed(&src[pos..pos + header.block_size])?;
-                pos += header.block_size;
-            }
-            _ => {
-                return Err(ZstdError::Invalid {
-                    what: "block type",
-                    detail: "reserved block type 3".into(),
-                })
-            }
-        }
-        if header.last {
+        let (next, last) = state.decode_block_at(src, pos)?;
+        pos = next;
+        if last {
             break;
         }
     }

@@ -17,7 +17,7 @@
 use crate::alloc_prelude::*;
 use crate::io::{self, Read};
 
-use super::block::{self, BlockState};
+use super::block::BlockState;
 use super::dict::Dictionary;
 use super::error::{Result, ZstdError};
 use super::frame::{frame_header, frame_header_magicless};
@@ -157,56 +157,15 @@ impl<'a> StreamingDecoder<'a> {
     /// last block) verifying the content size and trailing checksum.
     fn decode_next_block(&mut self) -> Result<()> {
         let before = self.state.out.len();
-        let header = block::read_header(&self.src[self.pos..])?;
-        self.pos += 3;
-        match header.block_type {
-            0 => {
-                let end = self.pos + header.block_size;
-                if self.src.len() < end {
-                    return Err(ZstdError::Truncated {
-                        what: "raw block body",
-                        needed: end - self.src.len(),
-                    });
-                }
-                self.state.decode_raw(&self.src[self.pos..end])?;
-                self.pos = end;
-            }
-            1 => {
-                if self.src.len() <= self.pos {
-                    return Err(ZstdError::Truncated {
-                        what: "RLE block byte",
-                        needed: 1,
-                    });
-                }
-                let b = self.src[self.pos];
-                self.state.decode_rle(b, header.block_size)?;
-                self.pos += 1;
-            }
-            2 => {
-                let end = self.pos + header.block_size;
-                if self.src.len() < end {
-                    return Err(ZstdError::Truncated {
-                        what: "compressed block body",
-                        needed: end - self.src.len(),
-                    });
-                }
-                self.state.decode_compressed(&self.src[self.pos..end])?;
-                self.pos = end;
-            }
-            _ => {
-                return Err(ZstdError::Invalid {
-                    what: "block type",
-                    detail: "reserved block type 3".into(),
-                })
-            }
-        }
+        let (next, last) = self.state.decode_block_at(self.src, self.pos)?;
+        self.pos = next;
 
         // Hash the freshly produced bytes before they can be evicted.
         let produced = &self.state.out[before..];
         self.hasher.update(produced);
         self.total_out += produced.len() as u64;
 
-        if header.last {
+        if last {
             self.last_done = true;
             if let Some(n) = self.declared_size {
                 if self.total_out != n {
