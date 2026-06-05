@@ -218,13 +218,27 @@ impl FseDecoder {
     /// compiler elide the bounds check (see [`FSE_DTABLE_SIZE`]).
     #[inline]
     pub fn symbol(&self, table: &FseDecodeTable) -> u8 {
-        table.entries[self.state as usize & FSE_DTABLE_MASK].symbol
+        self.entry(table).symbol
+    }
+
+    /// The full table entry for the current state. Sequence decoding needs both
+    /// the symbol and the state-transition metadata; loading the entry once keeps
+    /// the hot loop from indexing the same table twice per state.
+    #[inline]
+    pub fn entry(&self, table: &FseDecodeTable) -> FseEntry {
+        table.entries[self.state as usize & FSE_DTABLE_MASK]
     }
 
     /// Advance the state by reading `num_bits` low bits for the current entry.
     #[inline]
     pub fn update(&mut self, table: &FseDecodeTable, br: &mut ReverseBitReader) {
-        let e = table.entries[self.state as usize & FSE_DTABLE_MASK];
+        let e = self.entry(table);
+        self.update_with_entry(e, br);
+    }
+
+    /// Advance the state using an entry already loaded for this state.
+    #[inline]
+    pub fn update_with_entry(&mut self, e: FseEntry, br: &mut ReverseBitReader) {
         let low = br.read(e.num_bits as u32);
         self.state = e.new_state_base as u32 + low;
     }

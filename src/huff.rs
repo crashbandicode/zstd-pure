@@ -19,13 +19,37 @@ fn highbit32(x: u32) -> u32 {
     31 - x.leading_zeros()
 }
 
-/// A built Huffman decode table: `symbols[code]`/`num_bits[code]` indexed by the
-/// top `max_bits` bits of the stream.
+const HUF_DTABLE_SIZE: usize = 1usize << (HUF_TABLELOG_MAX as usize);
+const HUF_DTABLE_MASK: usize = HUF_DTABLE_SIZE - 1;
+
+/// One Huffman decode-table entry: emit `symbol`, then consume `num_bits`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HuffEntry {
+    pub symbol: u8,
+    pub num_bits: u8,
+}
+
+/// A built Huffman decode table, indexed by the top `max_bits` bits of the
+/// stream. The fixed-size array lets the decode hot path mask the index and
+/// load symbol + bit count together.
 #[derive(Debug, Clone)]
 pub struct HuffTable {
     pub max_bits: u32,
-    pub symbols: Vec<u8>,
-    pub num_bits: Vec<u8>,
+    pub entries: Box<[HuffEntry; HUF_DTABLE_SIZE]>,
+}
+
+impl HuffTable {
+    /// Live entries in canonical order. The encoder uses this to invert the
+    /// decoder-built table into canonical codes without maintaining a parallel
+    /// assignment algorithm.
+    pub fn entries(&self) -> &[HuffEntry] {
+        &self.entries[..1usize << self.max_bits]
+    }
+
+    #[inline]
+    fn entry(&self, code: usize) -> HuffEntry {
+        self.entries[code & HUF_DTABLE_MASK]
+    }
 }
 
 /// Read a Huffman table description from the front of `src`; returns the table
@@ -133,8 +157,7 @@ pub(crate) fn build_table(weights: &[u8]) -> Result<HuffTable> {
     }
 
     let size = 1usize << max_bits;
-    let mut symbols = vec![0u8; size];
-    let mut num_bits = vec![0u8; size];
+    let mut entries = Box::new([HuffEntry::default(); HUF_DTABLE_SIZE]);
     for (s, &w) in all_weights.iter().enumerate() {
         if w == 0 {
             continue;
@@ -146,17 +169,15 @@ pub(crate) fn build_table(weights: &[u8]) -> Result<HuffTable> {
             return Err(ZstdError::CorruptTable("huffman table overflow".into()));
         }
         for u in start..start + length {
-            symbols[u] = s as u8;
-            num_bits[u] = nb as u8;
+            entries[u] = HuffEntry {
+                symbol: s as u8,
+                num_bits: nb as u8,
+            };
         }
         rank_start[w as usize] += length as u32;
     }
 
-    Ok(HuffTable {
-        max_bits,
-        symbols,
-        num_bits,
-    })
+    Ok(HuffTable { max_bits, entries })
 }
 
 #[inline]
@@ -167,8 +188,8 @@ fn decode_into(table: &HuffTable, src: &[u8], count: usize, out: &mut Vec<u8>) -
     let mut i = 0usize;
 
     // Fast path: decode 4 symbols per reload (libzstd's `HUF_decodeStreamX1`). A
-    // refilled 64-bit window serves `4 * max_bits` bits; with `max_bits <= 14`
-    // that is ≤ 56, and `reload()` leaves ≤ 7 bits already consumed, so all four
+    // refilled 64-bit window serves `4 * max_bits` bits; with `max_bits <= 12`
+    // that is ≤ 48, and `reload()` leaves ≤ 7 bits already consumed, so all four
     // `peek(max_bits)` stay within the window. `reload() == Unfinished` guarantees
     // a full window was loaded (for `n >= 8` streams `ptr` never exceeds
     // `len - 8`, so the load is never short); any other status drops to the tail.
@@ -176,8 +197,9 @@ fn decode_into(table: &HuffTable, src: &[u8], count: usize, out: &mut Vec<u8>) -
         while i + 4 <= count && br.reload() == ReloadStatus::Unfinished {
             for _ in 0..4 {
                 let code = br.peek(max_bits) as usize;
-                out.push(table.symbols[code]);
-                br.consume(table.num_bits[code] as u32);
+                let e = table.entry(code);
+                out.push(e.symbol);
+                br.consume(e.num_bits as u32);
             }
             i += 4;
         }
@@ -188,8 +210,9 @@ fn decode_into(table: &HuffTable, src: &[u8], count: usize, out: &mut Vec<u8>) -
     while i < count {
         br.reload();
         let code = br.peek(max_bits) as usize;
-        out.push(table.symbols[code]);
-        br.consume(table.num_bits[code] as u32);
+        let e = table.entry(code);
+        out.push(e.symbol);
+        br.consume(e.num_bits as u32);
         i += 1;
     }
     Ok(())
@@ -210,9 +233,9 @@ pub fn decode_1stream(table: &HuffTable, src: &[u8], regen_size: usize) -> Resul
 fn huf_one(br: &mut ReverseBitReader, table: &HuffTable) -> u8 {
     br.ensure(table.max_bits);
     let code = br.peek(table.max_bits) as usize;
-    let s = table.symbols[code];
-    br.consume(table.num_bits[code] as u32);
-    s
+    let e = table.entry(code);
+    br.consume(e.num_bits as u32);
+    e.symbol
 }
 
 /// Decode a 4-stream Huffman literal block. The first 6 bytes are a jump table
@@ -275,8 +298,9 @@ pub fn decode_4stream(table: &HuffTable, src: &[u8], regen_size: usize) -> Resul
         macro_rules! step {
             ($r:expr, $dst:expr, $idx:expr) => {{
                 let code = $r.peek(mb) as usize;
-                $dst[$idx] = table.symbols[code];
-                $r.consume(table.num_bits[code] as u32);
+                let e = table.entry(code);
+                $dst[$idx] = e.symbol;
+                $r.consume(e.num_bits as u32);
             }};
         }
 

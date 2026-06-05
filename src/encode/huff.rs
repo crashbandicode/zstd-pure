@@ -158,8 +158,9 @@ fn build_code_table(lengths: &[u8; 256]) -> Result<CodeTable> {
     let mut code = [0u32; 256];
     let mut nbits = [0u8; 256];
     let mut seen = [false; 256];
-    for (idx, (&sym, &nb)) in table.symbols.iter().zip(table.num_bits.iter()).enumerate() {
-        let s = sym as usize;
+    for (idx, e) in table.entries().iter().copied().enumerate() {
+        let s = e.symbol as usize;
+        let nb = e.num_bits;
         if nb != 0 && !seen[s] {
             seen[s] = true;
             nbits[s] = nb;
@@ -597,8 +598,8 @@ fn raw_header_len(regen: usize) -> usize {
 /// [`build_code_table`], yielding the exact inverse of `ht`.
 pub(crate) fn code_table_from_huff(ht: &huff::HuffTable) -> Result<CodeTable> {
     let mut lengths = [0u8; 256];
-    for (&sym, &nb) in ht.symbols.iter().zip(ht.num_bits.iter()) {
-        lengths[sym as usize] = nb;
+    for e in ht.entries().iter().copied() {
+        lengths[e.symbol as usize] = e.num_bits;
     }
     build_code_table(&lengths)
 }

@@ -89,6 +89,17 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
 ## In flight / next
 - **Convention:** one feature → one `git worktree` on its own branch (see
   `AGENTS.md` §0 / `CLAUDE.md`), so agents work in parallel without colliding.
+- **Decode-speed recommendations (`wip/speed-recs`, not merged):** implemented
+  borrowed sequence-table cache resolution (Repeat no longer clones boxed FSE
+  tables), fused sequence FSE entry loads for symbol+state update, packed Huffman
+  decode entries (`symbol` + `num_bits` in one fixed table), and safe small-offset
+  overlap copies for offsets 1/2/4/8. Criterion built-in decode improved
+  `zstd_pure/our_frame` ~641→844 MiB/s and `zstd_pure/libzstd_frame` ~755→1009
+  MiB/s. Silesia throughput stayed in the known size band (L3 +1.1%, L9 +1.5%,
+  L12 +2.0%, L19 +0.5%) and showed decode ~334–387 MiB/s vs libzstd
+  ~1012–1109 MiB/s. Gates run: `cargo test --release`, `cargo fmt --check`,
+  `cargo clippy --all-targets`, `cargo build --no-default-features`, docs with
+  warnings denied, ratio, Silesia throughput, and both 80s fuzz targets.
 - **Pure-Rust peer comparison (Task #1, `wip/competitor-comparison`)**:
   `COMPARISON.md` now records reproducible `pure_rust_compare` results for
   zstd-pure vs ruzstd 0.8.3 and oxiarc-zstd 0.3.2 on synthetic profiles and

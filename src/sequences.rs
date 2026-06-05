@@ -130,6 +130,33 @@ pub(crate) fn resolve_offset(rep: &mut [u32; 3], offset_value: u32, ll0: bool) -
     }
 }
 
+#[inline]
+fn copy_power_of_two_pattern(out: &mut Vec<u8>, start: usize, offset: usize, match_len: usize) {
+    const CHUNK: usize = 64;
+
+    debug_assert!(matches!(offset, 2 | 4 | 8));
+    let mut chunk = [0u8; CHUNK];
+    chunk[..offset].copy_from_slice(&out[start..start + offset]);
+
+    let mut filled = offset;
+    while filled < CHUNK {
+        let n = filled.min(CHUNK - filled);
+        let (prefix, rest) = chunk.split_at_mut(filled);
+        rest[..n].copy_from_slice(&prefix[..n]);
+        filled += n;
+    }
+
+    out.reserve(match_len);
+    let mut remaining = match_len;
+    while remaining >= CHUNK {
+        out.extend_from_slice(&chunk);
+        remaining -= CHUNK;
+    }
+    if remaining > 0 {
+        out.extend_from_slice(&chunk[..remaining]);
+    }
+}
+
 /// Decode the sequences section and reconstruct the block's contribution into
 /// `out`, appending behind any existing history. `out` already contains all
 /// prior output (window history) usable by back-references.
@@ -195,15 +222,18 @@ pub fn decode(
 
     let bitstream = &src[p..];
     let mut br = ReverseBitReader::new(bitstream)?;
-    let mut s_ll = FseDecoder::init(&ll_table, &mut br);
-    let mut s_of = FseDecoder::init(&of_table, &mut br);
-    let mut s_ml = FseDecoder::init(&ml_table, &mut br);
+    let mut s_ll = FseDecoder::init(ll_table, &mut br);
+    let mut s_of = FseDecoder::init(of_table, &mut br);
+    let mut s_ml = FseDecoder::init(ml_table, &mut br);
 
     let mut lit_pos = 0usize;
     for i in 0..nb_seq {
-        let ll_code = s_ll.symbol(&ll_table) as usize;
-        let ml_code = s_ml.symbol(&ml_table) as usize;
-        let of_code = s_of.symbol(&of_table) as u32;
+        let e_ll = s_ll.entry(ll_table);
+        let e_ml = s_ml.entry(ml_table);
+        let e_of = s_of.entry(of_table);
+        let ll_code = e_ll.symbol as usize;
+        let ml_code = e_ml.symbol as usize;
+        let of_code = e_of.symbol as u32;
         // `of_code` is the log2 baseline of the offset; a 32-bit offset caps it
         // at 31. A corrupt/mutated entropy table can yield a larger symbol —
         // reject it rather than overflow the `1 << of_code` shift.
@@ -253,6 +283,13 @@ pub fn decode(
             // Non-overlapping back-reference: the whole match is already present,
             // so copy it in one bulk move (a memcpy) instead of byte-by-byte.
             out.extend_from_within(start..start + match_len);
+        } else if actual_offset == 1 {
+            // Common RLE-like overlap: repeat the previous byte without growing
+            // via many overlapping slice copies.
+            let b = out[start];
+            out.resize(out.len() + match_len, b);
+        } else if matches!(actual_offset, 2 | 4 | 8) {
+            copy_power_of_two_pattern(out, start, actual_offset, match_len);
         } else {
             // Overlapping back-reference (offset < length): replicate the
             // `actual_offset`-byte pattern. Copy it in geometrically growing
@@ -271,12 +308,13 @@ pub fn decode(
         }
 
         if i + 1 < nb_seq {
-            // The three state updates read ≤ `table_log` bits each; ensure the
-            // window holds their combined worst case once, then update.
-            br.ensure(ll_table.table_log + ml_table.table_log + of_table.table_log);
-            s_ll.update(&ll_table, &mut br);
-            s_ml.update(&ml_table, &mut br);
-            s_of.update(&of_table, &mut br);
+            // The table entries were already loaded for their symbols; reuse
+            // them for the state transitions instead of indexing each table a
+            // second time.
+            br.ensure(e_ll.num_bits as u32 + e_ml.num_bits as u32 + e_of.num_bits as u32);
+            s_ll.update_with_entry(e_ll, &mut br);
+            s_ml.update_with_entry(e_ml, &mut br);
+            s_of.update_with_entry(e_of, &mut br);
         }
     }
 
@@ -286,20 +324,17 @@ pub fn decode(
 }
 
 /// Materialize the actual table for a channel, updating the repeat cache.
-fn resolve_table(
+fn resolve_table<'a>(
     mode: Mode,
     default_dist: &[i16],
     default_max_symbol: usize,
     default_log: u32,
-    cache: &mut Option<FseDecodeTable>,
+    cache: &'a mut Option<FseDecodeTable>,
     name: &'static str,
-) -> Result<FseDecodeTable> {
-    let table = match mode {
-        Mode::Predefined => fse::build_dtable(default_dist, default_max_symbol, default_log)?,
-        Mode::Rle(s) => rle_table(s),
-        Mode::Fse(t) => t,
+) -> Result<&'a FseDecodeTable> {
+    match mode {
         Mode::Repeat => match cache {
-            Some(t) => t.clone(),
+            Some(t) => return Ok(t),
             None => {
                 return Err(ZstdError::Invalid {
                     what: "repeat sequence table",
@@ -307,7 +342,19 @@ fn resolve_table(
                 })
             }
         },
+        Mode::Predefined => {
+            *cache = Some(fse::build_dtable(
+                default_dist,
+                default_max_symbol,
+                default_log,
+            )?);
+        }
+        Mode::Rle(s) => {
+            *cache = Some(rle_table(s));
+        }
+        Mode::Fse(t) => {
+            *cache = Some(t);
+        }
     };
-    *cache = Some(table.clone());
-    Ok(table)
+    Ok(cache.as_ref().expect("sequence table cache was just set"))
 }
