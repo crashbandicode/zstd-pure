@@ -2,7 +2,7 @@ name: Coverage
 
 on:
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
 
 env:
@@ -14,7 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
-      contents: read
+      # Needed only to push the regenerated badge to the `badges` branch.
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -30,13 +31,17 @@ jobs:
             --skip our_frames_round_trip_through_the_streaming_decoder
           cargo llvm-cov report --release --summary-only | tee coverage-summary.txt
           cargo llvm-cov report --release --lcov --output-path lcov.info
-      - name: upload to Codecov
-        uses: codecov/codecov-action@v5
-        continue-on-error: true
-        with:
-          files: lcov.info
-          fail_ci_if_error: false
-          token: ${{ secrets.CODECOV_TOKEN }}
+      - name: line coverage % + run summary
+        id: cov
+        run: |
+          pct=$(cargo llvm-cov report --release --json | jq '.data[0].totals.lines.percent')
+          printf 'pct=%.1f\n' "$pct" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Coverage — $(printf '%.2f%%' "$pct") lines"
+            echo '```'
+            cat coverage-summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: upload coverage artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -44,3 +49,23 @@ jobs:
           path: |
             coverage-summary.txt
             lcov.info
+      # Regenerate the badge and force-push it as the sole file on an orphan
+      # `badges` branch (kept out of this workflow's triggers, so no loop). The
+      # README references it via raw.githubusercontent — no external badge
+      # service. Only main updates the published badge.
+      - name: publish coverage badge
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash scripts/coverage_badge.sh "${{ steps.cov.outputs.pct }}" coverage.svg
+          work=$(mktemp -d)
+          cp coverage.svg "$work/"
+          cd "$work"
+          git init -q
+          git checkout -q -b badges
+          git add coverage.svg
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -q -m "coverage: ${{ steps.cov.outputs.pct }}% [skip ci]"
+          git push -fq "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:badges

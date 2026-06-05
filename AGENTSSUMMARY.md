@@ -76,9 +76,15 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
   ~1.35× vs libzstd's native on the mixed bench corpus.
 
 ## Coverage baseline
+- **Coverage badge is GitHub-Actions-only** (`wip/coverage-badge`): dropped
+  Codecov entirely. The Coverage workflow computes line % from `cargo llvm-cov
+  report --json`, generates a flat SVG (`scripts/coverage_badge.sh`) and
+  force-pushes it as the lone file on an orphan `badges` branch via the built-in
+  `GITHUB_TOKEN` (no token secret, no external service); the README badge is the
+  raw `badges/coverage.svg`. The full table goes to the run summary + artifacts.
 - Task #2 branch `wip/coverage-info`: separate informational `cargo-llvm-cov`
-  workflow with Codecov upload plus `coverage-summary.txt`/`lcov.info` artifacts,
-  and a README coverage badge. Local baseline measured 2026-06-04 with
+  workflow plus `coverage-summary.txt`/`lcov.info` artifacts and a README
+  coverage badge. Local baseline measured 2026-06-04 with
   cargo-llvm-cov 0.8.7: **92.76% line**, 93.56% region, 93.65% function coverage.
   The coverage command runs release-profile all-features tests and skips only
   exhaustive matrix tests already covered by normal CI to keep the job bounded:
