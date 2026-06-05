@@ -242,6 +242,7 @@ impl Read for StreamingDecoder<'_> {
 mod tests {
     use super::*;
     use crate::decompress;
+    use crate::testutil::prng;
 
     fn zstd_with_window(data: &[u8], level: i32, window_log: u32) -> Vec<u8> {
         let mut cctx = zstd::zstd_safe::CCtx::create();
@@ -374,20 +375,6 @@ mod tests {
         let mut bad = StreamingDecoder::new(&comp).unwrap();
         let mut sink = Vec::new();
         assert!(bad.read_to_end(&mut sink).is_err());
-    }
-
-    /// A deterministic PRNG producing incompressible bytes (so the only available
-    /// match is a deliberately-planted far duplicate).
-    fn prng(n: usize, mut s: u64) -> Vec<u8> {
-        (0..n)
-            .map(|_| {
-                s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
-                let mut z = s;
-                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-                (z ^ (z >> 31)) as u8
-            })
-            .collect()
     }
 
     /// `compress_long` advertises a window beyond 8 MiB and emits a back-reference

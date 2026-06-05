@@ -52,6 +52,7 @@ pub fn compress_stored(data: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::prng;
     use crate::{decompress, frame_header};
 
     /// A store-mode frame must round-trip through BOTH libzstd and our decoder.
@@ -406,17 +407,6 @@ mod tests {
         // the same chunk again — its second copy sits ~9.5 MiB back, past the
         // 8 MiB window the regular finders are capped to at every level. Plain
         // compression must store it; only the LDM index can reach it.
-        fn prng(n: usize, mut s: u64) -> Vec<u8> {
-            (0..n)
-                .map(|_| {
-                    s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
-                    let mut z = s;
-                    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-                    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-                    (z ^ (z >> 31)) as u8
-                })
-                .collect()
-        }
         let chunk = prng(512 * 1024, 0x00C0_FFEE);
         let filler = prng(9_000_000, 0x00F1_11E2);
         let mut data = Vec::with_capacity(chunk.len() * 2 + filler.len());

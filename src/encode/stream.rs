@@ -390,6 +390,7 @@ impl crate::io::Write for StreamingEncoder {
 mod tests {
     use super::*;
     use crate::io::Read;
+    use crate::testutil::prng;
     use crate::{decompress, StreamingDecoder};
 
     /// Build a frame by pushing `data` in `chunk`-sized writes (0 = one write).
@@ -624,20 +625,6 @@ mod tests {
             chunked, whole,
             "sliding frame must be independent of push chunking"
         );
-    }
-
-    /// Incompressible bytes, so the only available match is a deliberately planted
-    /// far duplicate.
-    fn prng(n: usize, mut s: u64) -> Vec<u8> {
-        (0..n)
-            .map(|_| {
-                s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
-                let mut z = s;
-                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-                (z ^ (z >> 31)) as u8
-            })
-            .collect()
     }
 
     /// A 512 KiB chunk, ~9 MiB of filler, then the same chunk — its copy sits

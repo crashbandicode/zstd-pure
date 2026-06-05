@@ -55,6 +55,9 @@ pub mod fse;
 pub mod huff;
 pub mod literals;
 pub mod sequences;
+/// Shared deterministic generators for the crate's unit tests (test-only).
+#[cfg(test)]
+mod testutil;
 /// `std::io::Read` and the `Error`/`ErrorKind`/`Result` it needs under `std`; a
 /// minimal `no_std` stand-in otherwise — so [`streaming::StreamingDecoder`] can
 /// implement one `Read` trait whether or not `std` is present. Under `std` this
