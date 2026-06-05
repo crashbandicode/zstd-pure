@@ -76,12 +76,14 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
   ~1.35× vs libzstd's native on the mixed bench corpus.
 
 ## Coverage baseline
-- **Coverage badge is GitHub-Actions-only** (`wip/coverage-badge`): dropped
-  Codecov entirely. The Coverage workflow computes line % from `cargo llvm-cov
-  report --json`, generates a flat SVG (`scripts/coverage_badge.sh`) and
-  force-pushes it as the lone file on an orphan `badges` branch via the built-in
-  `GITHUB_TOKEN` (no token secret, no external service); the README badge is the
-  raw `badges/coverage.svg`. The full table goes to the run summary + artifacts.
+- **Coverage badge is GitHub-Actions-only, via GitHub Pages** (`wip/coverage-badge`
+  → `wip/coverage-pages`): dropped Codecov entirely. The Coverage workflow computes
+  line % from `cargo llvm-cov report --json`, generates a flat SVG
+  (`scripts/coverage_badge.sh`) plus a one-page report, and a second `deploy` job
+  publishes them to GitHub Pages (`actions/deploy-pages`, Pages source = Actions).
+  No badge branch (so no "compare & pull request" banner), no token secret, no
+  external service. README badge = `https://crashbandicode.github.io/zstd-pure/coverage.svg`;
+  full table also goes to the run summary + artifacts.
 - Task #2 branch `wip/coverage-info`: separate informational `cargo-llvm-cov`
   workflow plus `coverage-summary.txt`/`lcov.info` artifacts and a README
   coverage badge. Local baseline measured 2026-06-04 with
