@@ -28,8 +28,8 @@ jobs:
             --skip frame_is_independent_of_write_chunk_size \
             --skip multi_block_stream_compresses_and_round_trips \
             --skip our_frames_round_trip_through_the_streaming_decoder
-          cargo llvm-cov report --summary-only | tee coverage-summary.txt
-          cargo llvm-cov report --lcov --output-path lcov.info
+          cargo llvm-cov report --release --summary-only | tee coverage-summary.txt
+          cargo llvm-cov report --release --lcov --output-path lcov.info
       - name: upload to Codecov
         uses: codecov/codecov-action@v5
         continue-on-error: true
