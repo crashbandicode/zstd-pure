@@ -3,7 +3,7 @@
 Rolling status doc (see `AGENTS.md` §4). Read this first; update it after each
 landed chunk; reconcile it against `git log`/tests after any context compaction.
 
-_Last updated: 2026-06-04._
+_Last updated: 2026-06-05._
 
 ## Standing vs libzstd (Silesia, real-world)
 - **Compression:** within **~1.5–3%** of libzstd's size across L5–L19; **beats**
@@ -50,6 +50,12 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
   L18 +2.6%→+0.7%, L19 +2.4%→+0.5%** — L16/L17 now *beat* libzstd; zero regressions
   (guard); non-opt levels byte-identical. Cost: a 2nd DP over the richer stream at
   L16–22 (collection is shared). See `COST_MODEL_NOTES.md`.
+- **Gain-based btlazy2 match selection** (L13–15): the lazy parse now picks chain
+  vs binary-tree match by *gain* (`len*4 - offset_bits`) instead of a fixed
+  `target_length` cutoff, so the tree's longer far matches win when worth it.
+  **Silesia sizeΔ: L13 +2.7%→+0.2%, L14 +2.4%→+0.1%, L15 +2.2%→+0.5%** (≈ libzstd);
+  synthetic json 1.28×→1.04×, mixed now beats libzstd; only `records` +6 B (accepted
+  synthetic blip). Encode speed unchanged (tree already maintained at these levels).
 
 ## Tried & rejected (don't redo without a new angle — see PERF_NOTES)
 - `unsafe`/`get_unchecked` (≈0% after the safe elision) — discarded.
@@ -57,16 +63,18 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
   reuse (zeroing was free) — flat, reverted.
 - Row-based finder (`RowHashState`) — correct but ~2× slower scalar; needs SIMD.
 - Block-split estimator "C" for L7–12 — couldn't make it free; cost is inherent.
+- Binary tree for L8–12 (Lazy2): beats libzstd on ratio (L9 +1.5%→−1.8%) but 4–7×
+  slower encode (L9 22→3 MB/s) — gutted the fast tier; kept those levels tree-less.
 
 ## In flight / next
 - **Convention:** one feature → one `git worktree` on its own branch (see
   `AGENTS.md` §0 / `CLAUDE.md`), so agents work in parallel without colliding.
 - All four queued tasks (#2–#5) are landed; the `HANDOFF.md` encoder tasks are done.
-- **Next ratio target — mid levels (L9–L15):** the band still furthest from libzstd
-  (L9 +1.5%, L12 +2.0%). These are lazy/lazy2/btlazy2 parsers, so the full-tree DP
-  technique doesn't apply (no DP to consume a Pareto set). Lever is finder quality
-  in the lazy parse (better chain/tree candidates) or a SIMD row-hash finder (the
-  earlier `RowHashState` was rejected at ~2× slower scalar — would need SIMD).
+- **Mid levels:** L13–15 closed to ≈libzstd (gain-based btlazy2, above). **L9–L12
+  (Lazy2) deliberately left tree-less** at +1.5–2.0%: a measured experiment giving
+  them a tree beat libzstd on ratio but cost 4–7× encode (L9 22→3 MB/s), gutting the
+  fast tier — see "Tried & rejected". The remaining mid-band lever would be a SIMD
+  row-hash finder (better chain candidates without the full tree's cost).
 - Parallel agent: competitive benchmark vs other pure-Rust zstd crates + code
   coverage/badge + coverage-driven tests (see `HANDOFF.md`).
 - Deferred: v0.1.0 release (CHANGELOG needs refreshing to current `main` first).
