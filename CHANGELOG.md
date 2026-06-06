@@ -39,6 +39,26 @@ breaking changes).
 - Coverage is reported entirely from GitHub Actions (badge published to GitHub
   Pages; Codecov dropped); CI actions moved to Node 24 runtimes.
 
+### Testing
+- Validation-hardening pass (test-only; no library change):
+  - `seekable_decode` fuzz target stressing random-access + parallel decode on
+    *adversarial* archives (corrupt offsets / sizes / checksums, pathological
+    job counts).
+  - Streaming decode proven independent of caller read granularity
+    (1/2/3/7/64/4096/65536-byte reads vs one-shot, for our + libzstd frames).
+  - Cap + checksum decode semantics locked as proptests (cap monotonicity,
+    insufficient-cap rejection, no silent wrong data under a content checksum,
+    hostile tiny-read never-panic).
+  - Encoder structural invariants: emitted frames are parsed and checked for
+    RFC 8878 format-validity (magic/checksum/content-size/dict-id flags, block
+    types, `Block_Maximum_Size`, single last block) across every encode entry
+    point.
+  - Typed-error corpus locking the `ZstdError` variant each crafted malformation
+    yields (frame header / block header / dictionary / seekable).
+  - Persistent fuzz-regression corpus (`tests/regressions/`) + walker, and an
+    offline version-pinned golden-frame corpus (`tests/fixtures/frames/`)
+    covering Raw/RLE/Compressed blocks and Treeless literals.
+
 ## [0.1.0] - 2026-06-03
 
 Initial release: a from-scratch, pure-Rust Zstandard ([RFC 8878]) decoder and

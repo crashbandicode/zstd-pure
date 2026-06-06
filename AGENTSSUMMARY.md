@@ -21,6 +21,16 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
 **parallel seekable decode** (`decompress_seekable_parallel[_capped]`, ~3.4×/8thr).
 
 ## Recently landed (on origin/main)
+- **Validation-hardening pass** (`wip/validation-hardening`, test-only — no library
+  change): `seekable_decode` fuzz target for adversarial archives; streaming decode
+  proven read-granularity-independent (1..65536-byte reads vs one-shot); cap +
+  checksum semantics locked as proptests (monotonicity, insufficient-cap, no silent
+  wrong data, hostile tiny-read never-panic); encoder structural-invariant checks on
+  emitted frames (flags / block types / `Block_Maximum_Size` / single last block,
+  ratio-independent); a typed-error malformed corpus; a persistent
+  `tests/regressions/` corpus + walker; and an offline version-pinned golden-frame
+  corpus (`tests/fixtures/frames/`). Stayed clear of the encoder ratio/perf work in
+  flight; no version release.
 - **API surface tightened** (`wip/api-hygiene`, pre-publish): the internal decoder
   primitives `bits`/`block`/`fse`/`huff`/`literals`/`sequences`/`xxhash` are now
   private `mod`s (was `pub mod`) — the supported surface is the crate-root
