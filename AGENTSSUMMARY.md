@@ -21,6 +21,14 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
 **parallel seekable decode** (`decompress_seekable_parallel[_capped]`, ~3.4×/8thr).
 
 ## Recently landed (on origin/main)
+- **RFC 9659 (HTTP `zstd` window sizing)** (`wip/rfc9659`): added `decompress_http`
+  (+ `HTTP_MAX_WINDOW_SIZE`), a content-coding decode profile that rejects frames
+  requiring `Window_Size` > 8 MiB and caps total output (untrusted HTTP bodies),
+  across multi-frame + skippable streams. We already satisfied both RFC 9659 MUSTs:
+  the decoder supports the full 8 MiB (and beyond), and regular `compress` /
+  `compress_with_options` (non-LDM) clamp `window_log` to 23 = 8 MiB; only the
+  opt-in `compress_long` / LDM intentionally exceeds it (non-HTTP use). Decode-side
+  only — no encoder change. Regression-tested in `tests/rfc9659.rs`.
 - **Validation-hardening pass** (`wip/validation-hardening`, test-only — no library
   change): `seekable_decode` fuzz target for adversarial archives; streaming decode
   proven read-granularity-independent (1..65536-byte reads vs one-shot); cap +

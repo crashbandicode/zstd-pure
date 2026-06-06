@@ -183,6 +183,21 @@ pub fn decode_one_with_dict(
     max_output: usize,
     dict: Option<&Dictionary>,
 ) -> Result<DecodedFrame> {
+    decode_frame(src, expect_magic, max_output, dict, None)
+}
+
+/// The shared single-frame decode, plus an optional `max_window` ceiling (bytes):
+/// a frame whose `Window_Size` exceeds it is rejected before any block is decoded.
+/// `None` imposes no ceiling (the general decoder); [`decompress_http`] passes the
+/// RFC 9659 8 MiB limit. Skippable frames are returned before the check, so they
+/// are never affected by the ceiling.
+fn decode_frame(
+    src: &[u8],
+    expect_magic: bool,
+    max_output: usize,
+    dict: Option<&Dictionary>,
+    max_window: Option<u64>,
+) -> Result<DecodedFrame> {
     let mut pos = 0usize;
     if expect_magic {
         if src.len() < 4 {
@@ -220,6 +235,17 @@ pub fn decode_one_with_dict(
 
     let header = parse_frame_header(&src[pos..])?;
     pos += header.header_len;
+    if let Some(max_ws) = max_window {
+        if header.window_size > max_ws {
+            return Err(ZstdError::Invalid {
+                what: "window size",
+                detail: format!(
+                    "frame window {} exceeds the {max_ws}-byte ceiling",
+                    header.window_size
+                ),
+            });
+        }
+    }
     let block_max = header.window_size.min(MAX_BLOCK_SIZE as u64) as usize;
 
     let cap = match header.content_size {
@@ -348,6 +374,46 @@ pub fn decompress_capped(src: &[u8], max_output: usize) -> Result<Vec<u8>> {
             .checked_sub(out.len())
             .ok_or(ZstdError::OutputTooLarge { limit: max_output })?;
         let frame = decode_one(&src[pos..], true, remaining)?;
+        out.extend_from_slice(&frame.data);
+        pos += frame.consumed;
+    }
+    Ok(out)
+}
+
+/// The RFC 9659 `Window_Size` ceiling for the HTTP `zstd` content coding: 8 MiB.
+pub const HTTP_MAX_WINDOW_SIZE: u64 = 8 << 20;
+
+/// Decode an HTTP `zstd` content-coding body, following [RFC 9659]'s window-sizing
+/// profile for the `zstd` content coding.
+///
+/// This is [`decompress_capped`] hardened for untrusted content-encoding payloads:
+/// every frame whose `Window_Size` exceeds 8 MiB (the RFC 9659 ceiling,
+/// [`HTTP_MAX_WINDOW_SIZE`]) is rejected with [`ZstdError::Invalid`] — so a hostile
+/// header can't force a large sliding-window allocation — and the total decoded
+/// size across all frames is capped at `max_output` (the decompression-bomb bound).
+/// Multi-frame streams and interleaved skippable frames are handled exactly as by
+/// [`decompress_capped`].
+///
+/// RFC 9659 requires decoders to support a `Window_Size` up to and including 8 MiB:
+/// this accepts the full 8 MiB and refuses only larger windows, which is the safe
+/// posture for untrusted HTTP bodies. (The general [`decompress`] /
+/// [`decompress_capped`] entry points impose no window ceiling.)
+///
+/// [RFC 9659]: https://www.rfc-editor.org/rfc/rfc9659
+pub fn decompress_http(src: &[u8], max_output: usize) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while pos < src.len() {
+        let remaining = max_output
+            .checked_sub(out.len())
+            .ok_or(ZstdError::OutputTooLarge { limit: max_output })?;
+        let frame = decode_frame(
+            &src[pos..],
+            true,
+            remaining,
+            None,
+            Some(HTTP_MAX_WINDOW_SIZE),
+        )?;
         out.extend_from_slice(&frame.data);
         pos += frame.consumed;
     }

@@ -8,6 +8,11 @@ breaking changes).
 ## [Unreleased]
 
 ### Added
+- `decompress_http` (+ `HTTP_MAX_WINDOW_SIZE`): an [RFC 9659] content-coding
+  decode profile for untrusted HTTP `zstd` bodies — rejects any frame requiring a
+  `Window_Size` larger than 8 MiB and caps total output, across multi-frame and
+  skippable streams. Our default encode paths already satisfy RFC 9659's
+  encoder/decoder window MUSTs (now regression-tested).
 - Parallel whole-archive seekable decode (`decompress_seekable_parallel` /
   `decompress_seekable_parallel_capped`, `std`-only): independent frames decode
   across threads, byte-identical to serial decode + concatenation.
@@ -107,5 +112,6 @@ encoder. `#![forbid(unsafe_code)]`, `no_std + alloc`, only `thiserror` at runtim
   encoder output verified both ways.
 
 [RFC 8878]: https://www.rfc-editor.org/rfc/rfc8878
+[RFC 9659]: https://www.rfc-editor.org/rfc/rfc9659
 [Unreleased]: https://github.com/crashbandicode/zstd-pure/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/crashbandicode/zstd-pure/releases/tag/v0.1.0

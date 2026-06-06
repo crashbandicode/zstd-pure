@@ -173,9 +173,9 @@ pub use encode::{
 };
 pub use error::{Result, ZstdError};
 pub use frame::{
-    decode_one, decode_one_with_dict, decompress, decompress_capped, decompress_magicless,
-    decompress_magicless_with_dict, decompress_with_dict, frame_header, frame_header_magicless,
-    DecodedFrame, FrameHeader,
+    decode_one, decode_one_with_dict, decompress, decompress_capped, decompress_http,
+    decompress_magicless, decompress_magicless_with_dict, decompress_with_dict, frame_header,
+    frame_header_magicless, DecodedFrame, FrameHeader, HTTP_MAX_WINDOW_SIZE,
 };
 pub use seekable::{compress_seekable, decompress_seekable_frame, SeekFrame, SeekTable};
 /// Parallel whole-archive seekable decode (`std`-only — uses `std::thread`); the

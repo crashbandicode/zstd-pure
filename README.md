@@ -120,6 +120,7 @@ libzstd, which implements RFC 8878. Notable points:
 - **Content checksum** — low 4 bytes of `XXH64(data, seed = 0)`, little-endian (§3.1.1).
 - **Reserved bit** of the `Frame_Header_Descriptor` must be 0; a frame that sets it is rejected (§3.1.1.1.1).
 - **Window size** — `compress` caps `Window_Size` at 8 MiB, honoring §3.1.1.1.2's recommendation that a compressor not require more (for broad decoder interoperability); the streaming decoder accepts windows up to 128 MiB (log 27), the default `windowLogMax` of a stock `ZSTD_decompress`. The opt-in `compress_long` (long-distance matching) is the deliberate exception: it may advertise a `Window_Size` up to 128 MiB to make its long-range matches reachable — still within that default limit, so the frames stay broadly decodable. Plain `compress` is unchanged at 8 MiB.
+- **RFC 9659** (*Window Sizing for Zstandard Content Encoding*) makes the 8 MiB window a **requirement** for the HTTP `zstd` content coding: decoders MUST support up to 8 MiB, encoders MUST NOT exceed it. Our default encode paths already comply (the 8 MiB cap above; `compress_with_options` also clamps any override unless long-distance is requested), and the decoder supports the full 8 MiB. For untrusted content-coding bodies, `decompress_http` is the turnkey profile: it rejects any frame whose `Window_Size` exceeds 8 MiB and caps total output.
 - **Block_Maximum_Size** — `min(Window_Size, 128 KiB)` (§3.1.1.2).
 
 ## Supported / unsupported
