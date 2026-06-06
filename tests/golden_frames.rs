@@ -152,7 +152,7 @@ fn generate_golden_frames() {
 
     // Incompressible bytes → a Raw block (libzstd stores them verbatim).
     let mut raw = Vec::with_capacity(5000);
-    let mut r = 0xC0FF_EE12_3456_789au64;
+    let mut r = 0xC0FF_EE12_3456_789A_u64;
     for _ in 0..5000 {
         r = r.wrapping_mul(6364136223846793005).wrapping_add(1);
         raw.push((r >> 40) as u8);
