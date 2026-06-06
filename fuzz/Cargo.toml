@@ -75,3 +75,10 @@ path = "fuzz_targets/dictionary.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "seekable_decode"
+path = "fuzz_targets/seekable_decode.rs"
+test = false
+doc = false
+bench = false
