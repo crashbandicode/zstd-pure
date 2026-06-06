@@ -259,15 +259,36 @@ pub fn decompress_seekable_frame(
         what: "seek frame index",
         detail: "out of range".into(),
     })?;
-    let start = f.compressed_offset as usize;
-    let end = start + f.compressed_size as usize;
+    // Checked offset math: the offset/size come from an untrusted seek table, so
+    // a `u64` offset that doesn't fit `usize` (32-bit hosts) or a `start + size`
+    // overflow must error rather than wrap into a bogus in-range slice.
+    let range_err = || ZstdError::Invalid {
+        what: "seekable frame range",
+        detail: "frame offset/size outside the archive".into(),
+    };
+    let start = usize::try_from(f.compressed_offset).map_err(|_| range_err())?;
+    let size = f.compressed_size as usize;
+    let end = start.checked_add(size).ok_or_else(range_err)?;
     if end > archive.len() {
         return Err(ZstdError::Truncated {
             what: "seekable frame",
             needed: end - archive.len(),
         });
     }
-    let decoded = decode_one(&archive[start..end], true, f.decompressed_size as usize + 1)?;
+    // Cap at the table's declared size, then require an exact match: this rejects
+    // both an over-producing frame (the cap trips `OutputTooLarge`) and a silent
+    // under-producing one, so random-access output always matches the table.
+    let want = f.decompressed_size as usize;
+    let decoded = decode_one(&archive[start..end], true, want)?;
+    if decoded.data.len() != want {
+        return Err(ZstdError::Invalid {
+            what: "seekable frame size",
+            detail: format!(
+                "frame {index} decoded {} bytes, seek table declares {want}",
+                decoded.data.len()
+            ),
+        });
+    }
     if let Some(expected) = f.checksum {
         let computed = (xxh64(&decoded.data, 0) & 0xFFFF_FFFF) as u32;
         if computed != expected {
@@ -478,6 +499,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Random-access decode of a single frame must agree with the seek table:
+    /// a tampered `decompressed_size` (in either direction) is rejected, not
+    /// returned as a wrong-length buffer.
+    #[test]
+    fn serial_frame_decode_rejects_size_mismatch() {
+        let data = b"the quick brown fox jumps over the lazy dog. ".repeat(300);
+        let archive = compress_seekable(&data, 4096, 9, true).unwrap();
+        let good = SeekTable::parse(&archive).unwrap();
+        // Sanity: every frame round-trips at its declared size.
+        for i in 0..good.num_frames() {
+            assert!(decompress_seekable_frame(&archive, &good, i).is_ok());
+        }
+        // Under-declared (frame produces more than the table claims) -> capped out.
+        let mut shrunk = SeekTable::parse(&archive).unwrap();
+        shrunk.frames[0].decompressed_size -= 1;
+        assert!(decompress_seekable_frame(&archive, &shrunk, 0).is_err());
+        // Over-declared (frame produces fewer than the table claims) -> mismatch.
+        let mut grown = SeekTable::parse(&archive).unwrap();
+        grown.frames[0].decompressed_size += 1;
+        assert!(matches!(
+            decompress_seekable_frame(&archive, &grown, 0),
+            Err(ZstdError::Invalid {
+                what: "seekable frame size",
+                ..
+            })
+        ));
     }
 
     /// Parallel whole-archive decode must equal the serial decode (and the

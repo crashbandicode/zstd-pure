@@ -21,6 +21,16 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
 **parallel seekable decode** (`decompress_seekable_parallel[_capped]`, ~3.4×/8thr).
 
 ## Recently landed (on origin/main)
+- **Decoder hardening** (`wip/decode-hardening`): (1) per-block regenerated-size
+  cap. `decode_compressed` now bounds a block's output by
+  `min(max_output, produced_so_far + block_max)`, so a single hostile compressed
+  block can't balloon the buffer even when the frame-wide ceiling is disabled —
+  this closes a streaming-decoder bomb vector (streaming runs `max_output =
+  usize::MAX`, relying on window eviction between blocks). Conformant frames never
+  hit it (corpus differential byte-identical). (2) seekable random access
+  (`decompress_seekable_frame`) uses checked offset arithmetic and requires the
+  decoded length to exactly match the seek table (rejects over- and
+  under-producing frames), bringing the serial path up to the parallel path's bar.
 - **Code-quality / LOC pass** (`wip/quality`): de-duplicated logic at equal
   functionality — byte-identical, proven by the libzstd corpus differential (both
   directions, all levels) + the full suite. One block-type dispatch

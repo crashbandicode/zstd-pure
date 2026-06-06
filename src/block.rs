@@ -79,11 +79,22 @@ impl BlockState {
     }
 
     /// Decode a Compressed block body (literals section + sequences section).
-    /// The output ceiling is enforced inside [`sequences::decode`] so a hostile
-    /// block cannot expand past `max_output` (unlike the up-front `check_ceiling`
-    /// of raw/RLE blocks, a compressed block's size isn't known until decoded).
+    ///
+    /// A compressed block's regenerated size isn't known until decoded, so the
+    /// ceiling is enforced *during* decode inside [`sequences::decode_capped`].
+    /// Two bounds apply: the frame-wide `max_output`, and — because RFC 8878
+    /// §3.1.1.2 limits any one block to `Block_Maximum_Size` — a per-block cap of
+    /// `block_max` on top of the output already produced. The per-block cap is
+    /// what keeps the *streaming* decoder bounded: it disables `max_output`
+    /// (relying on window eviction between blocks), so without it a single
+    /// hostile block could regenerate gigabytes into the buffer before the next
+    /// compaction. For a conformant frame neither bound ever binds.
     pub fn decode_compressed(&mut self, data: &[u8]) -> Result<()> {
         let (lits, consumed) = literals::decode(data, &mut self.huff)?;
+        let real_so_far = self.out.len() - self.dict_len;
+        let block_cap = self
+            .max_output
+            .min(real_so_far.saturating_add(self.block_max));
         sequences::decode_capped(
             &data[consumed..],
             &lits,
@@ -91,7 +102,7 @@ impl BlockState {
             &mut self.seq,
             &mut self.rep,
             self.dict_len,
-            self.max_output,
+            block_cap,
         )
     }
 
@@ -162,5 +173,48 @@ impl BlockState {
             }
         }
         Ok((pos, header.last))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A compressed block must not regenerate more than `block_max`, even when
+    /// the frame-wide ceiling is disabled (the streaming decoder's bomb guard).
+    /// A conformant frame never exceeds `block_max`, so this drives a real block
+    /// body through `decode_compressed` with an artificially tight cap.
+    #[test]
+    fn compressed_block_regen_is_capped_at_block_max() {
+        let payload = b"the quick brown fox jumps over the lazy dog. ".repeat(40);
+        let frame = crate::compress(&payload, 3, false, true);
+        // Slice out the (single) compressed block body following the header.
+        let h = crate::frame_header(&frame).unwrap();
+        let bh = &frame[h.header_len..];
+        let v = (bh[0] as u32) | ((bh[1] as u32) << 8) | ((bh[2] as u32) << 16);
+        assert_eq!((v >> 1) & 3, 2, "fixture must be a single compressed block");
+        let body = &bh[3..3 + (v >> 3) as usize];
+
+        let make = |block_max| BlockState {
+            out: Vec::new(),
+            dict_len: 0,
+            max_output: usize::MAX, // streaming-style: frame ceiling disabled
+            block_max,
+            huff: None,
+            seq: sequences::SeqTables::default(),
+            rep: [1, 4, 8],
+        };
+
+        // A cap below the regenerated size stops the expansion.
+        let mut tight = make(256);
+        assert!(matches!(
+            tight.decode_compressed(body),
+            Err(ZstdError::OutputTooLarge { .. })
+        ));
+
+        // A cap that admits the block decodes it back to the original bytes.
+        let mut ok = make(payload.len());
+        ok.decode_compressed(body).unwrap();
+        assert_eq!(ok.out, payload.as_slice());
     }
 }

@@ -99,12 +99,12 @@ impl<'a> StreamingDecoder<'a> {
         let mut state = BlockState {
             out: Vec::new(),
             dict_len: 0,
-            // Bounded-memory mode: per-block growth is already capped by the
-            // input length, and the window bounds total residency, so the
-            // one-shot ceiling is disabled here.
+            // Bounded-memory mode: the window bounds total residency (eviction
+            // happens between blocks), so the frame-wide ceiling is disabled.
             max_output: usize::MAX,
-            // The RFC block-size cap is a format check (not a memory guard), so
-            // it still applies in streaming mode.
+            // Per-block regenerated size is still capped at Block_Maximum_Size
+            // (`decode_compressed` enforces it against `block_max`), so a single
+            // hostile block can't balloon the buffer before the next eviction.
             block_max: header.window_size.min(MAX_BLOCK_SIZE as u64) as usize,
             huff: None,
             seq: SeqTables::default(),
