@@ -62,13 +62,18 @@ impl BlockState {
     }
 
     fn check_ceiling(&self, extra: usize) -> Result<()> {
-        if self.output_len() + extra > self.max_output {
-            Err(ZstdError::OutputTooLarge {
+        let next = self
+            .output_len()
+            .checked_add(extra)
+            .ok_or(ZstdError::OutputTooLarge {
                 limit: self.max_output,
-            })
-        } else {
-            Ok(())
+            })?;
+        if next > self.max_output {
+            return Err(ZstdError::OutputTooLarge {
+                limit: self.max_output,
+            });
         }
+        Ok(())
     }
 
     /// Decode a Raw block: copy `data` verbatim.

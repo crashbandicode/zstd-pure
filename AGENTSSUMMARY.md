@@ -21,6 +21,15 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
 **parallel seekable decode** (`decompress_seekable_parallel[_capped]`, ~3.4×/8thr).
 
 ## Recently landed (on origin/main)
+- **Decoder hardening, round 2** (`wip/harden2`, from an external review): made
+  `decompress_with_dict` enforce a *total* cross-frame output cap (was per-frame,
+  unlike `decompress_capped`); `decode_one` now caps blocks at the pledged
+  `content_size` (not just `max_output`) and rejects an over-ceiling pledge up
+  front via checked `u64`→`usize`; the uncapped `decompress_seekable_parallel`
+  and `check_ceiling` use checked arithmetic; `decode_frame_group` drops the
+  `want + 1` (32-bit overflow edge); a panicking seekable decode worker maps to
+  `Err` instead of unwinding. New total-cap-with-dict regression test. All
+  byte-identical on the corpus differential.
 - **Decoder hardening** (`wip/decode-hardening`): (1) per-block regenerated-size
   cap. `decode_compressed` now bounds a block's output by
   `min(max_output, produced_so_far + block_max)`, so a single hostile compressed

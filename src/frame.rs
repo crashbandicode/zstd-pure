@@ -222,19 +222,28 @@ pub fn decode_one_with_dict(
     let block_max = header.window_size.min(MAX_BLOCK_SIZE as u64) as usize;
 
     let cap = match header.content_size {
-        Some(n) => (n as usize).min(max_output),
+        // A pledged size over the caller's ceiling is rejected up front rather
+        // than after growing the buffer; `try_from` also avoids a u64->usize
+        // truncation on 32-bit hosts.
+        Some(n) if n > max_output as u64 => {
+            return Err(ZstdError::OutputTooLarge { limit: max_output });
+        }
+        Some(n) => {
+            usize::try_from(n).map_err(|_| ZstdError::OutputTooLarge { limit: max_output })?
+        }
         None => max_output,
     };
     // Pre-size the output to the pledged content size to avoid repeated reallocation
     // on large frames — but bound the up-front allocation by the *input* size (×8)
     // so a tiny/malicious frame claiming a huge `content_size` can't force a large
-    // allocation. The actual decompression-bomb guard is `max_output`, enforced as
-    // each block is produced; this only sizes the initial buffer. Always allow ≥1 MiB.
+    // allocation. The real decompression-bomb guard is `cap` (the pledged size or
+    // the caller's ceiling), enforced as each block is produced; this only sizes
+    // the initial buffer. Always allow ≥1 MiB.
     let reserve = cap.min(src.len().saturating_mul(8).max(1 << 20));
     let mut state = BlockState {
         out: Vec::with_capacity(reserve),
         dict_len: 0,
-        max_output,
+        max_output: cap,
         block_max,
         huff: None,
         seq: SeqTables::default(),
@@ -331,7 +340,12 @@ pub fn decompress_capped(src: &[u8], max_output: usize) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut pos = 0usize;
     while pos < src.len() {
-        let remaining = max_output - out.len();
+        // `checked_sub` can't actually underflow (each frame is capped at the
+        // remaining budget), but keep the public decoder panic-free even if a
+        // future change broke that invariant.
+        let remaining = max_output
+            .checked_sub(out.len())
+            .ok_or(ZstdError::OutputTooLarge { limit: max_output })?;
         let frame = decode_one(&src[pos..], true, remaining)?;
         out.extend_from_slice(&frame.data);
         pos += frame.consumed;
@@ -346,12 +360,17 @@ pub fn decompress_magicless(src: &[u8], max_output: usize) -> Result<DecodedFram
 }
 
 /// Decompress a standard stream using a dictionary (raw-content or structured).
-/// The dictionary primes every frame in the stream.
+/// The dictionary primes every frame in the stream. `max_output` is the **total**
+/// ceiling across all frames (the same decompression-bomb guard as
+/// [`decompress_capped`]).
 pub fn decompress_with_dict(src: &[u8], dict: &Dictionary, max_output: usize) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut pos = 0usize;
     while pos < src.len() {
-        let frame = decode_one_with_dict(&src[pos..], true, max_output, Some(dict))?;
+        let remaining = max_output
+            .checked_sub(out.len())
+            .ok_or(ZstdError::OutputTooLarge { limit: max_output })?;
+        let frame = decode_one_with_dict(&src[pos..], true, remaining, Some(dict))?;
         out.extend_from_slice(&frame.data);
         pos += frame.consumed;
     }

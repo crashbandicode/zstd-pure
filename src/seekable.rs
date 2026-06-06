@@ -322,7 +322,11 @@ pub fn decompress_seekable_parallel(
     table: &SeekTable,
     n_jobs: usize,
 ) -> Result<Vec<u8>> {
-    decompress_seekable_parallel_capped(archive, table, n_jobs, table.decompressed_size() as usize)
+    // "Uncapped" sizes the output from the (trusted) table total — but still
+    // refuse rather than silently truncate a u64 that doesn't fit usize.
+    let total = usize::try_from(table.decompressed_size())
+        .map_err(|_| ZstdError::OutputTooLarge { limit: usize::MAX })?;
+    decompress_seekable_parallel_capped(archive, table, n_jobs, total)
 }
 
 /// [`decompress_seekable_parallel`] with a hard ceiling on total decompressed
@@ -393,7 +397,12 @@ pub fn decompress_seekable_parallel_capped(
             handles.push(s.spawn(move || decode_frame_group(archive, grp, region)));
         }
         for h in handles {
-            h.join().expect("seekable decode worker panicked")?;
+            // A worker panic (a bug, not hostile input) becomes an error rather
+            // than unwinding out of the public decode API.
+            h.join().map_err(|_| ZstdError::Invalid {
+                what: "seekable decode worker",
+                detail: "decode worker panicked".into(),
+            })??;
         }
         Ok(())
     })?;
@@ -423,7 +432,7 @@ fn decode_frame_group(archive: &[u8], grp: &[SeekFrame], region: &mut [u8]) -> R
             });
         }
         let want = f.decompressed_size as usize;
-        let decoded = decode_one(&archive[start..end], true, want + 1)?;
+        let decoded = decode_one(&archive[start..end], true, want)?;
         if decoded.data.len() != want {
             return Err(ZstdError::Invalid {
                 what: "seekable frame size",

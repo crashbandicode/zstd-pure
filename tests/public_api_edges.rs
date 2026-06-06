@@ -1,9 +1,9 @@
 use std::io::Read;
 
 use zstd_pure::{
-    compress, compress_with_options, decompress, decompress_capped, decompress_magicless_bytes,
-    frame_header, frame_header_magicless, train_dictionary_structured, CompressOptions,
-    StreamingDecoder, ZstdError,
+    compress, compress_with_dict, compress_with_options, decompress, decompress_capped,
+    decompress_magicless_bytes, decompress_with_dict, frame_header, frame_header_magicless,
+    train_dictionary_structured, CompressOptions, Dictionary, StreamingDecoder, ZstdError,
 };
 
 fn libzstd_decompress_magicless(frame: &[u8], out_len: usize) -> Vec<u8> {
@@ -199,6 +199,32 @@ fn decompress_capped_enforces_total_output_across_frames() {
     both.extend_from_slice(&b);
     assert_eq!(decompress_capped(&stream, 2 * each).unwrap(), both);
     assert_eq!(decompress(&stream).unwrap(), both);
+}
+
+/// `decompress_with_dict` enforces a **total** output ceiling across all frames,
+/// like `decompress_capped` — two dict frames each under the cap but over it
+/// together must be refused.
+#[test]
+fn decompress_with_dict_enforces_total_output_across_frames() {
+    let dict = Dictionary::raw(b"the quick brown fox jumps over the lazy dog");
+    let each = 50_000usize;
+    let a = vec![0xABu8; each];
+    let b: Vec<u8> = (0..each as u32)
+        .map(|i| (i.wrapping_mul(2654435761) >> 24) as u8)
+        .collect();
+    let mut stream = compress_with_dict(&a, &dict, 9, false, true);
+    stream.extend_from_slice(&compress_with_dict(&b, &dict, 9, false, true));
+
+    assert!(matches!(
+        decompress_with_dict(&stream, &dict, each + each / 2),
+        Err(ZstdError::OutputTooLarge { .. })
+    ));
+    let mut both = a.clone();
+    both.extend_from_slice(&b);
+    assert_eq!(
+        decompress_with_dict(&stream, &dict, 2 * each).unwrap(),
+        both
+    );
 }
 
 /// A compressed (type-2) block must not be allowed to expand past `max_output`
