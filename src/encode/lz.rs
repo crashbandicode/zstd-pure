@@ -266,8 +266,8 @@ impl MatchState {
 /// updating the persistent `state` so matches can reference earlier blocks.
 /// `literals` is the concatenation of this block's literal runs (including the
 /// trailing run after the last match); reconstructing the block copies
-/// `lit_len` literals then the match per sequence, exactly as
-/// [`crate::sequences::decode`] does.
+/// `lit_len` literals then the match per sequence, exactly as the decoder's
+/// sequence reconstruction does.
 ///
 /// Match candidates may lie anywhere before `p` within `max_offset` (the
 /// advertised window); the matched bytes never cross `end`, so the block's

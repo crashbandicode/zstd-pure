@@ -157,12 +157,9 @@ fn copy_power_of_two_pattern(out: &mut Vec<u8>, start: usize, offset: usize, mat
     }
 }
 
-/// Decode the sequences section and reconstruct the block's contribution into
-/// `out`, appending behind any existing history. `out` already contains all
-/// prior output (window history) usable by back-references.
-/// Decode the sequences section with no output ceiling (for tests / callers that
-/// have already bounded the output). Production decode goes through
-/// [`decode_capped`].
+/// Decode the sequences section with no output ceiling — a test-only convenience
+/// over [`decode_capped`] (production decode always supplies a cap).
+#[cfg(test)]
 pub fn decode(
     src: &[u8],
     literals: &[u8],

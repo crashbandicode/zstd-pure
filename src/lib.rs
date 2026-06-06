@@ -46,16 +46,19 @@ mod alloc_prelude {
 #[allow(unused_imports)]
 use alloc_prelude::*;
 
-pub mod bits;
-pub mod block;
+// Internal decoder primitives — not part of the public API. The supported
+// surface is the re-exports below (decode/encode entry points) plus the
+// `dict`/`encode`/`frame`/`seekable`/`streaming`/`io` modules.
+mod bits;
+mod block;
 pub mod dict;
 pub mod encode;
 mod error;
 pub mod frame;
-pub mod fse;
-pub mod huff;
-pub mod literals;
-pub mod sequences;
+mod fse;
+mod huff;
+mod literals;
+mod sequences;
 /// Shared deterministic generators for the crate's unit tests (test-only).
 #[cfg(test)]
 mod testutil;
@@ -153,7 +156,7 @@ pub mod io {
 
 pub mod seekable;
 pub mod streaming;
-pub mod xxhash;
+mod xxhash;
 
 pub use dict::Dictionary;
 /// A T2.1a stepping-stone (Huffman-coded literals, no match finding) — strictly

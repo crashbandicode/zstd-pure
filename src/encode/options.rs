@@ -24,6 +24,7 @@ use super::params::{self, CParams, Strategy, LDM_MAX_WINDOW_LOG, MAX_WINDOW_LOG,
 /// assert_eq!(zstd_pure::decompress(&frame).unwrap(), b"hello hello hello");
 /// ```
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct CompressOptions {
     /// Base compression level (1–22; clamped) supplying defaults for unset fields.
     pub level: i32,

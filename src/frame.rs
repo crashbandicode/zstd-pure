@@ -31,6 +31,7 @@ pub struct DecodedFrame {
 /// and inspection without decoding the frame body — the analog of libzstd's
 /// `ZSTD_getFrameHeader` / `ZSTD_getFrameContentSize`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FrameHeader {
     /// Total bytes the header occupies (including the 4-byte magic when parsed
     /// via [`frame_header`]; header-only in the magicless case).

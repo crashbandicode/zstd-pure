@@ -169,6 +169,8 @@ impl<'a> ReverseBitReader<'a> {
 
     /// True once every meaningful bit has been consumed (the expected terminal
     /// state for a well-formed stream): `ptr` at the start and 64 bits taken.
+    /// Used only by the bit-reader's own tests.
+    #[cfg(test)]
     #[inline]
     pub fn finished(&self) -> bool {
         self.ptr == 0 && self.bits_consumed == 64

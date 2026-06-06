@@ -115,6 +115,7 @@ fn write_seek_table(out: &mut Vec<u8>, entries: &[(u32, u32, u32)], checksum: bo
 /// One frame's location in a seekable archive: where its compressed bytes sit,
 /// and what range of the logical (decompressed) output it produces.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct SeekFrame {
     /// Byte offset of the frame within the archive.
     pub compressed_offset: u64,

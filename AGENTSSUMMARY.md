@@ -21,6 +21,14 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
 **parallel seekable decode** (`decompress_seekable_parallel[_capped]`, ~3.4×/8thr).
 
 ## Recently landed (on origin/main)
+- **API surface tightened** (`wip/api-hygiene`, pre-publish): the internal decoder
+  primitives `bits`/`block`/`fse`/`huff`/`literals`/`sequences`/`xxhash` are now
+  private `mod`s (was `pub mod`) — the supported surface is the crate-root
+  re-exports plus `dict`/`encode`/`frame`/`seekable`/`streaming`/`io`. Removed
+  the dead `fse::read_dtable`, made the test-only `sequences::decode` /
+  `bits::finished` `#[cfg(test)]`. Added `#[non_exhaustive]` to `ZstdError`,
+  `FrameHeader`, `SeekFrame`, `CompressOptions` so new variants/fields/params stay
+  non-breaking. No external code referenced the now-private modules (verified).
 - **Trainer: no cross-sample segments** (`wip/trainer-boundary`): COVER now clamps
   the segment length to the largest sample and only scores/selects segment starts
   wholly inside one sample, so a trained segment can't contain a byte sequence

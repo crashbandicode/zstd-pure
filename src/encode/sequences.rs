@@ -364,7 +364,7 @@ pub fn write_sequences(out: &mut Vec<u8>, seqs: &[Seq], prev: &SeqCTables) -> Re
 /// sequence channel into a **structured dictionary**'s entropy section. Builds a
 /// table from `codes` when they form a real (≥ 2 distinct) alphabet, else falls
 /// back to the channel's predefined distribution (always valid). Read back by
-/// [`crate::fse::read_dtable`]; accepted by libzstd's dictionary loader. Unlike
+/// the decoder's FSE table reader; accepted by libzstd's dictionary loader. Unlike
 /// [`plan_channel`], a dictionary table is always a full FSE description — never
 /// RLE — so it can serve as a multi-symbol "previous" table for Repeat mode.
 fn write_dict_fse_table(

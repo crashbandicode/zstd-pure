@@ -186,13 +186,6 @@ pub fn build_dtable(norm: &[i16], max_symbol: usize, table_log: u32) -> Result<F
     Ok(FseDecodeTable { table_log, entries })
 }
 
-/// Convenience: read a table description and build the decode table.
-pub fn read_dtable(src: &[u8], max_log: u32) -> Result<(FseDecodeTable, usize)> {
-    let nc = read_ncount(src, max_log)?;
-    let dt = build_dtable(&nc.counts, nc.max_symbol, nc.table_log)?;
-    Ok((dt, nc.bytes_consumed))
-}
-
 /// A single FSE decode state (used by sequence decoding).
 #[derive(Debug, Clone, Copy)]
 pub struct FseDecoder {

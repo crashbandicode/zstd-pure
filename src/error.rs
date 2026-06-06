@@ -10,6 +10,7 @@ use thiserror::Error;
 
 /// An error decoding (or, later, encoding) a Zstandard stream.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ZstdError {
     /// Input ended before a structure could be fully read.
     #[error("zstd: unexpected end of input (need {needed} more byte(s) for {what})")]
