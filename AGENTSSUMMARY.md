@@ -21,6 +21,14 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
 **parallel seekable decode** (`decompress_seekable_parallel[_capped]`, ~3.4×/8thr).
 
 ## Recently landed (on origin/main)
+- **Trainer: no cross-sample segments** (`wip/trainer-boundary`): COVER now clamps
+  the segment length to the largest sample and only scores/selects segment starts
+  wholly inside one sample, so a trained segment can't contain a byte sequence
+  that straddles a sample boundary (which never occurred in any input). The
+  comment claiming this was already enforced is now actually true. Added a
+  boundary regression test and a `dictionary` fuzz target (parse arbitrary bytes
+  + bounded decode + trained-dict round-trip). Experimental trainer, dicts still
+  round-trip + stay ≤ the default.
 - **Decoder hardening, round 2** (`wip/harden2`, from an external review): made
   `decompress_with_dict` enforce a *total* cross-frame output cap (was per-frame,
   unlike `decompress_capped`); `decode_one` now caps blocks at the pledged

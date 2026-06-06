@@ -68,3 +68,10 @@ path = "fuzz_targets/parallel_roundtrip.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "dictionary"
+path = "fuzz_targets/dictionary.rs"
+test = false
+doc = false
+bench = false

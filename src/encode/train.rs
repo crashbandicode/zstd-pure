@@ -117,9 +117,28 @@ fn train_cover(samples: &[&[u8]], max_size: usize, k_req: usize, d: usize) -> Ve
         }
     }
 
-    let k = k_req.min(total).max(d);
+    // A segment must lie wholly within one sample — a window straddling a sample
+    // boundary would seed the dictionary with a byte sequence that never occurred
+    // in any input. Clamp the segment length to the largest sample, and below only
+    // score/select segment starts fully contained in a single sample.
+    let max_sample = samples.iter().map(|s| s.len()).max().unwrap_or(0);
+    let k = k_req.min(max_sample).max(d);
+    if total < k {
+        return Vec::new();
+    }
     let seg_dmers = k - d + 1; // dmer start positions inside one segment
     let last_start = total - k; // inclusive max segment start
+
+    // Which segment starts keep the whole `k`-byte window inside one sample.
+    let mut valid_seg = vec![false; last_start + 1];
+    for w in 0..samples.len() {
+        let (s, e) = (bounds[w], bounds[w + 1]);
+        if e >= s + k {
+            for slot in valid_seg.iter_mut().take(e - k + 1).skip(s) {
+                *slot = true;
+            }
+        }
+    }
 
     // Greedily pick the highest-coverage segment, then zero the freq of the
     // dmers it covers so the next pick adds new coverage rather than repeating.
@@ -140,10 +159,13 @@ fn train_cover(samples: &[&[u8]], max_size: usize, k_req: usize, d: usize) -> Ve
                 *c += 1;
             }
         }
-        let mut best_score = score;
+        // Seed `best` from start 0 only if that window stays inside one sample.
+        let mut best_score = if valid_seg[0] { score } else { 0 };
         let mut best_start = 0usize;
 
-        for start in 1..=last_start {
+        // Iterate `valid_seg` directly (start = its index) so the sliding window
+        // visits every position while we only *select* within-sample starts.
+        for (start, &seg_ok) in valid_seg.iter().enumerate().skip(1) {
             // Drop the dmer leaving on the left.
             let lo = start - 1;
             if valid[lo] {
@@ -166,7 +188,7 @@ fn train_cover(samples: &[&[u8]], max_size: usize, k_req: usize, d: usize) -> Ve
                 }
                 *c += 1;
             }
-            if score > best_score {
+            if seg_ok && score > best_score {
                 best_score = score;
                 best_start = start;
             }
@@ -373,6 +395,26 @@ mod tests {
         let refs: Vec<&[u8]> = samples.iter().map(|v| v.as_slice()).collect();
         let dict = train_dictionary(&refs, 4096);
         assert!(dict.windows(12).any(|w| w == b"alpha_shared"));
+    }
+
+    /// Selected segments stay within a single sample — a window straddling a
+    /// sample boundary would seed the dictionary with a byte pair occurring in no
+    /// input. `A` ends in 0x09 and `B` is a lone 0x0A, so the pair [0x09, 0x0A]
+    /// exists only across the boundary; with `max_size` forcing a single segment
+    /// (no concatenation join to confound it), it must never appear. Before the
+    /// fix, the segment length was clamped to the whole concatenation and the lone
+    /// segment spanned the boundary.
+    #[test]
+    fn segments_do_not_straddle_sample_boundaries() {
+        let mut a = vec![0x01u8; 50];
+        a.push(0x09);
+        let b = vec![0x0Au8];
+        let dict = train_dictionary(&[a.as_slice(), b.as_slice()], 8);
+        assert!(!dict.is_empty(), "expected a trained segment");
+        assert!(
+            !dict.windows(2).any(|w| w == [0x09, 0x0A]),
+            "dictionary contains the cross-boundary pair 0x09,0x0A: {dict:?}"
+        );
     }
 
     #[test]
