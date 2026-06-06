@@ -130,8 +130,17 @@ fn generate_seed_corpus() {
         &[0x28, 0xB5, 0x2F, 0xFD, 0x01, 0x00, 0x07],
     );
     write("decode", "0004-all-zeros.bin", &[0u8; 64]);
-    let real = compress(b"a real frame, then cut in half to truncate it", 9, true, true);
-    write("decode", "0005-truncated-real-frame.bin", &real[..real.len() / 2]);
+    let real = compress(
+        b"a real frame, then cut in half to truncate it",
+        9,
+        true,
+        true,
+    );
+    write(
+        "decode",
+        "0005-truncated-real-frame.bin",
+        &real[..real.len() / 2],
+    );
 
     // decode_diff/: valid frames both decoders must agree on.
     write(

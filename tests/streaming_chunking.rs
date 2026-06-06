@@ -111,8 +111,10 @@ fn streaming_decode_is_independent_of_read_size_libzstd() {
 #[test]
 fn streaming_decode_is_independent_of_read_size_magicless() {
     for (name, data) in profiles() {
-        let frame = compress_with_options(&data, &CompressOptions::new(9).checksum(true).magic(false));
-        let one_shot = decompress_magicless_bytes(&frame, data.len() + 64).expect("magicless one-shot");
+        let frame =
+            compress_with_options(&data, &CompressOptions::new(9).checksum(true).magic(false));
+        let one_shot =
+            decompress_magicless_bytes(&frame, data.len() + 64).expect("magicless one-shot");
         assert_eq!(one_shot, data, "[{name}] magicless one-shot sanity");
         for &rs in &READ_SIZES {
             let dec = StreamingDecoder::new_magicless(&frame).expect("construct magicless decoder");

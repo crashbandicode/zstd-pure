@@ -27,7 +27,8 @@ fn block_and_literal_types(frame: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let mut pos = h.header_len;
     let (mut block_types, mut literal_types) = (Vec::new(), Vec::new());
     loop {
-        let v = (frame[pos] as u32) | ((frame[pos + 1] as u32) << 8) | ((frame[pos + 2] as u32) << 16);
+        let v =
+            (frame[pos] as u32) | ((frame[pos + 1] as u32) << 8) | ((frame[pos + 2] as u32) << 16);
         let last = (v & 1) != 0;
         let btype = ((v >> 1) & 3) as u8;
         let bsize = (v >> 3) as usize;
@@ -70,7 +71,11 @@ fn golden_frames_decode_byte_identically() {
         let expected = fs::read(zst.with_extension("expected"))
             .unwrap_or_else(|_| panic!("missing {stem}.expected"));
 
-        assert_eq!(decompress(&frame).unwrap(), expected, "[{stem}] one-shot decode");
+        assert_eq!(
+            decompress(&frame).unwrap(),
+            expected,
+            "[{stem}] one-shot decode"
+        );
 
         let mut dec = StreamingDecoder::new(&frame).expect("streaming construct");
         let mut streamed = Vec::new();
