@@ -20,7 +20,9 @@ use std::io::Read;
 
 use proptest::prelude::*;
 
-use zstd_pure::{compress as our_compress, decompress, decompress_capped, StreamingDecoder};
+use zstd_pure::{
+    compress as our_compress, decompress, decompress_capped, StreamingDecoder, ZstdError,
+};
 
 /// Output ceiling for the never-panic probes — bounds memory if a corrupt
 /// header claims a huge size, so a "panic" can't hide behind an OOM kill.
@@ -32,6 +34,20 @@ fn drain_streaming(comp: &[u8]) {
     if let Ok(mut dec) = StreamingDecoder::new(comp) {
         let mut sink = Vec::new();
         let _ = dec.read_to_end(&mut sink);
+    }
+}
+
+/// Like `drain_streaming`, but reads a few bytes at a time — the hostile
+/// read-granularity path: a corrupt frame must never panic even when the caller
+/// drains it one tiny buffer at a time (any read error is terminal here).
+fn drain_streaming_chunked(comp: &[u8], read_size: usize) {
+    if let Ok(mut dec) = StreamingDecoder::new(comp) {
+        let mut buf = vec![0u8; read_size.max(1)];
+        while let Ok(n) = dec.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+        }
     }
 }
 
@@ -96,5 +112,81 @@ proptest! {
         let comp = zstd::bulk::compress(&data, level).expect("libzstd compress");
         let got = decompress(&comp).expect("our decoder must decode a libzstd frame");
         prop_assert_eq!(got, data);
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(192))]
+
+    /// Cap monotonicity: if a frame decodes under a ceiling of `n`, it decodes
+    /// *identically* under any larger ceiling — more headroom never changes the
+    /// result or flips success into failure. (Locks the bomb-cap semantics: the
+    /// cap is a pure safety bound, not part of the decode.)
+    #[test]
+    fn cap_is_monotonic(
+        data in prop::collection::vec(any::<u8>(), 0..4096),
+        level in 1i32..=19,
+        n in 0usize..6000,
+        k in 0usize..6000,
+    ) {
+        let frame = our_compress(&data, level, false, true);
+        if let Ok(at_n) = decompress_capped(&frame, n) {
+            let larger = decompress_capped(&frame, n.saturating_add(k));
+            prop_assert!(larger.is_ok(), "a larger cap must still succeed");
+            prop_assert_eq!(at_n, larger.unwrap());
+        }
+    }
+
+    /// Insufficient cap: a frame whose true output is L > 0 must be refused at a
+    /// ceiling of L-1 (with the typed OutputTooLarge), and accepted at exactly L.
+    #[test]
+    fn cap_one_below_true_size_is_refused(
+        data in prop::collection::vec(any::<u8>(), 1..4096),
+        level in 1i32..=19,
+    ) {
+        let frame = our_compress(&data, level, false, true);
+        let l = data.len();
+        let refused = decompress_capped(&frame, l - 1);
+        prop_assert!(
+            matches!(refused, Err(ZstdError::OutputTooLarge { .. })),
+            "cap L-1 must trip OutputTooLarge, got {refused:?}"
+        );
+        prop_assert_eq!(decompress_capped(&frame, l).unwrap(), data);
+    }
+
+    /// A content checksum means a corrupted frame can never *silently* return wrong
+    /// data: a byte flip anywhere makes decode either error or return the exact
+    /// original bytes — never some other plausible-looking output.
+    #[test]
+    fn checksum_frame_never_returns_wrong_data(
+        data in prop::collection::vec(any::<u8>(), 0..4096),
+        at in any::<u16>(),
+    ) {
+        let mut frame = our_compress(&data, 9, true, true);
+        let idx = (at as usize) % frame.len(); // our_compress never yields an empty frame
+        frame[idx] ^= 0xFF;
+        if let Ok(out) = decompress_capped(&frame, CAP) {
+            prop_assert_eq!(out, data.clone());
+        }
+    }
+
+    /// Hostile read granularity: a mutated frame drained a few bytes at a time must
+    /// still only ever Ok/Err, never panic (the streaming complement to the
+    /// tiny-read determinism test on *valid* frames).
+    #[test]
+    fn mutated_frame_never_panics_at_tiny_reads(
+        payload in prop::collection::vec(any::<u8>(), 0..1024),
+        flips in prop::collection::vec(any::<u16>(), 0..8),
+        read_size in 1usize..8,
+    ) {
+        let mut frame = zstd::bulk::compress(&payload, 9).expect("libzstd compress");
+        for at in flips {
+            if frame.is_empty() {
+                break;
+            }
+            let idx = (at as usize) % frame.len();
+            frame[idx] ^= 0x55;
+        }
+        drain_streaming_chunked(&frame, read_size);
     }
 }
