@@ -163,7 +163,12 @@ impl SeekTable {
                 what: "seek table",
                 detail: "frame count overflow".into(),
             })?;
-        let frame_total = SKIPPABLE_HEADER + content;
+        let frame_total = SKIPPABLE_HEADER
+            .checked_add(content)
+            .ok_or(ZstdError::Invalid {
+                what: "seek table",
+                detail: "table size overflow".into(),
+            })?;
         if frame_total > end {
             return Err(ZstdError::Invalid {
                 what: "seek table",
@@ -184,7 +189,17 @@ impl SeekTable {
             });
         }
 
-        let mut frames = Vec::with_capacity(num_frames);
+        // `num_frames` is already bounded by the `frame_total > end` check above
+        // (the table must physically fit the archive, so num_frames <= end/8), so
+        // this allocation is proportional to the input — but reserve fallibly so a
+        // memory-constrained / bare-metal host gets an `Err` rather than an abort.
+        let mut frames = Vec::new();
+        frames
+            .try_reserve(num_frames)
+            .map_err(|_| ZstdError::Invalid {
+                what: "seek table",
+                detail: "too many entries to allocate".into(),
+            })?;
         let mut p = skip_start + SKIPPABLE_HEADER;
         let mut comp_off = 0u64;
         let mut decomp_off = 0u64;

@@ -1,0 +1,28 @@
+name: Release check
+
+# Manual / gated only — never runs on push or PR. Run this before tagging a
+# release to close the packaging gap: the regular `CI` workflow already covers
+# fmt/clippy/docs/tests/no_std/MSRV/bare-metal/fuzz, so this adds the
+# release-time checks (release-profile tests + `cargo package` / `publish
+# --dry-run`) that confirm the crate is publishable as-is.
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release-check:
+    name: release tests + package + publish dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: test (release, all features)
+        run: cargo test --release --all-features
+      - name: doc tests (all features)
+        run: cargo test --doc --all-features
+      - name: package
+        run: cargo package
+      - name: publish (dry run)
+        run: cargo publish --dry-run

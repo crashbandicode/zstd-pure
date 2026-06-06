@@ -40,8 +40,12 @@ breaking changes).
   libzstd's "Dictionary mismatch". Applies to `decompress_with_dict` and
   `StreamingDecoder::with_dict`; a zero frame id still accepts any dictionary.
 - Use checked arithmetic on the remaining hostile-input size computations
-  (skippable-frame length, block-body extent, streaming window size) so the public
-  decode paths are panic-free on 32-bit / bare-metal targets, not just 64-bit.
+  (skippable-frame length, block-body extent, streaming window size, seek-table
+  size sum) so the public decode paths are panic-free on 32-bit / bare-metal
+  targets, not just 64-bit.
+- `SeekTable::parse` reserves its entry storage fallibly (`try_reserve`); the
+  frame count is already bounded by the archive length, so an oversized table now
+  yields an `Err` rather than an allocation abort on a memory-constrained host.
 - Seekable random access (`decompress_seekable_frame`) uses checked offset
   arithmetic and requires the decoded length to match the seek table exactly.
 

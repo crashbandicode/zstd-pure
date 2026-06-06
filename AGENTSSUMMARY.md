@@ -11,7 +11,7 @@ _Last updated: 2026-06-06._
   0.65×, records 0.84× @L9, 3x90k, mixed/wiki at high levels).
 - **Speed:** decode **~3×** slower, encode **~2–4×** (6× at L19). This is the
   safe-Rust/no-SIMD floor; the `unsafe` ceiling was measured at ~0% extra (the
-  FSE fixed-array elision already banked it) — see `PERF_NOTES.md`.
+  FSE fixed-array elision already banked it), so `forbid(unsafe_code)` stays.
 - **100% safe Rust** (`forbid(unsafe_code)`), no_std+alloc, only `thiserror`.
 
 ## Capabilities (format- & feature-complete)
@@ -21,6 +21,16 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
 **parallel seekable decode** (`decompress_seekable_parallel[_capped]`, ~3.4×/8thr).
 
 ## Recently landed (on origin/main)
+- **Pre-release polish** (`wip/prerelease-polish`, from an external review):
+  `SeekTable::parse` reserves entries with `try_reserve` (graceful `Err` instead of
+  an alloc abort; the count is already archive-bounded) and uses `checked_add` for
+  the table-size sum; a `workflow_dispatch`-gated `release-check.yml`
+  (release-profile tests + `cargo package` / `publish --dry-run`) closes the
+  packaging gap; and AGENTSSUMMARY no longer points public readers at gitignored
+  journals. (Declined as overstated/out-of-scope: a `parse_capped` API — the
+  seek-table allocation is already bounded to ~5× the archive; cargo-hack
+  powerset — CI already covers the meaningful feature combos; the boolean
+  `compress(...)` ergonomics — breaking + encoder-API territory.)
 - **Dictionary-id conformance + 32-bit hardening** (`wip/dict-id-conformance`, from
   an external review): a raw-content dict (id 0) no longer satisfies a frame naming
   a *nonzero* dictionary id — it's rejected up front like libzstd's "Dictionary
@@ -122,7 +132,7 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
   `Parsed.alts`). **Silesia sizeΔ vs libzstd: L16 +2.7%→−0.4%, L17 +1.8%→−0.1%,
   L18 +2.6%→+0.7%, L19 +2.4%→+0.5%** — L16/L17 now *beat* libzstd; zero regressions
   (guard); non-opt levels byte-identical. Cost: a 2nd DP over the richer stream at
-  L16–22 (collection is shared). See `COST_MODEL_NOTES.md`.
+  L16–22 (collection is shared).
 - **Gain-based btlazy2 match selection** (L13–15): the lazy parse now picks chain
   vs binary-tree match by *gain* (`len*4 - offset_bits`) instead of a fixed
   `target_length` cutoff, so the tree's longer far matches win when worth it.
@@ -175,7 +185,7 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
   streaming decoder now enforces the same cap as the one-shot path.)
   Crate-level docs and the old `nx-layout-toolbox` error-module reference were
   refreshed to match the standalone `zstd-pure` surface.
-## Tried & rejected (don't redo without a new angle — see PERF_NOTES)
+## Tried & rejected (don't redo without a new angle)
 - `unsafe`/`get_unchecked` (≈0% after the safe elision) — discarded.
 - Huffman fixed-array elision (ILP already hides it); per-block literal-buffer
   reuse (zeroing was free) — flat, reverted.
@@ -201,7 +211,7 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
   fast tier — see "Tried & rejected". The remaining mid-band lever would be a SIMD
   row-hash finder (better chain candidates without the full tree's cost).
 - Parallel agent: competitive benchmark vs other pure-Rust zstd crates + code
-  coverage/badge + coverage-driven tests (see `HANDOFF.md`).
+  coverage/badge + coverage-driven tests.
 - Deferred: v0.1.0 release (CHANGELOG needs refreshing to current `main` first).
 - COVER "stable" follow-ups: epoch-partitioned segment selection + a dict fuzz target.
 
