@@ -5,9 +5,9 @@
 ![unsafe](https://img.shields.io/badge/unsafe-forbidden-success)
 [![Coverage](https://crashbandicode.github.io/zstd-pure/coverage/badge.svg)](https://crashbandicode.github.io/zstd-pure/coverage/)
 
-A from-scratch [Zstandard][zstd] ([RFC 8878]) **decoder and encoder**, written
-entirely in safe Rust from the specification — no GPL code, and **no libzstd at
-runtime**. The only runtime dependency is [`thiserror`]; libzstd (the `zstd`
+A from-scratch [Zstandard][zstd] ([RFC 8878], with [RFC 9659] window sizing)
+**decoder and encoder**, written entirely in safe Rust from the specification —
+no GPL code, and **no libzstd at runtime**. The only runtime dependency is [`thiserror`]; libzstd (the `zstd`
 crate) is a dev-only test/benchmark oracle. The crate is
 `#![forbid(unsafe_code)]` and runs on `no_std` (with `alloc`).
 
@@ -18,6 +18,7 @@ It was built bottom-up and validated against libzstd and real Nintendo TotK
 
 [zstd]: https://facebook.github.io/zstd/
 [RFC 8878]: https://www.rfc-editor.org/rfc/rfc8878
+[RFC 9659]: https://www.rfc-editor.org/rfc/rfc9659
 [`thiserror`]: https://crates.io/crates/thiserror
 
 ## Status & stability
