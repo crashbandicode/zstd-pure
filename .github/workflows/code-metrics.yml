@@ -1,0 +1,31 @@
+name: Code metrics
+
+# Informational only — never gates the build. Runs Mozilla's rust-code-analysis
+# over src/ via scripts/code_metrics.sh and posts a complexity / maintainability
+# summary to the run summary + uploads it as an artifact. Uses the prebuilt
+# release binary (the crates.io CLI doesn't build on current Rust), so no Rust
+# toolchain is needed — just curl + python3 (both on the runner).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  code-metrics:
+    name: rust-code-analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: code metrics (rust-code-analysis)
+        run: bash scripts/code_metrics.sh | tee code-metrics.md
+      - name: post to run summary
+        run: cat code-metrics.md >> "$GITHUB_STEP_SUMMARY"
+      - name: upload metrics
+        uses: actions/upload-artifact@v7
+        with:
+          name: code-metrics
+          path: code-metrics.md

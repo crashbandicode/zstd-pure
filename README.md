@@ -209,6 +209,16 @@ See [`examples/safe_decompress.rs`](examples/safe_decompress.rs)
   `ZSTD_PURE_CORPUS=~/fixtures/silesia/raw cargo test --release real_corpus -- --ignored --nocapture`
   (knobs: `ZSTD_PURE_CORPUS_LEVELS`, `ZSTD_PURE_CORPUS_MAX_MB`, `ZSTD_PURE_CORPUS_LONG`).
 - **Coverage** (`cargo-llvm-cov`, informational): `cargo llvm-cov --release --summary-only --all-features -- --skip compress_roundtrips_across_levels --skip round_trips_three_ways_across_levels --skip frame_is_independent_of_write_chunk_size --skip multi_block_stream_compresses_and_round_trips --skip our_frames_round_trip_through_the_streaming_decoder`. The skipped matrix tests are still run by normal CI; coverage keeps them out only to keep the report bounded. Use `--html` instead of `--summary-only` when hunting uncovered surfaces. The [Coverage workflow](.github/workflows/coverage.yml) runs this on every `main` push, prints the table to the run summary, uploads `lcov.info`/`coverage-summary.txt` as artifacts, and deploys the report (badge from `scripts/coverage_badge.sh` + the summary table) to [GitHub Pages at `/coverage/`](https://crashbandicode.github.io/zstd-pure/coverage/) — entirely within GitHub Actions, no external coverage service and no extra branch.
+- **Code metrics** (`rust-code-analysis`, informational): `scripts/code_metrics.sh`
+  runs Mozilla's [rust-code-analysis] over `src/` and prints a Markdown summary —
+  per-file and per-function cyclomatic & cognitive complexity, SLOC, and the
+  maintainability index, with the complexity hot-spots surfaced. It uses the
+  prebuilt release binary (the crates.io CLI doesn't build on current Rust),
+  cached under `target/tools/`. The [Code metrics workflow](.github/workflows/code-metrics.yml)
+  runs it on every push / PR and posts the table to the run summary (never gates
+  the build).
+
+[rust-code-analysis]: https://github.com/mozilla/rust-code-analysis
 
 ## Benchmarks
 

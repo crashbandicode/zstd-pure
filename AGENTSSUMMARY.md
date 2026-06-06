@@ -21,6 +21,13 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
 **parallel seekable decode** (`decompress_seekable_parallel[_capped]`, ~3.4×/8thr).
 
 ## Recently landed (on origin/main)
+- **Code-metrics tooling** (`wip/code-metrics`): `scripts/code_metrics.sh` + an
+  informational `Code metrics` workflow run Mozilla's `rust-code-analysis` over
+  `src/` (per-file/function cyclomatic & cognitive complexity, SLOC, MI) and post
+  the summary to the run summary — never gating. The crates.io CLI (0.0.25) fails
+  to build on current stable, so it uses the prebuilt release binary cached under
+  `target/tools/`. Also surfaced RFC 9659 in the README headline + crate
+  description (`wip/headline-rfc`).
 - **Pre-release polish** (`wip/prerelease-polish`, from an external review):
   `SeekTable::parse` reserves entries with `try_reserve` (graceful `Err` instead of
   an alloc abort; the count is already archive-bounded) and uses `checked_add` for

@@ -54,6 +54,11 @@ breaking changes).
   change (byte-identical, verified by the libzstd corpus differential).
 - Coverage is reported entirely from GitHub Actions (badge published to GitHub
   Pages; Codecov dropped); CI actions moved to Node 24 runtimes.
+- Code-metrics tooling: `scripts/code_metrics.sh` + an informational Code-metrics
+  workflow run Mozilla's `rust-code-analysis` over `src/` (per-file/function
+  cyclomatic & cognitive complexity, SLOC, maintainability index) and post the
+  summary to the run summary — never gating. Uses the prebuilt release binary
+  (the crates.io CLI doesn't build on current Rust).
 
 ### Testing
 - Validation-hardening pass (test-only; no library change):
