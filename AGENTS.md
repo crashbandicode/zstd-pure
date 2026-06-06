@@ -117,12 +117,21 @@ ironclad. For any public API, that means:
 Only with all of the above is it safe to drop the experimental caveat.
 
 ## 6. Layout & validation map
-- Decoder: `bits`, `fse`, `huff`, `literals`, `sequences`, `block`, `frame`,
-  `streaming`, `seekable`, `dict`, `xxhash`.
+- Decoder — public modules: `frame`, `streaming`, `seekable`, `dict`, `io`. The
+  rest are private internals (`mod`, not `pub mod`): `bits`, `block`, `fse`,
+  `huff`, `literals`, `sequences`, `xxhash`, `error`. The supported surface is
+  those public modules plus the crate-root re-exports.
 - Encoder: `encode/{lz,sequences,huff,fse,bitstream,block,frame,params,parallel,
-  stream,ldm,dict}`.
-- Tests: in-module `#[cfg(test)]` + `tests/corpus.rs` (libzstd differential) +
-  `tests/real_corpus.rs` (`#[ignore]`, full Silesia both ways via
-  `ZSTD_PURE_CORPUS`) + `tests/proptests.rs`. Fuzz targets in `fuzz/`.
-- Journals (gitignored or root): `PERF_NOTES.md` (perf campaign), `HANDOFF.md`,
-  `COST_MODEL_NOTES.md`, `CHANGELOG.md`.
+  stream,ldm,options,train}` (`train` is the experimental COVER trainer).
+- Tests: in-module `#[cfg(test)]` + the `tests/` integration suite —
+  `corpus.rs` (libzstd differential), `real_corpus.rs` (`#[ignore]`, full Silesia
+  both ways via `ZSTD_PURE_CORPUS`), `proptest.rs` (shrinking properties),
+  `public_api_edges.rs`, `malformed.rs` (typed-error corpus),
+  `encoder_invariants.rs`, `streaming_chunking.rs`, `rfc9659.rs`, `golden_frames.rs`
+  (+ `tests/fixtures/frames/`), and `regressions.rs` (+ `tests/regressions/`
+  fuzz-regression corpus). Eight fuzz targets in `fuzz/`: `decode`, `decode_diff`,
+  `encode_roundtrip`, `streaming_roundtrip`, `seekable_roundtrip`,
+  `parallel_roundtrip`, `dictionary`, `seekable_decode`.
+- Journals (gitignored): `PERF_NOTES.md` (perf campaign), `HANDOFF.md`,
+  `COST_MODEL_NOTES.md`. Tracked root docs: `CHANGELOG.md`, `README.md`,
+  `SECURITY.md`, `BENCHMARKS.md`, `COMPARISON.md`, `AGENTSSUMMARY.md`.

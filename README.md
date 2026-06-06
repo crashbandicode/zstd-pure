@@ -29,7 +29,8 @@ property tests, eight cargo-fuzz targets, and a differential against libzstd. Th
 every encoder output is validated **both ways**
 (`libzstd.decompress(compress(x)) == x` *and* `decompress(compress(x)) == x`).
 
-The dictionary **trainers** (`train_dictionary` / `train_dictionary_structured`)
+The dictionary **trainers** (`train_dictionary` / `train_dictionary_optimized` /
+`train_dictionary_structured`)
 are flagged **experimental** in their rustdoc — they produce correct,
 ratio-improving dictionaries, but the underlying COVER is simplified, so output
 *quality* is below libzstd's `ZDICT` and the produced bytes may change as it
@@ -168,9 +169,11 @@ Skippable frames are skipped on decode (their payload isn't surfaced).
 
 ## Memory & allocation
 
-- **One-shot `decompress`** allocates the full output. Use
-  `decompress_capped(frame, max)` to bound it — it errors on a frame that would
-  exceed `max`, the decompression-bomb defense.
+- **One-shot `decompress`** allocates the full output, under a 256 MiB default
+  ceiling. Use `decompress_capped(frame, max)` to choose a tighter bound — it
+  errors on a frame that would exceed `max`, the decompression-bomb defense.
+  (`decompress_http` applies the RFC 9659 8 MiB-window profile for untrusted HTTP
+  `zstd` bodies.)
 - **`StreamingDecoder`** keeps memory bounded to ~`window + one block`,
   independent of the logical output size. `StreamingDecoder::with_options(..,
   window_log_max)` rejects a frame declaring a larger window than you permit
