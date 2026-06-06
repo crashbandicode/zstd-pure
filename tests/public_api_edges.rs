@@ -271,3 +271,63 @@ fn structured_dictionary_respects_max_size() {
         );
     }
 }
+
+/// A frame that names a nonzero dictionary id must be decoded with that exact
+/// dictionary; a raw-content dictionary (id 0) cannot satisfy it — matching
+/// libzstd, which returns "Dictionary mismatch" for the same input. (Previously
+/// the id check exempted raw dicts, so this was accepted and then failed later
+/// with a misleading entropy-table error.)
+#[test]
+fn raw_dictionary_does_not_satisfy_nonzero_frame_dictionary_id() {
+    let samples: Vec<Vec<u8>> = (0..800u32)
+        .map(|i| format!("record {{id:{i}, tag:\"shared-prefix-{}\"}}", i % 23).into_bytes())
+        .collect();
+    let blob = zstd::dict::from_samples(&samples, 8 * 1024).expect("train dict");
+    let structured = Dictionary::parse(&blob).expect("parse dict");
+    assert_ne!(structured.id(), 0, "a trained dict carries a nonzero id");
+
+    // libzstd embeds the dict id when compressing with the structured dict.
+    let data = b"record {id:7, tag:\"shared-prefix-7\"} and more body ".repeat(8);
+    let mut c = zstd::bulk::Compressor::with_dictionary(6, &blob).expect("compressor");
+    let frame = c.compress(&data).expect("compress with dict");
+    assert_eq!(frame_header(&frame).unwrap().dictionary_id, structured.id());
+
+    // A raw dict of the same content (id 0) must be refused, not decoded.
+    let raw = Dictionary::raw(structured.content());
+    assert!(matches!(
+        decompress_with_dict(&frame, &raw, data.len() + 64),
+        Err(ZstdError::Dictionary(_))
+    ));
+    // The matching structured dict still decodes it.
+    assert_eq!(
+        decompress_with_dict(&frame, &structured, data.len() + 64).unwrap(),
+        data
+    );
+}
+
+/// The same dictionary-id contract through `StreamingDecoder::with_dict`: a raw
+/// dict is rejected at construction for a frame naming a nonzero id.
+#[test]
+fn streaming_raw_dictionary_does_not_satisfy_nonzero_frame_dictionary_id() {
+    let samples: Vec<Vec<u8>> = (0..800u32)
+        .map(|i| format!("entry {i}: shared-token-{}", i % 19).into_bytes())
+        .collect();
+    let blob = zstd::dict::from_samples(&samples, 8 * 1024).expect("train dict");
+    let structured = Dictionary::parse(&blob).expect("parse dict");
+    assert_ne!(structured.id(), 0);
+
+    let data = b"entry 5: shared-token-5 plus a longer tail ".repeat(8);
+    let mut c = zstd::bulk::Compressor::with_dictionary(6, &blob).expect("compressor");
+    let frame = c.compress(&data).expect("compress");
+
+    let raw = Dictionary::raw(structured.content());
+    assert!(matches!(
+        StreamingDecoder::with_dict(&frame, &raw),
+        Err(ZstdError::Dictionary(_))
+    ));
+    // The matching dict constructs and decodes.
+    let mut dec = StreamingDecoder::with_dict(&frame, &structured).expect("matching dict");
+    let mut out = Vec::new();
+    dec.read_to_end(&mut out).expect("read");
+    assert_eq!(out, data);
+}

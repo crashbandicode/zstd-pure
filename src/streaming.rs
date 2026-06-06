@@ -95,6 +95,12 @@ impl<'a> StreamingDecoder<'a> {
                 ),
             });
         }
+        // The frame passed the window ceiling; convert to `usize` explicitly so a
+        // caller-raised `window_log_max` can't silently truncate on a 32-bit host.
+        let window_size = usize::try_from(header.window_size).map_err(|_| ZstdError::Invalid {
+            what: "window size",
+            detail: "window size does not fit usize".into(),
+        })?;
 
         let mut state = BlockState {
             out: Vec::new(),
@@ -105,7 +111,7 @@ impl<'a> StreamingDecoder<'a> {
             // Per-block regenerated size is still capped at Block_Maximum_Size
             // (`decode_compressed` enforces it against `block_max`), so a single
             // hostile block can't balloon the buffer before the next eviction.
-            block_max: header.window_size.min(MAX_BLOCK_SIZE as u64) as usize,
+            block_max: window_size.min(MAX_BLOCK_SIZE),
             huff: None,
             seq: SeqTables::default(),
             rep: [1, 4, 8],
@@ -113,7 +119,10 @@ impl<'a> StreamingDecoder<'a> {
         let mut read_off = 0usize;
 
         if let Some(d) = dict {
-            if header.dictionary_id != 0 && d.id() != 0 && header.dictionary_id != d.id() {
+            // A nonzero frame dictionary id requires that exact dictionary; a
+            // raw-content dict (id 0) can't satisfy it (matches libzstd). See the
+            // same check in `frame::decode_frame`.
+            if header.dictionary_id != 0 && header.dictionary_id != d.id() {
                 return Err(ZstdError::Dictionary(format!(
                     "frame references dictionary id {} but dictionary is id {}",
                     header.dictionary_id,
@@ -133,7 +142,7 @@ impl<'a> StreamingDecoder<'a> {
         Ok(StreamingDecoder {
             src,
             pos: header.header_len,
-            window_size: header.window_size as usize,
+            window_size,
             state,
             read_off,
             last_done: false,

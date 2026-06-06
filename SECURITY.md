@@ -27,10 +27,14 @@ frames). The safeguards:
 - **No `unsafe`.** The crate is `#![forbid(unsafe_code)]` — 100 % safe Rust, so it
   cannot contain memory-unsafety / undefined behavior. Out-of-bounds access is a
   deterministic panic, never UB.
-- **Fuzzed to never panic or OOM.** The `decode` and `decode_diff` cargo-fuzz
-  targets feed arbitrary and mutated-valid frames (one-shot + streaming, magic +
-  magicless) and require the decoder to only ever return `Ok`/`Err` — never panic
-  or exhaust memory — under a 64 MiB output cap.
+- **Fuzzed to never panic or OOM.** The decoder surface is fuzzed through `decode`
+  and `decode_diff` (arbitrary + mutated-valid frames, one-shot + streaming, magic +
+  magicless; `decode_diff` also requires byte-for-byte agreement with libzstd on any
+  frame both accept), `dictionary` (untrusted dictionary parse + bounded dict
+  decode), and `seekable_decode` (random-access + parallel decode of hostile
+  seekable archives); `streaming_roundtrip` and `seekable_roundtrip` exercise the
+  decode paths as well. Every target requires the decoder to only ever return
+  `Ok`/`Err` — never panic or exhaust memory — under an output cap.
 - **Decompression bombs.** `decompress_capped(frame, max)` refuses a frame whose
   output would exceed `max` (it does not allocate the bomb first); `decompress`
   applies a 256 MiB default ceiling.

@@ -24,7 +24,7 @@ It was built bottom-up and validated against libzstd and real Nintendo TotK
 
 The **decoder** is at ecosystem parity (multi-frame, magicless, dictionaries,
 streaming/bounded-memory, frame inspection) and hardened by a corpus matrix,
-property tests, six cargo-fuzz targets, and a differential against libzstd. The
+property tests, eight cargo-fuzz targets, and a differential against libzstd. The
 **encoder** produces RFC 8878 frames that libzstd decodes across all levels;
 every encoder output is validated **both ways**
 (`libzstd.decompress(compress(x)) == x` *and* `decompress(compress(x)) == x`).
@@ -194,8 +194,11 @@ See [`examples/safe_decompress.rs`](examples/safe_decompress.rs)
   differential requiring our decoder and libzstd to agree on any frame *both*
   accept), `encode_roundtrip`, `streaming_roundtrip` (`StreamingEncoder` over
   arbitrary input × chunkings, plain + LDM), `parallel_roundtrip`
-  (`compress_parallel` output round-trips and decodes under libzstd), and
-  `seekable_roundtrip` (the seek-table parser never panics + archive round-trip).
+  (`compress_parallel` output round-trips and decodes under libzstd),
+  `seekable_roundtrip` (the seek-table parser never panics + archive round-trip),
+  `dictionary` (arbitrary bytes parsed as a dictionary + bounded decode +
+  trained-dict round-trip), and `seekable_decode` (random-access + parallel decode
+  on hostile archives stay bounded and never panic).
   Seed `fuzz/corpus/<target>/` for depth.
 - **Fixture-gated, off by default** (`#[ignore]`): `tests/real_corpus.rs` walks
   `$ZSTD_PURE_CORPUS` and round-trips every file both ways across levels, e.g.

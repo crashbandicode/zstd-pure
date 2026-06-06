@@ -21,6 +21,15 @@ parallel encode (`compress_parallel`); LDM (`compress_long`); seekable format +
 **parallel seekable decode** (`decompress_seekable_parallel[_capped]`, ~3.4×/8thr).
 
 ## Recently landed (on origin/main)
+- **Dictionary-id conformance + 32-bit hardening** (`wip/dict-id-conformance`, from
+  an external review): a raw-content dict (id 0) no longer satisfies a frame naming
+  a *nonzero* dictionary id — it's rejected up front like libzstd's "Dictionary
+  mismatch" (was: accepted, then failed later with a misleading entropy error), in
+  both `decompress_with_dict` and `StreamingDecoder::with_dict`. Plus checked
+  arithmetic on the last hostile-input size math (skippable length, block-body
+  extent, streaming window→usize) for panic-free decode on 32-bit/bare-metal. Docs:
+  README/SECURITY fuzz-target count fixed (six→eight; `dictionary`/`seekable_decode`
+  listed). Decode-side only; no encoder change.
 - **RFC 9659 (HTTP `zstd` window sizing)** (`wip/rfc9659`): added `decompress_http`
   (+ `HTTP_MAX_WINDOW_SIZE`), a content-coding decode profile that rejects frames
   requiring `Window_Size` > 8 MiB and caps total output (untrusted HTTP bodies),

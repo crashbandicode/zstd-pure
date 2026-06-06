@@ -136,10 +136,21 @@ impl BlockState {
                 detail: format!("block {} exceeds max {}", header.block_size, self.block_max),
             });
         }
-        let mut pos = pos + 3;
+        // Bounded in practice (block_size <= 128 KiB, pos <= src.len()), but use
+        // checked addition so the public decode path is provably panic-free on a
+        // 32-bit host even for a hostile near-`usize::MAX` input.
+        let mut pos = pos.checked_add(3).ok_or(ZstdError::Invalid {
+            what: "block header",
+            detail: "block position overflows usize".into(),
+        })?;
         match header.block_type {
             0 => {
-                let end = pos + header.block_size;
+                let end = pos
+                    .checked_add(header.block_size)
+                    .ok_or(ZstdError::Invalid {
+                        what: "block size",
+                        detail: "block extends past addressable input".into(),
+                    })?;
                 if src.len() < end {
                     return Err(ZstdError::Truncated {
                         what: "raw block body",
@@ -160,7 +171,12 @@ impl BlockState {
                 pos += 1;
             }
             2 => {
-                let end = pos + header.block_size;
+                let end = pos
+                    .checked_add(header.block_size)
+                    .ok_or(ZstdError::Invalid {
+                        what: "block size",
+                        detail: "block extends past addressable input".into(),
+                    })?;
                 if src.len() < end {
                     return Err(ZstdError::Truncated {
                         what: "compressed block body",

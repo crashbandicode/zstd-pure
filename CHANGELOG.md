@@ -35,6 +35,13 @@ breaking changes).
   multi-frame stream (previously applied per frame).
 - Reject a frame that references a dictionary id when no matching dictionary is
   supplied (rather than decoding against missing history).
+- Reject a raw-content dictionary (id 0) for a frame that names a *nonzero*
+  dictionary id — it can't prove it is the referenced dictionary, matching
+  libzstd's "Dictionary mismatch". Applies to `decompress_with_dict` and
+  `StreamingDecoder::with_dict`; a zero frame id still accepts any dictionary.
+- Use checked arithmetic on the remaining hostile-input size computations
+  (skippable-frame length, block-body extent, streaming window size) so the public
+  decode paths are panic-free on 32-bit / bare-metal targets, not just 64-bit.
 - Seekable random access (`decompress_seekable_frame`) uses checked offset
   arithmetic and requires the decoded length to match the seek table exactly.
 

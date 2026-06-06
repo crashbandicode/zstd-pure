@@ -149,6 +149,16 @@ fn structured_dictionary_header_without_tables_errors() {
     assert!(Dictionary::parse(&bytes).is_err());
 }
 
+#[test]
+fn skippable_frame_with_huge_length_errors_not_panics() {
+    // Skippable magic + a u32::MAX length with no body. On 64-bit this is a
+    // Truncated error; on a 32-bit target the checked `8 + len` trips first. Either
+    // way it must return Err, never panic or wrap (the no_std/bare-metal path).
+    let mut frame = 0x184D_2A50u32.to_le_bytes().to_vec();
+    frame.extend_from_slice(&u32::MAX.to_le_bytes());
+    assert!(decompress(&frame).is_err());
+}
+
 // ---- Seekable --------------------------------------------------------------
 
 #[test]

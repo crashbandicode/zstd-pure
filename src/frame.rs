@@ -215,7 +215,13 @@ fn decode_frame(
                 });
             }
             let len = u32::from_le_bytes([src[4], src[5], src[6], src[7]]) as usize;
-            let consumed = 8 + len;
+            // `8 + len` can overflow a 32-bit `usize` (this crate runs on
+            // bare-metal targets), so add checked — a hostile near-`u32::MAX`
+            // skippable length must error, not wrap.
+            let consumed = 8usize.checked_add(len).ok_or(ZstdError::Invalid {
+                what: "skippable frame size",
+                detail: "size overflows usize".into(),
+            })?;
             if src.len() < consumed {
                 return Err(ZstdError::Truncated {
                     what: "skippable frame body",
@@ -278,9 +284,12 @@ fn decode_frame(
     };
 
     if let Some(d) = dict {
-        // A frame that names a dictionary id must match the supplied dict; a
-        // zero frame id (dict id omitted) accepts any dictionary.
-        if header.dictionary_id != 0 && d.id() != 0 && header.dictionary_id != d.id() {
+        // A frame that names a (nonzero) dictionary id must be decoded with that
+        // exact dictionary; a zero frame id (dict id omitted) accepts any
+        // dictionary. A raw-content dictionary has id 0, so — like libzstd, which
+        // returns "Dictionary mismatch" here — it cannot satisfy a frame that
+        // names a nonzero id (it can't prove it is the referenced dictionary).
+        if header.dictionary_id != 0 && header.dictionary_id != d.id() {
             return Err(ZstdError::Dictionary(format!(
                 "frame references dictionary id {} but dictionary is id {}",
                 header.dictionary_id,
