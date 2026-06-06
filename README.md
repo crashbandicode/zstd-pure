@@ -24,7 +24,7 @@ It was built bottom-up and validated against libzstd and real Nintendo TotK
 
 The **decoder** is at ecosystem parity (multi-frame, magicless, dictionaries,
 streaming/bounded-memory, frame inspection) and hardened by a corpus matrix,
-property tests, three cargo-fuzz targets, and a differential against libzstd. The
+property tests, six cargo-fuzz targets, and a differential against libzstd. The
 **encoder** produces RFC 8878 frames that libzstd decodes across all levels;
 every encoder output is validated **both ways**
 (`libzstd.decompress(compress(x)) == x` *and* `decompress(compress(x)) == x`).
@@ -139,8 +139,9 @@ matching; streaming; single-continuous-frame (ZSTDMT-style) parallel compression
 with cross-seam matching.
 
 **Out of scope / not supported:** legacy zstd formats (pre-v0.8 / the variants
-RFC 8478 obsoleted) — RFC 8878 only; windows beyond log 27; multi-threaded
-*decode* (decode is single-threaded; `compress_parallel` is an encoder feature).
+RFC 8478 obsoleted) — RFC 8878 only; windows beyond log 27; multi-threaded decode
+of a *single* frame (one frame decodes single-threaded — but a seekable archive
+decodes its independent frames in parallel, see `decompress_seekable_parallel`).
 Skippable frames are skipped on decode (their payload isn't surfaced).
 
 ## Known limitations
@@ -191,9 +192,10 @@ See [`examples/safe_decompress.rs`](examples/safe_decompress.rs)
   panic/OOM on arbitrary/malformed frames under a 64 MiB cap), `decode_diff` (a
   differential requiring our decoder and libzstd to agree on any frame *both*
   accept), `encode_roundtrip`, `streaming_roundtrip` (`StreamingEncoder` over
-  arbitrary input × chunkings, plain + LDM), and `seekable_roundtrip` (the
-  seek-table parser never panics + archive round-trip). Seed
-  `fuzz/corpus/<target>/` for depth.
+  arbitrary input × chunkings, plain + LDM), `parallel_roundtrip`
+  (`compress_parallel` output round-trips and decodes under libzstd), and
+  `seekable_roundtrip` (the seek-table parser never panics + archive round-trip).
+  Seed `fuzz/corpus/<target>/` for depth.
 - **Fixture-gated, off by default** (`#[ignore]`): `tests/real_corpus.rs` walks
   `$ZSTD_PURE_CORPUS` and round-trips every file both ways across levels, e.g.
   `ZSTD_PURE_CORPUS=~/fixtures/silesia/raw cargo test --release real_corpus -- --ignored --nocapture`
@@ -224,8 +226,11 @@ cargo build --no-default-features --features alloc # no_std
 ```
 
 The full codec (including `StreamingDecoder`/`StreamingEncoder`) is available
-under `no_std + alloc`; `compress_parallel` is the only `std`-gated entry point.
-A `thumbv7em-none-eabi` build is the recommended bare-metal CI gate.
+under `no_std + alloc`. Only the thread-backed parallel entry points are
+`std`-gated — `compress_parallel` and the seekable whole-archive decoders
+`decompress_seekable_parallel` / `decompress_seekable_parallel_capped`; the
+`no_std` build falls back to serial decode for the latter. A
+`thumbv7em-none-eabi` build is the recommended bare-metal CI gate.
 
 ## Security
 

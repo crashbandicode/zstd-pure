@@ -7,7 +7,37 @@ breaking changes).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- Parallel whole-archive seekable decode (`decompress_seekable_parallel` /
+  `decompress_seekable_parallel_capped`, `std`-only): independent frames decode
+  across threads, byte-identical to serial decode + concatenation.
+- Advanced-parameter encode API (`CompressOptions` / `compress_with_options`),
+  the analogue of libzstd's `ZSTD_CCtx_setParameter` (window / hash / chain /
+  search log, min-match, target length, strategy, checksum, magic, LDM); defaults
+  are byte-identical to `compress`.
+- COVER (k,d) dictionary optimization (`train_dictionary_optimized`): grid-searches
+  the segment/dmer parameters and keeps the best-compressing candidate (never
+  worse than `train_dictionary`).
+
+### Hardened
+- Enforce RFC 8878 `Block_Maximum_Size = min(Window_Size, 128 KiB)` on every block
+  (oversized block headers are rejected), in both the one-shot and streaming
+  decoders.
+- Cap each compressed block's *regenerated* size at `Block_Maximum_Size`, closing
+  a streaming-decoder decompression-bomb vector (a single block can no longer
+  balloon the buffer before window eviction).
+- `decompress_capped` enforces a *total* output ceiling across all frames of a
+  multi-frame stream (previously applied per frame).
+- Reject a frame that references a dictionary id when no matching dictionary is
+  supplied (rather than decoding against missing history).
+- Seekable random access (`decompress_seekable_frame`) uses checked offset
+  arithmetic and requires the decoded length to match the seek table exactly.
+
+### Changed
+- Internal de-duplication / LOC-reduction pass across the codec; no behaviour
+  change (byte-identical, verified by the libzstd corpus differential).
+- Coverage is reported entirely from GitHub Actions (badge published to GitHub
+  Pages; Codecov dropped); CI actions moved to Node 24 runtimes.
 
 ## [0.1.0] - 2026-06-03
 

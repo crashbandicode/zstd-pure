@@ -3,7 +3,7 @@
 Rolling status doc (see `AGENTS.md` §4). Read this first; update it after each
 landed chunk; reconcile it against `git log`/tests after any context compaction.
 
-_Last updated: 2026-06-05._
+_Last updated: 2026-06-06._
 
 ## Standing vs libzstd (Silesia, real-world)
 - **Compression:** within **~1.5–3%** of libzstd's size across L5–L19; **beats**
